@@ -296,6 +296,7 @@ async function extractLeadLink(tab, accountName = "") {
   await expandCommentsAndReplies(tab);
   const candidates = await tab.playwright.evaluate((expectedAccountName) => {
     const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const linesFrom = (value) => String(value || "").split(/\n+/).map(clean).filter(Boolean);
     const isExternalHref = (href) => {
       try {
         const parsed = new URL(href, location.href);
@@ -312,11 +313,37 @@ async function extractLeadLink(tab, accountName = "") {
       }
     };
     const ownerName = clean(expectedAccountName);
+    const ownerNameLower = ownerName.toLowerCase();
+    const commentTimeLine = (line) => /^(just now|\d+\s*(m|min|h|hr|d|day|w|wk)|刚刚|\d+\s*分钟|\d+\s*小时|\d+\s*天)$/i.test(line);
+    const forbiddenChrome = (node) => {
+      const shell = node.closest?.('[role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"], nav, aside, footer, header');
+      return Boolean(shell);
+    };
+    const looksLikePageShellOrAd = (text) => /Sponsored|Suggested for you|Create a post|What's on your mind|Privacy\s*·\s*Terms|Ads Manager|Harness the Power of AI|Feed posts/i.test(text);
+    const ownerMatchedNearTop = (lines) => {
+      if (!ownerName) return true;
+      return lines.slice(0, 12).some((line) => {
+        const lower = line.toLowerCase();
+        return lower === ownerNameLower
+          || lower.startsWith(`${ownerNameLower} replied`)
+          || lower.includes(`${ownerNameLower} replied`);
+      });
+    };
+    const looksCommentContext = (lines, links) => {
+      const shortText = lines.slice(0, 24).join(" ");
+      const hasCommentPermalink = links.some((link) => /[?&]comment_id=|comment_id%3D/i.test(link.href));
+      return hasCommentPermalink
+        || /\bReply\b|replied|回复/.test(shortText)
+        || lines.some(commentTimeLine);
+    };
     const blocks = [...document.querySelectorAll('[role="article"], div[aria-label], li, div')];
     const results = [];
     for (const block of blocks) {
-      const text = clean(block.innerText || block.textContent || "");
-      if (!text || text.length > 5000) continue;
+      if (forbiddenChrome(block)) continue;
+      const rawText = block.innerText || block.textContent || "";
+      const text = clean(rawText);
+      if (!text || text.length > 3000 || looksLikePageShellOrAd(text)) continue;
+      const lines = linesFrom(rawText);
       const links = [...block.querySelectorAll("a[href]")]
         .map((a) => ({
           href: new URL(a.getAttribute("href"), location.href).href,
@@ -324,21 +351,24 @@ async function extractLeadLink(tab, accountName = "") {
         }))
         .filter((link) => isExternalHref(link.href));
       if (!links.length) continue;
-      const lowerText = text.toLowerCase();
-      const looksReply = /reply|replied|回复/i.test(text);
-      const ownerMatched = ownerName ? lowerText.includes(ownerName.toLowerCase()) : true;
+      const commentContext = looksCommentContext(lines, links);
+      if (!commentContext) continue;
+      const ownerMatched = ownerMatchedNearTop(lines);
+      if (!ownerMatched) continue;
+      const looksReply = /reply|replied|回复/i.test(lines.slice(0, 24).join(" "));
       results.push({
         href: links[0].href,
         text: links[0].text,
         block_text: text.slice(0, 800),
         source: looksReply ? "comment_reply" : "comment",
         owner_matched: ownerMatched,
+        comment_context: commentContext,
       });
     }
     results.sort((a, b) => Number(b.owner_matched) - Number(a.owner_matched));
     return results.slice(0, 20);
   }, accountName, { timeoutMs: 15000 });
-  const selected = (candidates || []).find((item) => item.owner_matched) || (candidates || [])[0] || null;
+  const selected = (candidates || []).find((item) => item.owner_matched && item.comment_context) || null;
   if (!selected) {
     return { status: "missing", candidates: candidates || [] };
   }
@@ -358,7 +388,6 @@ function outputStatusFor(post) {
   const requiredOk = Boolean(
     post.post_url
     && post.posted_at
-    && post.time_confirmed
     && post.story_summary
     && post.summary_source === "article"
     && post.lead_link_status === "qualified"

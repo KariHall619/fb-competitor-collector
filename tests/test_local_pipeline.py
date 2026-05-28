@@ -533,9 +533,15 @@ def assert_config_resolves_platform_defaults() -> None:
     assert explicit["codex_home"] == r"C:\Users\ops\.codex"
 
 
-def assert_exact_time_parsing_and_no_relative_time_estimation() -> None:
+def assert_exact_time_parsing_and_relative_time_estimation() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
-    from models import is_relative_time_label, normalize_post, normalize_post_time, normalize_posted_at
+    from models import (
+        estimate_posted_at_from_relative,
+        is_relative_time_label,
+        normalize_post,
+        normalize_post_time,
+        normalize_posted_at,
+    )
 
     assert normalize_posted_at("Wednesday, May 27, 2026 at 2:03 PM") == "2026年5月27日 14:03"
     assert normalize_posted_at("2026年5月27日 下午3:11") == "2026年5月27日 15:11"
@@ -547,16 +553,21 @@ def assert_exact_time_parsing_and_no_relative_time_estimation() -> None:
     assert normalize_post_time("19min") == ""
     assert normalize_post_time("2 小时") == ""
     assert normalize_post_time("Wednesday, May 27, 2026 at 2:03 PM") == ""
+    assert estimate_posted_at_from_relative("1h", "2026-05-28T14:00:00") == "2026年5月28日 13:00"
+    assert estimate_posted_at_from_relative("19min", "2026-05-28T14:00:00") == "2026年5月28日 13:41"
+    assert estimate_posted_at_from_relative("yesterday", "2026-05-28T14:00:00") == "2026年5月27日 14:00"
     post = normalize_post(
         {
             "post_url": "https://www.facebook.com/example/posts/relative-time",
             "post_time_text": "1h",
             "article_summary": "这是文章概要",
+            "crawled_at": "2026-05-28T14:00:00",
         }
     )
-    assert post["posted_date"] == ""
-    assert post["posted_at"] == ""
+    assert post["posted_date"] == "260528"
+    assert post["posted_at"] == "2026年5月28日 13:00"
     assert post["time_confirmed"] is False
+    assert post["time_source"] == "relative_estimated"
     assert post["relative_time_text"] == "1h"
 
     js = """
@@ -605,6 +616,120 @@ def assert_comments_and_shares_are_output_as_engagement() -> None:
     assert "分享数：3" in row[5]
 
 
+def assert_output_rows_follow_feishu_headers() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from field_schema import output_row_for_headers
+
+    post = {
+        "account_name": "Story Hub",
+        "account_type": "competitor",
+        "post_url": "https://facebook.com/story/posts/1",
+        "post_type": "reel",
+        "posted_at": "2026年5月27日 14:03",
+        "landing_url": "https://story.example/article",
+        "story_summary": "文章概要",
+        "likes": 81,
+        "views": 120000,
+        "comments": 29,
+        "shares": 3,
+    }
+    current_headers = [
+        "账号",
+        "账户类型",
+        "帖子链接",
+        "帖子类型",
+        "发帖时间",
+        "文章链接",
+        "故事概要",
+        "互动数据（点赞量）",
+        "浏览量",
+        "是否采用",
+        "对应站内链接",
+    ]
+    row = output_row_for_headers(post, current_headers)
+    assert row == [
+        "Story Hub",
+        "competitor",
+        "https://facebook.com/story/posts/1",
+        "reel",
+        "2026年5月27日 14:03",
+        "https://story.example/article",
+        "文章概要",
+        81,
+        120000,
+        "",
+        "",
+    ]
+
+    shuffled_headers = ["文章链接", "账号", "浏览量", "帖子链接", "故事概要"]
+    assert output_row_for_headers(post, shuffled_headers) == [
+        "https://story.example/article",
+        "Story Hub",
+        120000,
+        "https://facebook.com/story/posts/1",
+        "文章概要",
+    ]
+    legacy_headers = ["互动数据（浏览量、点赞量）"]
+    assert output_row_for_headers(post, legacy_headers) == ["浏览量：120000；点赞量：81；评论数：29；分享数：3"]
+
+    estimated = {
+        **post,
+        "posted_at": "2026年5月28日 13:00",
+        "time_source": "relative_estimated",
+    }
+    assert output_row_for_headers(estimated, ["发帖时间"]) == ["约2026年5月28日 13:00"]
+
+
+def assert_read_accounts_uses_header_roles() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import read_accounts
+
+    payload = {
+        "data": {
+            "valueRange": {
+                "values": [
+                    ["主页名称", "内部FB账户", "备注", "竞品fb账户"],
+                    [
+                        "Story Hub",
+                        [{"link": "https://facebook.com/internal", "text": "internal"}],
+                        "",
+                        [{"link": "https://facebook.com/competitor", "text": "competitor"}],
+                    ],
+                ]
+            }
+        }
+    }
+
+    class Result:
+        returncode = 0
+        stdout = json.dumps(payload, ensure_ascii=False)
+        stderr = ""
+
+    original = read_accounts.read_source_range
+    try:
+        read_accounts.read_source_range = lambda _config, range_expr: Result()
+        accounts = read_accounts.read_accounts({"feishu": {"sheets": {"accounts": "accounts"}}})
+    finally:
+        read_accounts.read_source_range = original
+
+    assert accounts == [
+        {
+            "account_name": "Story Hub",
+            "account_url": "https://facebook.com/internal",
+            "account_type": "internal",
+            "enabled": True,
+            "note": "飞书账号配置：internal",
+        },
+        {
+            "account_name": "Story Hub",
+            "account_url": "https://facebook.com/competitor",
+            "account_type": "competitor",
+            "enabled": True,
+            "note": "飞书账号配置：competitor",
+        },
+    ]
+
+
 def assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path: Path) -> None:
     raw = tmp_path / "raw.json"
     prepared = tmp_path / "prepared.json"
@@ -617,6 +742,7 @@ def assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path: Path) -> 
                         "post_url": "https://www.facebook.com/example/posts/short",
                         "post_time_text": "10h",
                         "story_summary": "Short",
+                        "crawled_at": "2026-05-27T14:00:00",
                     },
                     {
                         "post_url": "https://www.facebook.com/example/posts/ready",
@@ -656,11 +782,11 @@ def assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path: Path) -> 
     short = prepared_data["posts"][0]
     assert short["post_url"].endswith("/short")
     assert short["crawl_status"] == "needs_enrichment"
-    assert short["posted_at"] == ""
-    assert short["posted_date"] == ""
+    assert short["posted_at"] == "2026年5月27日 04:00"
+    assert short["posted_date"] == "260527"
     assert short["time_confirmed"] is False
-    assert "需通过FB时间悬停提示获取精确时间" in short["note"]
-    assert "目标日期待确认" in short["note"]
+    assert short["time_source"] == "relative_estimated"
+    assert "发帖时间为相对时间估算（10h），非Facebook精确时间" in short["note"]
 
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
     config_text = config.read_text(encoding="utf-8").replace(
@@ -684,7 +810,7 @@ def assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path: Path) -> 
     assert '"needs_enrichment_skipped": 1' in sync.stdout
 
 
-def assert_sync_blocks_estimated_relative_time(tmp_path: Path) -> None:
+def assert_sync_allows_estimated_relative_time_with_marker(tmp_path: Path) -> None:
     sample = tmp_path / "estimated_time.json"
     config = tmp_path / "settings_estimated_time.yaml"
     sample.write_text(
@@ -725,8 +851,9 @@ def assert_sync_blocks_estimated_relative_time(tmp_path: Path) -> None:
             "--dry-run",
         ]
     )
-    assert sync.returncode == 1, sync.stdout
-    assert "estimated_relative_time_not_allowed" in sync.stdout
+    assert sync.returncode == 0, sync.stdout
+    assert '"ready_for_output": 1' in sync.stdout
+    assert '"rows": 1' in sync.stdout
 
 
 def assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path: Path) -> None:
@@ -880,6 +1007,155 @@ def assert_filter_sync_applies_output_quality_gate(tmp_path: Path) -> None:
     assert "quality_gate" in filtered.stdout
 
 
+def assert_quality_gate_requires_comment_lead_source(tmp_path: Path) -> None:
+    sample = tmp_path / "bad_lead_status.json"
+    config = tmp_path / "settings_bad_lead_status.yaml"
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "post_url": "https://www.facebook.com/example/posts/bad-lead-status",
+                        "posted_at": "2026年5月27日 10:00",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                        "article_url": "https://site.test/story",
+                        "landing_url": "https://site.test/story",
+                        "lead_link_status": "qualified",
+                        "article_summary": "文章来源概要",
+                        "summary_source": "article",
+                        "output_status": "ready_for_output",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config_text = config.read_text(encoding="utf-8").replace(
+        "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'bad_lead_status.sqlite'}"
+    )
+    config.write_text(config_text, encoding="utf-8")
+    sync = run(
+        [
+            PYTHON,
+            "scripts/import_existing_result.py",
+            "--config",
+            str(config),
+            "--input",
+            str(sample),
+            "--sync",
+            "--dry-run",
+        ]
+    )
+    assert sync.returncode == 1, sync.stdout
+    assert "missing_qualified_comment_lead_link" in sync.stdout
+
+
+def assert_detail_enrichment_ignores_page_shell_ad_links() -> None:
+    script = """
+import fs from 'node:fs';
+const source = fs.readFileSync('./scripts/chrome_extension_enrich_post_details.mjs', 'utf8');
+const start = source.indexOf('async function extractLeadLink');
+const end = source.indexOf('\\nfunction outputStatusFor', start);
+const fnSource = source.slice(start, end);
+const captured = {};
+const tab = {
+  playwright: {
+    async evaluate(fn, arg) {
+      captured.fn = fn;
+      captured.arg = arg;
+      return [];
+    }
+  }
+};
+global.COMMENT_EXPAND_ROUNDS = 0;
+global.REPLY_EXPAND_ROUNDS = 0;
+global.sleep = async () => {};
+global.expandCommentsAndReplies = async () => {};
+global.resolveLandingUrl = async (href) => href;
+const extractLeadLink = eval(`${fnSource}; extractLeadLink`);
+await extractLeadLink(tab, 'Lessons Taught By Life');
+
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() {
+    return this.innerText;
+  }
+  get href() {
+    return this.attrs.href ? new URL(this.attrs.href, global.location.href).href : '';
+  }
+  getAttribute(name) {
+    return this.attrs[name] || '';
+  }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (selector.includes('[role="complementary"]') && node.attrs.role === 'complementary') return node;
+      if (selector.includes('[role="navigation"]') && node.attrs.role === 'navigation') return node;
+      if (selector.includes('[role="contentinfo"]') && node.attrs.role === 'contentinfo') return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a[href]') return node.tagName === 'A' && !!node.attrs.href;
+      if (current === '[role="article"]') return node.attrs.role === 'article';
+      if (current === 'div[aria-label]') return node.tagName === 'DIV' && !!node.attrs['aria-label'];
+      if (current === 'li') return node.tagName === 'LI';
+      if (current === 'div') return node.tagName === 'DIV';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+const adShell = new Node('div', { role: 'complementary' }, [
+  new Node('div', {}, [
+    new Node('span', {}, [], 'Sponsored'),
+    new Node('a', { href: 'https://l.facebook.com/l.php?u=https%3A%2F%2Fwww.shopify.com%2Ffree-trial' }, [], 'shopify.com')
+  ], 'Harness the Power of AI')
+]);
+const realComment = new Node('div', { role: 'article' }, [
+  new Node('span', {}, [], 'Lessons Taught By Life'),
+  new Node('span', {}, [], 'Full story here'),
+  new Node('a', { href: 'https://l.facebook.com/l.php?u=https%3A%2F%2Fexample.test%2Fstory' }, [], 'example.test'),
+  new Node('a', { href: '/LessonsTaughtByLifepage/posts/pfbid?comment_id=123' }, [], '48m'),
+  new Node('span', {}, [], 'Reply')
+]);
+const body = new Node('body', {}, [adShell, realComment]);
+global.document = {
+  querySelectorAll: (selector) => body.querySelectorAll(selector),
+};
+global.location = new URL('https://www.facebook.com/LessonsTaughtByLifepage/posts/pfbid');
+const results = captured.fn(captured.arg);
+if (results.length !== 1 || !results[0].href.includes('example.test') || results[0].href.includes('shopify')) {
+  console.error(JSON.stringify(results, null, 2));
+  process.exit(1);
+}
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_prepare_capture_has_no_base_time_argument() -> None:
     help_result = run([PYTHON, "scripts/prepare_capture_result.py", "--help"])
     assert help_result.returncode == 0, help_result.stderr
@@ -968,6 +1244,7 @@ def assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path: Path)
                     {
                         "post_url": "https://www.facebook.com/photo.php?fbid=1553393959512631&set=p.1553393959512631&type=3",
                         "post_time_text": "1h",
+                        "crawled_at": "2026-05-27T14:00:00",
                         "article_url": "https://kaylestore.net/story",
                         "landing_url": "https://kaylestore.net/story",
                         "lead_url_raw": "https://l.facebook.com/l.php?u=https%3A%2F%2Fkaylestore.net%2Fstory",
@@ -978,6 +1255,7 @@ def assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path: Path)
                     {
                         "post_url": "https://www.facebook.com/themeaningoflife88/posts/pfbid-real",
                         "post_time_text": "1h",
+                        "crawled_at": "2026-05-27T14:00:00",
                         "article_url": "https://kaylestore.net/different-story",
                         "landing_url": "https://kaylestore.net/different-story",
                         "lead_url_raw": "https://kaylestore.net/different-story",
@@ -1034,9 +1312,9 @@ def assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path: Path)
             "--dry-run",
         ]
     )
-    assert sync.returncode == 1, sync.stdout
-    assert "quality_gate" in sync.stdout
-    assert '"needs_enrichment_skipped": 2' in sync.stdout
+    assert sync.returncode == 0, sync.stdout
+    assert '"ready_for_output": 1' in sync.stdout
+    assert '"needs_enrichment_skipped": 1' in sync.stdout
 
 
 def assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp_path: Path) -> None:
@@ -1049,6 +1327,7 @@ def assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp
                     {
                         "post_url": "https://www.facebook.com/photo.php?fbid=1553393959512631&set=p.1553393959512631&type=3",
                         "post_time_text": "5h",
+                        "crawled_at": "2026-05-27T14:00:00",
                         "article_url": "https://kaylestore.net/beach-dog-rescue",
                         "landing_url": "https://kaylestore.net/beach-dog-rescue",
                         "lead_url_raw": "https://kaylestore.net/beach-dog-rescue",
@@ -1059,6 +1338,7 @@ def assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp
                     {
                         "post_url": "https://www.facebook.com/themeaningoflife88/posts/pfbid-parent-post",
                         "post_time_text": "5h",
+                        "crawled_at": "2026-05-27T14:00:00",
                         "article_url": "https://kaylestore.net/beach-dog-rescue",
                         "landing_url": "https://kaylestore.net/beach-dog-rescue",
                         "lead_url_raw": "https://kaylestore.net/beach-dog-rescue",
@@ -1125,7 +1405,7 @@ def assert_article_material_extractor(tmp_path: Path) -> None:
 
 def main() -> int:
     assert_url_canonicalization()
-    assert_exact_time_parsing_and_no_relative_time_estimation()
+    assert_exact_time_parsing_and_relative_time_estimation()
     assert_comments_and_shares_are_output_as_engagement()
     assert_mobile_dom_extractor_can_see_story_links()
     assert_dom_extractor_does_not_treat_story_clock_as_post_time()
@@ -1181,10 +1461,12 @@ def main() -> int:
         hot_after_many_data = json.loads(hot_after_many.stdout)
         assert hot_after_many_data["count"] == 1, hot_after_many.stdout
         assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path)
-        assert_sync_blocks_estimated_relative_time(tmp_path)
+        assert_sync_allows_estimated_relative_time_with_marker(tmp_path)
         assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path)
         assert_article_url_alone_does_not_qualify_lead_link(tmp_path)
         assert_filter_sync_applies_output_quality_gate(tmp_path)
+        assert_quality_gate_requires_comment_lead_source(tmp_path)
+        assert_detail_enrichment_ignores_page_shell_ad_links()
         assert_prepare_capture_has_no_base_time_argument()
         assert_exact_time_verifier_summary_contract()
         assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path)

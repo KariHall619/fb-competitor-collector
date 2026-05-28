@@ -80,7 +80,7 @@ function summarizeExactTimeChecks({ scan, checks, tab, claimedFrom, allowRealMou
     claimed_from: claimedFrom,
     message: confirmed.length > 0
       ? "已确认能从 Facebook DOM 属性或时间悬停提示获取精确发帖时间。"
-      : "未能从当前可见时间元素获取精确发帖时间；正式输出仍应保持时间缺失/待补全，不允许用相对时间估算代替。",
+      : "未能从当前可见时间元素获取精确发帖时间；如果候选仍有相对时间标签，正式输出可以使用估算时间并在表格中标注“约”。",
   };
 }
 

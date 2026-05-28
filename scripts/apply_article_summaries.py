@@ -13,7 +13,6 @@ def output_status_for(post: dict) -> str:
         [
             post.get("post_url"),
             post.get("posted_at"),
-            post.get("time_confirmed"),
             post.get("story_summary"),
             post.get("summary_source") == "article",
             post.get("lead_link_status") == "qualified",

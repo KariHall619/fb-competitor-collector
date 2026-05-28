@@ -119,11 +119,11 @@ Important: write only to the output workbook `FB竞品帖子链接`. The account
 Before syncing live FB capture results, the quality gate requires:
 
 - hour-level or better post time in `posted_at`, formatted like `2026年5月19日 17:00`
-- `posted_at` must be confirmed from Facebook's exact timestamp tooltip or timestamp DOM attributes. Estimated relative-time sources such as `relative_estimated`, `relative_hour`, or `relative_label` are rejected at sync time.
+- `posted_at` should be confirmed from Facebook's exact timestamp tooltip or timestamp DOM attributes when available. If Facebook exposes only relative time, estimate from crawl time, keep `time_source=relative_estimated`, and write the Feishu time with a leading `约`.
 - Timestamp tooltip capture is automated. The skill first tries synthetic hover through the Codex Chrome Extension, then can fall back to automated extension mouse movement. Operators should not manually hover timestamps except when debugging with Codex.
 - a lead link posted by the account in the comment area or a comment reply. The link must resolve to an external non-Facebook site and be stored as `landing_url` with `lead_link_status=qualified`.
 - story summary generated from the landing page/article, with `summary_source=article`
-- short posts are kept if they have a valid FB content URL, but remain `needs_enrichment` until lead link, landing URL, summary, and time are confirmed
+- short posts are kept if they have a valid FB content URL, but remain `needs_enrichment` until lead link, landing URL, summary, and at least exact-or-estimated time are available
 
 Capture should preserve all real FB content candidates. If the capture sees `photo.php`, `/photo/`, `/reel/`, `/watch/`, or `/videos/`, keep the original content link and mark `fb_link_kind`.
 
@@ -131,11 +131,11 @@ Media handling rule:
 
 - If a parent post link such as `/posts/`, `story.php`, or `permalink.php` is available, store it in `parent_post_url` and use it as the preferred dedupe key.
 - If no parent post link is available, keep the original `reel/photo/watch/video` link as the FB content link. Do not drop the candidate.
-- Parent-link absence does not block capture or local storage. Final Feishu output is blocked only when required output fields are missing: exact time, qualified comment/reply lead link, landing URL, and article-based summary.
+- Parent-link absence does not block capture or local storage. Final Feishu output is blocked only when required output fields are missing: exact-or-estimated time, qualified comment/reply lead link, landing URL, and article-based summary.
 
 If a candidate has no share count, add a coverage warning. It may still be a valid post, and the detail enrichment step should continue to check comments/replies for lead links.
 
-Relative FB labels such as `19m`, `1h`, `16h`, or `1d` are stored only as `relative_time_text`. They are not converted into `posted_at` for formal output. `posted_at` must come from Facebook's exact timestamp tooltip or DOM attributes such as `aria-label`, `title`, `datetime`, or `data-tooltip-*`. The hover step is performed automatically by the skill; human intervention is reserved for login/risk-control/page-loading blockers.
+Relative FB labels such as `19m`, `1h`, `16h`, or `1d` are stored as `relative_time_text`. The workflow first tries to replace them with exact `posted_at` from Facebook's timestamp tooltip or DOM attributes such as `aria-label`, `title`, `datetime`, or `data-tooltip-*`. If exact time is unavailable, the label is converted from crawl time into an approximate `posted_at`; Feishu output must show it with `约`. The hover step is performed automatically by the skill; human intervention is reserved for login/risk-control/page-loading blockers.
 
 Prepare raw Chrome Extension capture output:
 
@@ -163,7 +163,7 @@ python3 scripts/apply_article_summaries.py \
   --output exports/ready_for_time_confirmation.json
 ```
 
-If hour-level post time is still missing, do not sync. Ask the operator to confirm the time from Facebook UI or accept a `time_unconfirmed` non-output record.
+If all time signals are missing, do not sync. If only a relative time label exists, sync is allowed after estimating the time and marking it with `约` in Feishu.
 
 Validate exact Facebook time capture before removing any legacy relative-time fallback. This check must be run from Codex's trusted Chrome Extension runtime. The module exposes `verifyExactTimeCapture({ browser })` for that runtime; the shell command below is only a wrapper and will fail outside trusted Chrome runtime:
 
@@ -171,21 +171,21 @@ Validate exact Facebook time capture before removing any legacy relative-time fa
 node scripts/chrome_extension_verify_exact_time.mjs --run --account-url "<facebook-account-url>"
 ```
 
-This command must run from a trusted Codex Chrome Extension runtime. Passing output contains `status=exact_time_confirmed` and at least one `confirmed_examples[].posted_at` such as `2026年5月27日 15:11`. If it reports `facebook_tab_missing`, `login_required`, `visitor_preview`, or `exact_time_not_found`, keep the row as `needs_enrichment` and do not sync formal output for that post time.
+Passing output contains `status=exact_time_confirmed` and at least one `confirmed_examples[].posted_at` such as `2026年5月27日 15:11`. If it reports `facebook_tab_missing`, `login_required`, or `visitor_preview`, keep the row as `needs_enrichment`. If it reports `exact_time_not_found` but a relative label exists, use an estimated time and mark Feishu output with `约`.
 
 ## Date Filtering Policy
 
 Facebook often shows relative labels on feed pages. The workflow therefore uses two layers:
 
-- `posted_at`: hour-level or better time. This is the time field accepted for final Feishu output.
-- `relative_time_text`: visible label such as `1h` or `1d`. This remains a clue only and must not be used as the final output time.
+- `posted_at`: hour-level or better time. Exact time is preferred; estimated time from a relative label is accepted only when Feishu output shows `约`.
+- `relative_time_text`: visible label such as `1h` or `1d`. This remains the evidence for approximate time when exact time is unavailable.
 
 For a specific calendar day request, the reliable process is:
 
 1. collect enough visible posts around the target day;
 2. open/detail-check each candidate when possible;
-3. keep records without hour-level time in local SQLite as `needs_enrichment`;
-4. sync only rows whose `posted_at` and article summary are confirmed.
+3. keep records without any time signal in local SQLite as `needs_enrichment`;
+4. sync rows whose `posted_at` exists, article summary is generated, and required lead link fields are present; estimated times must be visibly marked with `约`.
 
 Dry-run example:
 
