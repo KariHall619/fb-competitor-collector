@@ -432,8 +432,8 @@ if (candidate.selected_post_link_kind !== 'post' || candidate.media_link_count !
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def assert_chrome_extract_script_requires_human_intervention() -> None:
-    script_text = (ROOT / "scripts" / "chrome_extension_extract_current_tab.mjs").read_text(encoding="utf-8")
+def assert_opencli_extract_script_requires_human_intervention() -> None:
+    script_text = (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
     assert "human_intervention_required" in script_text
     assert "visitor_preview" in script_text
     assert "已停止采集" in script_text
@@ -470,31 +470,23 @@ def assert_feishu_writes_require_user_identity() -> None:
         lark_io.run_lark = original
 
 
-def assert_check_env_prefers_chrome_extension_route() -> None:
+def assert_check_env_prefers_opencli_route() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from check_env import recommended_capture_route
 
-    assert recommended_capture_route({"codex_chrome_extension": {"ok": True}})["route"] == "codex_chrome_extension"
-    assert recommended_capture_route({"codex_chrome_extension": {"ok": False}})["route"] == "blocked_until_chrome_extension_ready"
+    assert recommended_capture_route({"opencli_browser_bridge": {"ok": True}})["route"] == "opencli_browser_bridge"
+    assert recommended_capture_route({"opencli_browser_bridge": {"ok": False}})["route"] == "blocked_until_opencli_ready"
 
 
-def assert_check_env_discovers_versioned_chrome_plugin(tmp_root: Path) -> None:
+def assert_check_env_reports_opencli_route_status() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
-    import check_env
+    from check_env import check_opencli, version_ok
 
-    original_base = check_env.CHROME_PLUGIN_BASE
-    try:
-        check_env.CHROME_PLUGIN_BASE = tmp_root
-        older = tmp_root / "1.0.0" / "scripts"
-        newer = tmp_root / "26.519.81530" / "scripts"
-        older.mkdir(parents=True)
-        newer.mkdir(parents=True)
-        for folder in (older, newer):
-            (folder / "browser-client.mjs").write_text("", encoding="utf-8")
-            (folder / "check-extension-installed.js").write_text("", encoding="utf-8")
-        assert check_env.find_chrome_plugin_root() == newer.parent
-    finally:
-        check_env.CHROME_PLUGIN_BASE = original_base
+    assert version_ok("1.8.0") is True
+    assert version_ok("1.7.9") is False
+    missing = check_opencli(["/definitely/missing/opencli"], daemon_port=9)
+    assert missing["status"] == "opencli_missing"
+    assert missing["ok"] is False
 
 
 def assert_config_resolves_platform_defaults() -> None:
@@ -503,8 +495,7 @@ def assert_config_resolves_platform_defaults() -> None:
 
     base = {
         "lark_cli_path": "auto",
-        "codex_home": "auto",
-        "codex_chrome_plugin_base": "auto",
+        "opencli_path": "auto",
         "platform_overrides": {
             "darwin": {"lark_cli_path": "/Users/a1/.npm-global/bin/lark-cli"},
             "windows": {"lark_cli_path": "lark-cli.cmd"},
@@ -513,7 +504,9 @@ def assert_config_resolves_platform_defaults() -> None:
     mac = resolve_runtime_config(base, platform_name="Darwin", environ={"HOME": "/Users/a1", "PATH": ""})
     assert mac["runtime"]["platform"] == "darwin"
     assert mac["lark_cli_path"] == "/Users/a1/.npm-global/bin/lark-cli"
-    assert mac["codex_chrome_plugin_base"] == "/Users/a1/.codex/plugins/cache/openai-bundled/chrome"
+    assert mac["opencli_path"] == "opencli"
+    assert mac["opencli_command"] == ["opencli"]
+    assert mac["opencli_session"] == "fb-competitor"
 
     windows = resolve_runtime_config(
         base,
@@ -522,15 +515,26 @@ def assert_config_resolves_platform_defaults() -> None:
     )
     assert windows["runtime"]["platform"] == "windows"
     assert windows["lark_cli_path"] == "lark-cli.cmd"
-    assert windows["codex_chrome_plugin_base"].endswith(".codex/plugins/cache/openai-bundled/chrome")
+    assert windows["opencli_path"] == "opencli.cmd"
+    assert windows["opencli_command"] == ["opencli.cmd"]
+
+    npx_fallback = resolve_runtime_config(
+        {"lark_cli_path": "auto", "opencli_path": "auto"},
+        platform_name="Darwin",
+        environ={"HOME": "/Users/a1", "PATH": "/usr/local/bin"},
+    )
+    assert npx_fallback["opencli_command"][-2:] == ["-y", "@jackwener/opencli"]
 
     explicit = resolve_runtime_config(
-        {"lark_cli_path": r"%USERPROFILE%\bin\lark-cli.cmd", "codex_home": r"%USERPROFILE%\.codex"},
+        {
+            "lark_cli_path": r"%USERPROFILE%\bin\lark-cli.cmd",
+            "opencli_path": r"%USERPROFILE%\bin\opencli.cmd",
+        },
         platform_name="Windows",
         environ={"USERPROFILE": r"C:\Users\ops", "PATH": ""},
     )
     assert explicit["lark_cli_path"] == r"C:\Users\ops\bin\lark-cli.cmd"
-    assert explicit["codex_home"] == r"C:\Users\ops\.codex"
+    assert explicit["opencli_path"] == r"C:\Users\ops\bin\opencli.cmd"
 
 
 def assert_exact_time_parsing_and_no_relative_time_estimation() -> None:
@@ -911,7 +915,7 @@ import {
   RUN_MAIN,
   summarizeExactTimeChecks,
   verifyExactTimeCapture,
-} from './scripts/chrome_extension_verify_exact_time.mjs';
+} from './scripts/opencli_verify_exact_time.mjs';
 
 if (RUN_MAIN) process.exit(6);
 if (typeof verifyExactTimeCapture !== 'function') process.exit(7);
@@ -953,7 +957,7 @@ if (missing.ok || missing.status !== 'exact_time_not_found' || missing.confirmed
     result = run(["node", "--input-type=module", "-e", js])
     assert result.returncode == 0, result.stderr or result.stdout
 
-    no_run = run(["node", "scripts/chrome_extension_verify_exact_time.mjs", "--self-test"])
+    no_run = run(["node", "scripts/opencli_verify_exact_time.mjs", "--self-test"])
     assert no_run.returncode == 0
     assert no_run.stdout == ""
 
@@ -1132,12 +1136,11 @@ def main() -> int:
     assert_dom_extractor_excludes_profile_shell_with_external_link()
     assert_dom_extractor_blocks_visitor_preview()
     assert_dom_extractor_prefers_parent_post_over_photo_link()
-    assert_chrome_extract_script_requires_human_intervention()
+    assert_opencli_extract_script_requires_human_intervention()
     assert_feishu_writes_require_user_identity()
-    assert_check_env_prefers_chrome_extension_route()
+    assert_check_env_prefers_opencli_route()
     assert_config_resolves_platform_defaults()
-    with tempfile.TemporaryDirectory() as plugin_tmp:
-        assert_check_env_discovers_versioned_chrome_plugin(Path(plugin_tmp))
+    assert_check_env_reports_opencli_route_status()
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         config = tmp_path / "settings.yaml"

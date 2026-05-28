@@ -1,40 +1,44 @@
 #!/usr/bin/env node
 /**
  * Enrich prepared posts by opening each post detail page in the user's normal
- * Chrome profile, hovering the post-header relative time, and reading the
- * Facebook tooltip that contains exact minute-level post time.
+ * Chrome profile through OpenCLI Browser Bridge, reading exact post time, and
+ * checking comments/replies for account-owned lead links.
+ *
+ * The backend is OpenCLI Browser Bridge.
  */
 
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  evaluateInSession,
+  extractArgs,
+  loadOpencliContext,
+  outputJson,
+  parseJsonOutput,
+  runOpencli,
+} from "./opencli_runtime.mjs";
 
 const require = createRequire(import.meta.url);
 const { browserExactTimeHelpersExpression } = require("./fb_time_extractors.js");
-const args = process.argv.slice(2);
+const { value, has } = extractArgs();
 
-function argValue(name, fallback = "") {
-  const index = args.indexOf(name);
-  if (index >= 0 && args[index + 1]) return args[index + 1];
-  return fallback;
-}
-
-const INPUT = argValue("--input");
-const OUTPUT = argValue("--output");
-const CONFIG = argValue("--config", "config/settings.yaml");
-const LIMIT = Number(argValue("--limit", "0"));
-const ALLOW_REAL_MOUSE_HOVER = args.includes("--allow-real-mouse-hover");
+const INPUT = value("--input");
+const OUTPUT = value("--output");
+const CONFIG = value("--config", "config/settings.yaml");
+const LIMIT = Number(value("--limit", "0"));
+const ALLOW_REAL_MOUSE_HOVER = has("--allow-real-mouse-hover");
 const configuredLeadLink = readLeadLinkConfig(CONFIG);
-const COMMENT_EXPAND_ROUNDS = Number(argValue("--comment-expand-rounds", configuredLeadLink.commentExpandRounds));
-const REPLY_EXPAND_ROUNDS = Number(argValue("--reply-expand-rounds", configuredLeadLink.replyExpandRounds));
-const RESOLVE_TIMEOUT_MS = Number(argValue("--resolve-timeout-ms", String(configuredLeadLink.resolveTimeoutSeconds * 1000)));
-const ALLOWED_DOMAINS = argValue("--allowed-domains", configuredLeadLink.allowedDomains.join(","))
+const COMMENT_EXPAND_ROUNDS = Number(value("--comment-expand-rounds", configuredLeadLink.commentExpandRounds));
+const REPLY_EXPAND_ROUNDS = Number(value("--reply-expand-rounds", configuredLeadLink.replyExpandRounds));
+const RESOLVE_TIMEOUT_MS = Number(value("--resolve-timeout-ms", String(configuredLeadLink.resolveTimeoutSeconds * 1000)));
+const ALLOWED_DOMAINS = value("--allowed-domains", configuredLeadLink.allowedDomains.join(","))
   .split(",")
   .map((item) => item.trim().replace(/^www\./i, "").toLowerCase())
   .filter(Boolean);
 
 if (!INPUT || !OUTPUT) {
-  console.error("Usage: chrome_extension_enrich_post_details.mjs --input prepared.json --output enriched.json [--limit N]");
+  console.error("Usage: opencli_enrich_post_details.mjs --input prepared.json --output enriched.json [--limit N]");
   process.exitCode = 2;
   throw new Error("missing required arguments");
 }
@@ -72,24 +76,66 @@ function readLeadLinkConfig(configPath) {
   }
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function evalPayload(context, js) {
+  const result = await evaluateInSession({
+    opencliCommand: context.opencliCommand,
+    session: context.session,
+    tab: context.tab.page,
+    js,
+  });
+  if (!result.ok) {
+    throw new Error(result.stderr || result.stdout || "OpenCLI eval failed");
+  }
+  return result.payload;
 }
 
-async function pageState(tab) {
-  return await tab.playwright.evaluate(() => {
+async function waitSeconds(context, seconds) {
+  await runOpencli([
+    "browser",
+    context.session,
+    "wait",
+    "time",
+    String(seconds),
+    "--tab",
+    context.tab.page,
+  ], { command: context.opencliCommand });
+}
+
+async function openPostTab(baseContext, url) {
+  const result = await runOpencli(["browser", baseContext.session, "tab", "new", url], {
+    command: baseContext.opencliCommand,
+  });
+  const payload = parseJsonOutput(result);
+  if (!result.ok || !payload?.page) {
+    throw new Error(result.stderr || result.stdout || `OpenCLI failed to open tab for ${url}`);
+  }
+  const tab = { page: payload.page, url, title: "" };
+  const context = { ...baseContext, tab };
+  await waitSeconds(context, 3.5);
+  return context;
+}
+
+async function closePostTab(context) {
+  if (!context?.tab?.page) return;
+  await runOpencli(["browser", context.session, "tab", "close", context.tab.page], {
+    command: context.opencliCommand,
+  });
+}
+
+async function pageState(context) {
+  return await evalPayload(context, `(() => {
     const body = document.body?.innerText || "";
     return {
-      loggedOut: /Log in to Facebook|登录 Facebook|Forgot Account|Forgot password|Create new account|邮箱或手机号\s+密码\s+登录/i.test(body),
-      visitorPreview: /(登录|Log in)\s+(忘记账户了？|Forgot Account|Forgot password|Forgotten password)/i.test(body),
+      loggedOut: /Log in to Facebook|登录 Facebook|Forgot Account|Forgot password|Create new account|邮箱或手机号\\s+密码\\s+登录/i.test(body),
+      visitorPreview: /(登录|Log in)\\s+(忘记账户了？|Forgot Account|Forgot password|Forgotten password)/i.test(body),
       bodyPreview: body.slice(0, 1200),
     };
-  }, undefined, { timeoutMs: 10000 });
+  })()`);
 }
 
-async function findHeaderTime(tab) {
-  return await tab.playwright.evaluate(`(() => {
-    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+async function findHeaderTime(context) {
+  return await evalPayload(context, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const helpers = ${browserExactTimeHelpersExpression()};
     const viewportHeight = window.innerHeight || 800;
     const candidates = [...document.querySelectorAll("a, abbr, span")].map((el, index) => {
@@ -112,20 +158,20 @@ async function findHeaderTime(tab) {
     }).filter((item) => helpers.isLikelyHeaderTimeElement(item, viewportHeight));
     candidates.sort((a, b) => a.y - b.y || a.x - b.x);
     return candidates[0] || null;
-  })()`, undefined, { timeoutMs: 10000 });
+  })()`);
 }
 
-async function readExactTimeFromDom(tab, target) {
+async function readExactTimeFromDom(context, target) {
   if (!target) return { posted_at_raw: "", posted_at: "", time_source: "" };
-  return await tab.playwright.evaluate(`(() => {
+  return await evalPayload(context, `(() => {
     const helpers = ${browserExactTimeHelpersExpression()};
     return helpers.exactTimeFromItem(${JSON.stringify(target)});
-  })()`, undefined, { timeoutMs: 10000 });
+  })()`);
 }
 
-async function readTooltipTimeWithSyntheticHover(tab, target) {
+async function readTooltipTimeWithSyntheticHover(context, target) {
   if (!target) return { posted_at_raw: "", posted_at: "", time_source: "" };
-  return await tab.playwright.evaluate(`(async () => {
+  return await evalPayload(context, `(async () => {
     const helpers = ${browserExactTimeHelpersExpression()};
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const elements = [...document.querySelectorAll("a, abbr, span")];
@@ -162,30 +208,39 @@ async function readTooltipTimeWithSyntheticHover(tab, target) {
       if (parsed) return { posted_at_raw: text, posted_at: parsed, time_source: "synthetic_hover_tooltip" };
     }
     return { posted_at_raw: "", posted_at: "", time_source: "" };
-  })()`, undefined, { timeoutMs: 10000 });
+  })()`);
 }
 
-async function readTooltipTimeWithRealMouse(tab, target) {
-  if (!target) return "";
-  await tab.cua.move({ x: Math.floor(target.x + target.w / 2), y: Math.floor(target.y + target.h / 2) });
-  await sleep(1800);
-  return await tab.playwright.evaluate(`(() => {
+async function readTooltipTimeWithRealMouse(context, target) {
+  if (!target) return { posted_at_raw: "", posted_at: "", time_source: "" };
+  await runOpencli([
+    "browser",
+    context.session,
+    "hover",
+    "a, abbr, span",
+    "--nth",
+    String(target.index),
+    "--tab",
+    context.tab.page,
+  ], { command: context.opencliCommand });
+  await waitSeconds(context, 1.8);
+  return await evalPayload(context, `(() => {
     const helpers = ${browserExactTimeHelpersExpression()};
     const tooltip = [...document.querySelectorAll('[role="tooltip"], div, span')]
       .map((el) => helpers.clean(el.innerText || el.textContent || ""))
       .find((text) => helpers.parseExactFacebookTime(text));
     if (!tooltip) return { posted_at_raw: "", posted_at: "", time_source: "" };
     return { posted_at_raw: tooltip, posted_at: helpers.parseExactFacebookTime(tooltip), time_source: "real_mouse_tooltip" };
-  })()`, undefined, { timeoutMs: 10000 });
+  })()`);
 }
 
-async function extractEngagement(tab) {
-  return await tab.playwright.evaluate(() => {
-    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+async function extractEngagement(context) {
+  return await evalPayload(context, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const body = clean(document.body?.innerText || "");
     const text = body.slice(0, 15000);
-    const reactionCluster = text.match(/Full story in 1st comment\s+(\d+(?:[.,]\d+)?[KkMm万]?)\s+(\d+(?:[.,]\d+)?[KkMm万]?)\s+(\d+(?:[.,]\d+)?[KkMm万]?)/)
-      || text.match(/Full Story\s+(\d+(?:[.,]\d+)?[KkMm万]?)\s+(\d+(?:[.,]\d+)?[KkMm万]?)\s+(\d+(?:[.,]\d+)?[KkMm万]?)/i);
+    const reactionCluster = text.match(/Full story in 1st comment\\s+(\\d+(?:[.,]\\d+)?[KkMm万]?)\\s+(\\d+(?:[.,]\\d+)?[KkMm万]?)\\s+(\\d+(?:[.,]\\d+)?[KkMm万]?)/)
+      || text.match(/Full Story\\s+(\\d+(?:[.,]\\d+)?[KkMm万]?)\\s+(\\d+(?:[.,]\\d+)?[KkMm万]?)\\s+(\\d+(?:[.,]\\d+)?[KkMm万]?)/i);
     if (reactionCluster) {
       return {
         raw: reactionCluster.slice(1, 4).join("；"),
@@ -194,14 +249,14 @@ async function extractEngagement(tab) {
         shares: reactionCluster[3],
       };
     }
-    const line = (text.match(/(?:\d+(?:[.,]\d+)?[KkMm万]?\s*){2,3}(?:comments?|shares?|评论|分享|赞)/i) || [""])[0];
+    const line = (text.match(/(?:\\d+(?:[.,]\\d+)?[KkMm万]?\\s*){2,3}(?:comments?|shares?|评论|分享|赞)/i) || [""])[0];
     return { raw: line };
-  }, undefined, { timeoutMs: 10000 });
+  })()`);
 }
 
-async function expandCommentsAndReplies(tab) {
+async function expandCommentsAndReplies(context) {
   for (let round = 0; round < Math.max(COMMENT_EXPAND_ROUNDS, REPLY_EXPAND_ROUNDS); round += 1) {
-    await tab.playwright.evaluate(() => {
+    await evalPayload(context, `(() => {
       const labels = [
         /view more comments/i,
         /see more comments/i,
@@ -214,7 +269,7 @@ async function expandCommentsAndReplies(tab) {
         /查看更多回复/,
         /查看回复/,
       ];
-      const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
       for (const el of document.querySelectorAll('div[role="button"], span, a')) {
         const text = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || "");
         if (!text || !labels.some((re) => re.test(text))) continue;
@@ -224,8 +279,9 @@ async function expandCommentsAndReplies(tab) {
           // Ignore click failures on virtualized comment controls.
         }
       }
-    }, undefined, { timeoutMs: 10000 }).catch(() => {});
-    await sleep(900);
+      return true;
+    })()`).catch(() => {});
+    await waitSeconds(context, 0.9);
   }
 }
 
@@ -280,28 +336,27 @@ async function resolveLandingUrl(href) {
     const resolved = await tryFetch("HEAD");
     if (allowedLandingUrl(resolved)) return resolved;
   } catch {
-    // Some story sites block HEAD; fall back to a small GET request and still
-    // rely on fetch redirect handling to determine the final URL.
+    // Some story sites block HEAD; fall back to GET redirect handling.
   }
   try {
     const resolved = await tryFetch("GET");
     if (allowedLandingUrl(resolved)) return resolved;
   } catch {
-    // Keep the cleaned URL as a candidate only when it already satisfies domain policy.
+    // Keep cleaned URL only when it already satisfies domain policy.
   }
   return allowedLandingUrl(cleaned) ? cleaned : "";
 }
 
-async function extractLeadLink(tab, accountName = "") {
-  await expandCommentsAndReplies(tab);
-  const candidates = await tab.playwright.evaluate((expectedAccountName) => {
-    const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+async function extractLeadLink(context, accountName = "") {
+  await expandCommentsAndReplies(context);
+  const candidates = await evalPayload(context, `((expectedAccountName) => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const isExternalHref = (href) => {
       try {
         const parsed = new URL(href, location.href);
-        const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+        const host = parsed.hostname.replace(/^www\\./i, "").toLowerCase();
         if (!/^https?:$/i.test(parsed.protocol)) return false;
-        if (/l\.facebook\.com$/i.test(parsed.hostname) && parsed.searchParams.get("u")) return true;
+        if (/l\\.facebook\\.com$/i.test(parsed.hostname) && parsed.searchParams.get("u")) return true;
         return host !== "facebook.com"
           && !host.endsWith(".facebook.com")
           && host !== "fb.watch"
@@ -337,7 +392,7 @@ async function extractLeadLink(tab, accountName = "") {
     }
     results.sort((a, b) => Number(b.owner_matched) - Number(a.owner_matched));
     return results.slice(0, 20);
-  }, accountName, { timeoutMs: 15000 });
+  })(${JSON.stringify(accountName)})`);
   const selected = (candidates || []).find((item) => item.owner_matched) || (candidates || [])[0] || null;
   if (!selected) {
     return { status: "missing", candidates: candidates || [] };
@@ -370,31 +425,26 @@ function outputStatusFor(post) {
 async function main() {
   const payload = JSON.parse(fs.readFileSync(INPUT, "utf8"));
   const posts = payload.posts || [];
-  const { setupBrowserRuntime } = await import("/Users/a1/.codex/plugins/cache/openai-bundled/chrome/latest/scripts/browser-client.mjs");
-  await setupBrowserRuntime({ globals: globalThis });
-  const browser = await agent.browsers.get("extension");
-  await browser.nameSession("FB detail enrichment");
+  const baseContext = loadOpencliContext();
 
   const enriched = [];
   const errors = [];
   for (const [index, post] of posts.entries()) {
     if (LIMIT && index >= LIMIT) break;
     if (!post.post_url) continue;
-    const tab = await browser.tabs.new();
+    let context = null;
     try {
-      await tab.goto(post.post_url);
-      await tab.playwright.waitForLoadState({ state: "domcontentloaded", timeoutMs: 20000 }).catch(() => {});
-      await sleep(3500);
-      const state = await pageState(tab);
+      context = await openPostTab(baseContext, post.post_url);
+      const state = await pageState(context);
       if (state.loggedOut || state.visitorPreview) {
         errors.push({ post_url: post.post_url, error: "human_intervention_required", body_preview: state.bodyPreview });
         continue;
       }
-      const target = await findHeaderTime(tab);
-      let exactTime = await readExactTimeFromDom(tab, target);
-      if (!exactTime.posted_at) exactTime = await readTooltipTimeWithSyntheticHover(tab, target);
-      if (!exactTime.posted_at && ALLOW_REAL_MOUSE_HOVER) exactTime = await readTooltipTimeWithRealMouse(tab, target);
-      const engagement = await extractEngagement(tab);
+      const target = await findHeaderTime(context);
+      let exactTime = await readExactTimeFromDom(context, target);
+      if (!exactTime.posted_at) exactTime = await readTooltipTimeWithSyntheticHover(context, target);
+      if (!exactTime.posted_at && ALLOW_REAL_MOUSE_HOVER) exactTime = await readTooltipTimeWithRealMouse(context, target);
+      const engagement = await extractEngagement(context);
       if (exactTime.posted_at) {
         post.posted_at_raw = exactTime.posted_at_raw;
         post.posted_at = exactTime.posted_at;
@@ -407,7 +457,7 @@ async function main() {
         if (engagement.comments) post.comments = engagement.comments;
         if (engagement.shares) post.shares = engagement.shares;
       }
-      const leadLink = await extractLeadLink(tab, post.account_name || "");
+      const leadLink = await extractLeadLink(context, post.account_name || "");
       if (leadLink.status === "qualified") {
         post.lead_url_raw = leadLink.lead_url_raw;
         post.landing_url = leadLink.landing_url;
@@ -423,15 +473,17 @@ async function main() {
       enriched.push({ post_url: post.post_url, exact_time: exactTime, engagement, lead_link: leadLink });
     } catch (error) {
       errors.push({ post_url: post.post_url, error: String(error.stack || error) });
+    } finally {
+      if (context) await closePostTab(context);
     }
   }
   payload.detail_enriched = enriched.length;
   payload.detail_enrichment_errors = errors;
   fs.writeFileSync(OUTPUT, JSON.stringify(payload, null, 2), "utf8");
-  console.log(JSON.stringify({ ok: true, enriched: enriched.length, errors: errors.length, output: OUTPUT }, null, 2));
+  outputJson({ ok: true, route: "opencli_browser_bridge", enriched: enriched.length, errors: errors.length, output: OUTPUT });
 }
 
 main().catch((error) => {
-  console.error(JSON.stringify({ ok: false, error: String(error.stack || error) }, null, 2));
+  outputJson({ ok: false, route: "opencli_browser_bridge", error: String(error.stack || error) });
   process.exitCode = 1;
 });

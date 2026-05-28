@@ -6,17 +6,21 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-from pathlib import Path
+import urllib.error
+import urllib.request
 from typing import Any
 
 from config_loader import deep_get, load_config
 
 
-DEFAULT_CHROME_PLUGIN_BASE = Path.home() / ".codex" / "plugins" / "cache" / "openai-bundled" / "chrome"
-CHROME_PLUGIN_BASE = DEFAULT_CHROME_PLUGIN_BASE
+OPENCLI_MIN_MAJOR = 1
+OPENCLI_MIN_MINOR = 8
 
 
-def check_command(path: str) -> dict[str, Any]:
+def check_command(path: str, args: list[str] | None = None) -> dict[str, Any]:
+    from pathlib import Path
+
+    args = args or ["--version"]
     p = Path(path)
     found_on_path = False
     if not p.exists():
@@ -28,9 +32,38 @@ def check_command(path: str) -> dict[str, Any]:
             found_on_path = True
     result = {"path": path, "resolved_path": str(p), "exists": p.exists(), "found_on_path": found_on_path}
     if p.exists():
-        proc = subprocess.run([str(p), "--version"], text=True, capture_output=True, check=False)
+        proc = subprocess.run([str(p), *args], text=True, capture_output=True, check=False)
         result.update({"ok": proc.returncode == 0, "stdout": proc.stdout.strip(), "stderr": proc.stderr.strip()})
     return result
+
+
+def check_invocation(command: list[str]) -> dict[str, Any]:
+    if not command:
+        return {"ok": False, "exists": False, "error": "empty command"}
+    executable = check_command(command[0], command[1:] + ["--version"] if len(command) > 1 else ["--version"])
+    return {"command": command, **executable}
+
+
+def parse_version(text: str) -> tuple[int, int, int] | None:
+    cleaned = text.strip().lstrip("v")
+    parts = cleaned.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        major = int(parts[0])
+        minor = int(parts[1])
+        patch = int(parts[2]) if len(parts) > 2 else 0
+    except ValueError:
+        return None
+    return major, minor, patch
+
+
+def version_ok(text: str) -> bool:
+    version = parse_version(text)
+    if not version:
+        return False
+    major, minor, _patch = version
+    return major > OPENCLI_MIN_MAJOR or (major == OPENCLI_MIN_MAJOR and minor >= OPENCLI_MIN_MINOR)
 
 
 def run_cli(path: str, args: list[str]) -> dict[str, Any]:
@@ -87,103 +120,72 @@ def auth_status_detail(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def run_node_json(script: Path, args: list[str] | None = None) -> dict[str, Any]:
-    args = args or []
-    if not script.exists():
-        return {"ok": False, "missing": True, "path": str(script)}
-    proc = subprocess.run(
-        ["node", str(script), *args],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=20,
+def read_opencli_daemon_status(port: int) -> dict[str, Any]:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/status",
+        headers={"X-OpenCLI": "1"},
     )
-    payload: Any = proc.stdout.strip()
-    if payload:
-        try:
-            payload = json.loads(payload)
-        except json.JSONDecodeError:
-            pass
-    return {
-        "ok": proc.returncode == 0,
-        "returncode": proc.returncode,
-        "stdout": payload,
-        "stderr": proc.stderr.strip(),
-    }
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            return {"ok": True, "status": payload}
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": str(exc)}
 
 
-def find_chrome_plugin_root(base: Path | str | None = None) -> Path | None:
-    plugin_base = Path(base) if base is not None else CHROME_PLUGIN_BASE
-    if not plugin_base.exists():
-        return None
-    candidates = [
-        path.parent.parent
-        for path in plugin_base.glob("*/scripts/browser-client.mjs")
-        if (path.parent / "check-extension-installed.js").exists()
-    ]
-    if not candidates:
-        return None
-    return sorted(candidates, key=lambda path: path.name, reverse=True)[0]
-
-
-def check_chrome_extension(plugin_base: str | Path | None = None) -> dict[str, Any]:
-    base = Path(plugin_base) if plugin_base else CHROME_PLUGIN_BASE
-    plugin_root = find_chrome_plugin_root(base)
-    if not plugin_root:
+def check_opencli(opencli_command: list[str] | str, *, daemon_port: int = 19825) -> dict[str, Any]:
+    command_list = opencli_command if isinstance(opencli_command, list) else [opencli_command]
+    command = check_invocation(command_list)
+    if not command.get("exists"):
         return {
             "ok": False,
-            "status": "chrome_plugin_missing",
-            "plugin_base": str(base),
-            "message": "Codex Chrome 插件包不存在，无法走当前用户 Chrome 标签页采集路线",
+            "status": "opencli_missing",
+            "command": command,
+            "daemon_status": read_opencli_daemon_status(daemon_port),
+            "message": "OpenCLI 未安装或不在 PATH；请安装 @jackwener/opencli 后重试。",
         }
-    native_host = run_node_json(plugin_root / "scripts" / "check-native-host-manifest.js", ["--json"])
-    extension = run_node_json(plugin_root / "scripts" / "check-extension-installed.js", ["--json"])
-    installed = False
-    enabled = False
-    profile_path = ""
-    extension_payload = extension.get("stdout")
-    if isinstance(extension_payload, dict):
-        installed = bool(extension_payload.get("installed"))
-        enabled = bool(extension_payload.get("enabled"))
-        profile_path = extension_payload.get("profilePath", "")
-    native_payload = native_host.get("stdout")
-    native_ok = bool(native_host.get("ok"))
-    if isinstance(native_payload, dict):
-        native_ok = bool(native_payload.get("correct"))
-    ready = native_ok and installed and enabled
+
+    version_text = str(command.get("stdout") or "")
+    daemon_status = read_opencli_daemon_status(daemon_port)
+    status_payload = daemon_status.get("status") if isinstance(daemon_status.get("status"), dict) else {}
+    extension_connected = bool(status_payload.get("extensionConnected"))
+    daemon_running = bool(daemon_status.get("ok") and status_payload.get("ok"))
+    version_ready = version_ok(version_text)
+    ready = bool(command.get("ok") and version_ready and daemon_running and extension_connected)
     if ready:
         status = "ready"
-        message = "Codex Chrome Extension 可用，优先使用当前用户 Chrome 标签页采集"
-    elif native_ok and not installed:
-        status = "extension_not_installed"
-        message = "native host 正常，但当前 Chrome profile 未安装 Codex Chrome Extension；需要先在业务使用的 Chrome profile 安装并启用扩展"
-    elif native_ok and installed and not enabled:
-        status = "extension_disabled"
-        message = "Codex Chrome Extension 已安装但未启用；需要在 Chrome 扩展管理页启用"
+        message = "OpenCLI Browser Bridge 已连接，优先使用当前用户 Chrome 标签页采集 Facebook。"
+    elif command.get("ok") and not version_ready:
+        status = "opencli_version_too_old"
+        message = "OpenCLI 版本过低；请升级到 @jackwener/opencli 1.8.0 或更新版本。"
+    elif command.get("ok") and not daemon_running:
+        status = "daemon_not_running"
+        message = "OpenCLI daemon 未运行；运行 opencli doctor 或任一 opencli browser 命令会尝试自动启动。"
+    elif command.get("ok") and not extension_connected:
+        status = "browser_bridge_not_connected"
+        message = "OpenCLI CLI/daemon 可用，但 Browser Bridge 扩展未连接到当前 Chrome profile；请在业务 Chrome 中安装并启用 OpenCLI 扩展。"
     else:
-        status = "native_host_invalid"
-        message = "Codex Chrome Extension native host 未就绪；需要从 Codex 插件 UI 重新安装/修复 Chrome 插件"
+        status = "opencli_not_ready"
+        message = "OpenCLI 命令不可用；请先修复 OpenCLI 安装。"
     return {
         "ok": ready,
         "status": status,
         "message": message,
-        "plugin_base": str(base),
-        "plugin_root": str(plugin_root),
-        "profile_path": profile_path,
-        "native_host": native_host,
-        "extension": extension,
+        "command": command,
+        "daemon_port": daemon_port,
+        "daemon_status": daemon_status,
     }
 
 
 def recommended_capture_route(report: dict[str, Any]) -> dict[str, str]:
-    if report["codex_chrome_extension"].get("ok"):
+    if report["opencli_browser_bridge"].get("ok"):
         return {
-            "route": "codex_chrome_extension",
-            "message": "优先读取业务人员当前 Chrome 已打开且肉眼可见的 Facebook 标签页，再导入/去重/同步飞书",
+            "route": "opencli_browser_bridge",
+            "message": "优先通过 OpenCLI Browser Bridge 读取业务人员当前 Chrome 已打开且肉眼可见的 Facebook 标签页，再导入/去重/同步飞书。",
         }
     return {
-        "route": "blocked_until_chrome_extension_ready",
-        "message": "Codex Chrome Extension 未就绪，已停止采集；请先在业务使用的 Chrome profile 安装并启用扩展",
+        "route": "blocked_until_opencli_ready",
+        "message": "OpenCLI Browser Bridge 未就绪，已停止实时采集；请先安装/启用 OpenCLI Chrome 扩展并确认 opencli doctor 通过。",
     }
 
 
@@ -193,6 +195,7 @@ def main() -> int:
     args = parser.parse_args()
     config = load_config(args.config)
     cli_path = config.get("lark_cli_path", "lark-cli")
+    opencli_path = config.get("opencli_path", "opencli")
     runtime = config.get("runtime", {})
     report = {
         "runtime": runtime,
@@ -203,7 +206,10 @@ def main() -> int:
         "database_path": config.get("database_path", "data/posts.sqlite"),
         "source_spreadsheet_configured": bool(deep_get(config, "feishu.source_spreadsheet_url", "")),
         "output_spreadsheet_configured": bool(deep_get(config, "feishu.output_spreadsheet_url", "")),
-        "codex_chrome_extension": check_chrome_extension(config.get("codex_chrome_plugin_base")),
+        "opencli_browser_bridge": check_opencli(
+            config.get("opencli_command") or [opencli_path],
+            daemon_port=int(config.get("opencli_daemon_port", 19825) or 19825),
+        ),
     }
     auth_detail = auth_status_detail(report["lark_auth_status"])
     strict_mode = cli_config_value(report["lark_strict_mode"])

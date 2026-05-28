@@ -5,7 +5,7 @@
 This package is the single entry point for FB competitor/internal-page collection:
 
 ```text
-normal Chrome Facebook tab -> Codex Chrome Extension -> normalize -> SQLite dedupe -> Feishu sync -> filter
+normal Chrome Facebook tab -> OpenCLI Browser Bridge -> normalize -> SQLite dedupe -> Feishu sync -> filter
 ```
 
 Business users should operate it through natural language in Codex.
@@ -22,13 +22,13 @@ Cross-platform runtime detection:
 - `lark_cli_path: auto` lets the project detect the current OS and resolve the real command.
 - On Mac, the current validated override is `/Users/a1/.npm-global/bin/lark-cli`.
 - On Windows, the default command is `lark-cli.cmd`; keep it available in PATH, or set `platform_overrides.windows.lark_cli_path` to the installed full path.
-- `codex_home: auto` resolves to the current user's `.codex` directory.
-- `codex_chrome_plugin_base: auto` resolves from `codex_home/plugins/cache/openai-bundled/chrome`.
+- `opencli_path: auto` resolves a global `opencli` command first and falls back to `npx -y @jackwener/opencli` when npx is available.
+- `opencli_session: fb-competitor` keeps the Browser Bridge tab lease scoped to this project.
 - Real Feishu writes must use user identity, not bot identity.
 - Identity policy is forced with `default-as user` and `strict-mode user`.
 - If `tokenStatus` is `needs_refresh`, run `lark-cli auth login` before writing Feishu.
-- Live Facebook capture requires Codex Chrome Extension in the same normal Chrome profile where Facebook is logged in.
-- A normal shell can confirm that the extension is installed, but live capture also needs the trusted Chrome backend/nativePipe in the current Codex session. If browser setup reports only `Codex In-app Browser` and no `extension` backend, live Facebook tooltip verification cannot run in that session.
+- Live Facebook capture requires OpenCLI Browser Bridge in the same normal Chrome profile where Facebook is logged in.
+- A normal shell can confirm OpenCLI readiness with `opencli doctor` or `npx -y @jackwener/opencli doctor`.
 
 Configured Feishu workbooks:
 
@@ -48,29 +48,34 @@ Supported route:
 
 ```text
 business user opens the visible Facebook page in normal Chrome
--> Codex Chrome Extension reads the current tab DOM
+-> OpenCLI Browser Bridge reads the current tab DOM
 -> normalize -> SQLite dedupe -> Feishu sync
 ```
 
-If the environment check says the extension is missing or disabled, stop and fix the Chrome Extension/profile setup first. Do not use another browser route for live Facebook capture.
+If the environment check says OpenCLI or Browser Bridge is not ready, stop and fix the OpenCLI CLI/daemon/extension/profile setup first. Do not use another browser route for live Facebook capture.
 
 If the page shows a login prompt, visitor preview, or only one preview post, stop immediately with `human_intervention_required`. The operator must manually log in or confirm the Chrome profile before retrying. Do not keep scrolling, import, or sync from that state.
 
-## Chrome Extension Troubleshooting
+## OpenCLI Browser Bridge Troubleshooting
 
 Use these checks when Codex cannot verify exact Facebook time from the normal Chrome tab:
 
 ```bash
-node ~/.codex/plugins/cache/openai-bundled/chrome/latest/scripts/chrome-is-running.js --json
-node ~/.codex/plugins/cache/openai-bundled/chrome/latest/scripts/check-extension-installed.js --json
-node ~/.codex/plugins/cache/openai-bundled/chrome/latest/scripts/check-native-host-manifest.js --json
+opencli doctor
+curl -H 'X-OpenCLI: 1' http://127.0.0.1:19825/status
+node scripts/check_opencli_runtime_backend.mjs
 ```
 
-If all three pass but Codex still reports only `Codex In-app Browser` and no `extension` backend, the blocker is the current Codex browser session connection, not Facebook login, the Chrome profile, or the project code. Restart/reconnect the Codex Chrome Extension session, then rerun:
+If `opencli doctor` reports `Extension: not connected`, the blocker is the OpenCLI Browser Bridge extension/profile connection, not Facebook login or the project code. Install or enable the OpenCLI extension in the business Chrome profile, then rerun:
 
 ```bash
-node scripts/chrome_extension_verify_exact_time.mjs --run --account-url "<facebook-account-url>"
+node scripts/opencli_verify_exact_time.mjs --run --account-url "<facebook-account-url>"
 ```
+
+
+## OpenCLI Facebook Boundary
+
+OpenCLI is the browser runtime and Facebook connectivity dependency for live capture. The project does not use the built-in `opencli facebook feed` output as the business result, because that adapter returns generic feed columns. This project still evaluates `scripts/fb_dom_extractors.js`, then runs the existing normalization, detail enrichment, quality gate, SQLite dedupe, and Feishu sync flow.
 
 ## Local Import Test
 
@@ -120,7 +125,7 @@ Before syncing live FB capture results, the quality gate requires:
 
 - hour-level or better post time in `posted_at`, formatted like `2026年5月19日 17:00`
 - `posted_at` must be confirmed from Facebook's exact timestamp tooltip or timestamp DOM attributes. Estimated relative-time sources such as `relative_estimated`, `relative_hour`, or `relative_label` are rejected at sync time.
-- Timestamp tooltip capture is automated. The skill first tries synthetic hover through the Codex Chrome Extension, then can fall back to automated extension mouse movement. Operators should not manually hover timestamps except when debugging with Codex.
+- Timestamp tooltip capture is automated. The skill first tries synthetic hover through the OpenCLI Browser Bridge, then can fall back to automated extension mouse movement. Operators should not manually hover timestamps except when debugging with Codex.
 - a lead link posted by the account in the comment area or a comment reply. The link must resolve to an external non-Facebook site and be stored as `landing_url` with `lead_link_status=qualified`.
 - story summary generated from the landing page/article, with `summary_source=article`
 - short posts are kept if they have a valid FB content URL, but remain `needs_enrichment` until lead link, landing URL, summary, and time are confirmed
@@ -137,7 +142,7 @@ If a candidate has no share count, add a coverage warning. It may still be a val
 
 Relative FB labels such as `19m`, `1h`, `16h`, or `1d` are stored only as `relative_time_text`. They are not converted into `posted_at` for formal output. `posted_at` must come from Facebook's exact timestamp tooltip or DOM attributes such as `aria-label`, `title`, `datetime`, or `data-tooltip-*`. The hover step is performed automatically by the skill; human intervention is reserved for login/risk-control/page-loading blockers.
 
-Prepare raw Chrome Extension capture output:
+Prepare raw OpenCLI Browser Bridge capture output:
 
 ```bash
 python3 scripts/prepare_capture_result.py \
@@ -165,13 +170,13 @@ python3 scripts/apply_article_summaries.py \
 
 If hour-level post time is still missing, do not sync. Ask the operator to confirm the time from Facebook UI or accept a `time_unconfirmed` non-output record.
 
-Validate exact Facebook time capture before removing any legacy relative-time fallback. This check must be run from Codex's trusted Chrome Extension runtime. The module exposes `verifyExactTimeCapture({ browser })` for that runtime; the shell command below is only a wrapper and will fail outside trusted Chrome runtime:
+Validate exact Facebook time capture before removing any legacy relative-time fallback. This check runs through OpenCLI Browser Bridge:
 
 ```bash
-node scripts/chrome_extension_verify_exact_time.mjs --run --account-url "<facebook-account-url>"
+node scripts/opencli_verify_exact_time.mjs --run --account-url "<facebook-account-url>"
 ```
 
-This command must run from a trusted Codex Chrome Extension runtime. Passing output contains `status=exact_time_confirmed` and at least one `confirmed_examples[].posted_at` such as `2026年5月27日 15:11`. If it reports `facebook_tab_missing`, `login_required`, `visitor_preview`, or `exact_time_not_found`, keep the row as `needs_enrichment` and do not sync formal output for that post time.
+Passing output contains `status=exact_time_confirmed` and at least one `confirmed_examples[].posted_at` such as `2026年5月27日 15:11`. If it reports `facebook_tab_missing`, `login_required`, `visitor_preview`, or `exact_time_not_found`, keep the row as `needs_enrichment` and do not sync formal output for that post time.
 
 ## Date Filtering Policy
 
@@ -204,8 +209,8 @@ python3 scripts/filter_posts.py \
 python3 tests/test_local_pipeline.py
 PYTHONPYCACHEPREFIX=/private/tmp/fb-competitor-pycache python3 -m py_compile scripts/*.py tests/test_local_pipeline.py
 node -c scripts/fb_dom_extractors.js
-node -c scripts/chrome_extension_extract_current_tab.mjs
-node -c scripts/chrome_extension_verify_exact_time.mjs
+node -c scripts/opencli_extract_current_tab.mjs
+node -c scripts/opencli_verify_exact_time.mjs
 ```
 
 ## Mac/Windows Handoff
@@ -214,21 +219,21 @@ The project should normally run with:
 
 ```yaml
 lark_cli_path: auto
-codex_home: auto
-codex_chrome_plugin_base: auto
+opencli_path: auto
+opencli_session: fb-competitor
 ```
 
-Windows business machines only need extra configuration when `lark-cli.cmd` is not in PATH or Codex uses a non-default home directory:
+Windows business machines only need extra configuration when `lark-cli.cmd` or `opencli.cmd` is not in PATH:
 
 ```yaml
 platform_overrides:
   windows:
     lark_cli_path: "C:\\Users\\<user>\\AppData\\Roaming\\npm\\lark-cli.cmd"
-    codex_home: "C:\\Users\\<user>\\.codex"
+    opencli_path: "C:\\Users\\<user>\\AppData\\Roaming\\npm\\opencli.cmd"
 ```
 
 The remaining handoff checks are:
 
-- Codex Chrome Extension is installed and enabled in the same Chrome profile where Facebook is logged in.
+- OpenCLI Browser Bridge is installed and enabled in the same Chrome profile where Facebook is logged in.
 - `lark-cli auth status` reports `identity=user` and `tokenStatus=valid`.
 - Scheduler setup is configured only if daily automation is enabled later.

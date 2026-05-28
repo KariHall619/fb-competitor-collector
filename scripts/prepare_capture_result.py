@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare raw Chrome Extension capture output before import or Feishu sync."""
+"""Prepare raw OpenCLI Browser Bridge capture output before import or Feishu sync."""
 
 from __future__ import annotations
 

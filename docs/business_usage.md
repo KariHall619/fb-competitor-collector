@@ -5,7 +5,7 @@
 ## 使用前准备
 
 1. 用平时工作的 Chrome 登录 Facebook。
-2. 在同一个 Chrome profile 里启用 Codex Chrome Extension。
+2. 在同一个 Chrome profile 里启用 OpenCLI Browser Bridge。
 3. 打开需要采集的 Facebook 主页，并确认肉眼能看到帖子列表。
 4. 飞书 CLI 需要保持用户身份登录。
 
@@ -17,7 +17,7 @@
 使用 FB 竞品采集 skill，检查一下现在能不能用。
 ```
 
-检查会确认飞书登录、输出表配置、用户身份限制、Codex Chrome Extension 是否可用。
+检查会确认飞书登录、输出表配置、用户身份限制、OpenCLI Browser Bridge 是否可用。
 
 测试当前页面是否能读到正文：
 
@@ -88,7 +88,7 @@
 
 ## 重要说明
 
-- 只有 Codex Chrome Extension 路线用于实时采集。
+- 只有 OpenCLI Browser Bridge 路线用于实时采集。
 - 如果插件不可用，系统会直接停止并提示修复插件或 Chrome profile 设置。
 - Facebook 页面必须是业务同学肉眼能看到帖子列表的正常登录页面。
 - 如果页面出现登录入口、游客预览、只显示一条预览帖子、空白动态壳、评论片段或没有真实帖子，系统会立即停止并提示 `human_intervention_required`，需要人工登录/确认页面后再重试。
@@ -96,7 +96,7 @@
 - 没有浏览量/点赞量时不会阻塞入库，会标记为“互动数据未确认”；但如果业务要求按互动数据筛选，缺失互动数据的记录不会命中。
 - 发帖时间只要求精确到小时，格式为 `2026年5月19日 17:00`。
 - `19min`、`1h`、`16h`、`1d` 这类相对时间只作为线索，不再换算成正式发帖时间。正式 `posted_at` 必须来自 Facebook 的精确时间悬停提示或页面 DOM 里的精确时间属性。
-- 时间悬停由 Skill 自动完成：优先使用不会移动真实鼠标的页面内自动 hover；必要时再使用 Codex Chrome Extension 自动移动鼠标到时间 UI。业务同学不需要手动悬停时间。
+- 时间悬停由 Skill 自动完成：优先使用不会移动真实鼠标的页面内自动 hover；必要时再使用 OpenCLI Browser Bridge 自动移动鼠标到时间 UI。业务同学不需要手动悬停时间。
 - 只有登录失效、游客预览、验证码/风控、Chrome profile 不对、页面没有真实加载出帖子这类阻断问题，才需要人工介入。
 - `reel/photo/watch/video/post/story` 都会先作为 FB 内容候选保留，不会因为缺父帖链接被丢弃。
 - 父帖链接只作为优先去重依据；抓不到父帖时保留原始 FB 内容链接，后续再处理重复。

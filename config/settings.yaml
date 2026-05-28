@@ -1,6 +1,8 @@
 lark_cli_path: auto
-codex_home: auto
-codex_chrome_plugin_base: auto
+opencli_path: auto
+opencli_package: "@jackwener/opencli"
+opencli_session: fb-competitor
+opencli_daemon_port: 19825
 timezone: Asia/Shanghai
 database_path: data/posts.sqlite
 
@@ -39,7 +41,7 @@ crawl:
   daily_hours: 24
   default_run_time: "10:00"
   dedupe_key: post_url
-  live_capture_route: codex_chrome_extension
+  live_capture_route: opencli_browser_bridge
 
 lead_link:
   comment_expand_rounds: 3

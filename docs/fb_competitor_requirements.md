@@ -8,7 +8,7 @@
 
 ```text
 业务人员打开已登录 Facebook 页面
--> Codex Chrome Extension 读取当前 Chrome 标签页可见帖子
+-> OpenCLI Browser Bridge 读取当前 Chrome 标签页可见帖子
 -> 标准化字段
 -> SQLite 本地去重入库
 -> 飞书表格同步
@@ -40,7 +40,7 @@
 第一阶段必须完成：
 
 1. 从飞书账号来源表读取竞品账号和内部主页账号；
-2. 通过 Codex Chrome Extension 读取业务人员当前正常 Chrome 标签页中可见的 Facebook 帖子；
+2. 通过 OpenCLI Browser Bridge 读取业务人员当前正常 Chrome 标签页中可见的 Facebook 帖子；
 3. 标准化帖子链接、文章链接、故事概要、账号类型、发帖时间、互动数据等字段；
 4. 本地 SQLite 保存全量内容并按 canonical post URL 去重；
 5. 同步结果到飞书输出表 `FB竞品帖子链接`；
@@ -144,7 +144,7 @@ Sheet id: 44013b
 1. Facebook 页面不提供稳定的日期范围接口；
 2. 实时采集依赖业务人员打开并加载目标页面；
 3. 第一版优先保证当前可见页面采集、入库、去重、同步和筛选稳定；
-4. 每日自动化需要在 Chrome Extension 当前页采集稳定后再单独配置固定运行机和执行方式。
+4. 每日自动化需要在 OpenCLI Browser Bridge 当前页采集稳定后再单独配置固定运行机和执行方式。
 
 ## 8. 筛选需求
 
@@ -185,7 +185,7 @@ Sheet id: 44013b
 
 1. 能读取飞书账号来源表；
 2. 能确认飞书 CLI 为用户身份；
-3. 能确认 Codex Chrome Extension 可用；
+3. 能确认 OpenCLI Browser Bridge 可用；
 4. 能从正常 Chrome 已登录页面读取真实帖子正文；
 5. 能提取帖子链接、文章链接、故事概要；
 6. 能写入 SQLite；

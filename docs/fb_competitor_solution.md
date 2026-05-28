@@ -2,7 +2,7 @@
 
 ## 1. 方案总览
 
-`fb-competitor-collector` 是本项目唯一业务入口。实时 Facebook 采集只使用 Codex Chrome Extension 读取业务人员正常 Chrome 中已经登录、已经打开、肉眼可见的 Facebook 页面。
+`fb-competitor-collector` 是本项目唯一业务入口。实时 Facebook 采集只使用 OpenCLI Browser Bridge 读取业务人员正常 Chrome 中已经登录、已经打开、肉眼可见的 Facebook 页面。
 
 核心链路：
 
@@ -10,7 +10,7 @@
 飞书账号来源表
   -> 读取账号清单
   -> 业务人员在正常 Chrome 打开目标 Facebook 页面
-  -> Codex Chrome Extension 读取当前标签页 DOM
+  -> OpenCLI Browser Bridge 读取当前标签页 DOM
   -> fb_dom_extractors.js 提取帖子候选
   -> normalize_post 标准化字段
   -> SQLite 按 canonical_post_url 去重
@@ -18,7 +18,7 @@
   -> filter_posts.py 条件筛选并写入筛选结果
 ```
 
-如果 Codex Chrome Extension 不可用，实时采集直接停止并提示修复插件/profile 设置。
+如果 OpenCLI Browser Bridge 不可用，实时采集直接停止并提示修复插件/profile 设置。
 
 如果 Facebook 页面出现登录入口、游客预览或只显示一条预览帖子，系统必须立即停止并返回 `human_intervention_required`。这种情况不能继续滚动试探，也不能写入飞书，因为 Facebook 常见行为是游客态只暴露少量预览内容。
 
@@ -52,7 +52,7 @@ fb-competitor-collector/
     sample_posts_13_with_duplicates.json
   scripts/
     check_env.py
-    chrome_extension_extract_current_tab.mjs
+    opencli_extract_current_tab.mjs
     config_loader.py
     fb_dom_extractors.js
     filter_posts.py
@@ -72,8 +72,8 @@ fb-competitor-collector/
 
 ```yaml
 lark_cli_path: auto
-codex_home: auto
-codex_chrome_plugin_base: auto
+opencli_path: auto
+opencli_session: fb-competitor
 timezone: Asia/Shanghai
 database_path: data/posts.sqlite
 
@@ -98,7 +98,7 @@ crawl:
   daily_hours: 24
   default_run_time: "10:00"
   dedupe_key: post_url
-  live_capture_route: codex_chrome_extension
+  live_capture_route: opencli_browser_bridge
 
 filters:
   hot_views: 100000
@@ -108,7 +108,7 @@ filters:
 配置规则：
 
 1. 不保存密码、cookie、token；
-2. `lark_cli_path: auto` 和 `codex_home: auto` 会按当前系统自动解析 Mac/Windows 路径；
+2. `lark_cli_path: auto` 和 `opencli_path: auto` 会按当前系统自动解析 Mac/Windows 路径；OpenCLI 优先使用全局命令，缺失时可通过 `npx -y @jackwener/opencli` 运行；
 3. 账号来源表和输出表必须分开。
 
 如果 Windows 业务机没有把 `lark-cli.cmd` 放进 PATH，只需要在 `platform_overrides.windows.lark_cli_path` 写入完整安装路径。
@@ -135,7 +135,7 @@ filters:
 
 ## 6. 采集实现
 
-实时采集由 Codex Chrome Extension 执行：
+实时采集由 OpenCLI Browser Bridge 执行：
 
 1. 列出用户当前打开的 Chrome 标签页；
 2. 选择业务人员肉眼可见帖子列表的 Facebook 标签页；
@@ -156,7 +156,7 @@ filters:
 3. 提示业务人员在当前 Chrome profile 手动登录 Facebook；
 4. 在人工确认能连续看到多条帖子前，不入库、不同步飞书。
 
-`scripts/chrome_extension_extract_current_tab.mjs` 是该路线的可检查参考脚本。实际运行时应由 Codex Chrome plugin runtime 控制当前标签页。
+`scripts/opencli_extract_current_tab.mjs` 是该路线的可检查参考脚本。实际运行时应由 OpenCLI Browser Bridge runtime 控制当前标签页。
 
 ## 7. 数据库设计
 
@@ -262,10 +262,10 @@ python3 scripts/filter_posts.py --config config/settings.yaml --date 260521 --ac
 
 ## 11. Mac/Windows 迁移
 
-Windows 迁移默认不再复制 Mac 路径。项目会通过 `check_env.py` 输出当前平台、实际 `lark-cli` 命令、Codex home 和 Chrome 插件包路径。迁移时只需要确认：
+Windows 迁移默认不再复制 Mac 路径。项目会通过 `check_env.py` 输出当前平台、实际 `lark-cli` 命令、OpenCLI 命令和 Browser Bridge 状态。迁移时只需要确认：
 
 1. `lark_cli_path: auto` 是否能解析到 Windows 上的 `lark-cli.cmd`；
-2. Codex Chrome Extension 已安装在业务使用的 Chrome profile；
+2. OpenCLI Browser Bridge 已安装在业务使用的 Chrome profile；
 3. Facebook 已在该 profile 登录；
 4. 飞书 CLI 已用户身份登录；
 5. 如后续启用每日任务，再配置固定机器的定时调度。
@@ -274,7 +274,7 @@ Windows 迁移默认不再复制 Mac 路径。项目会通过 `check_env.py` 输
 
 Mac 当前阶段必须通过：
 
-1. `check_env.py` 能报告 Chrome Extension 是否可用；
+1. `check_env.py` 能报告 OpenCLI Browser Bridge 是否可用；
 2. 能读取飞书账号来源表；
 3. 能从当前 Chrome Facebook 页面提取真实帖子正文；
 4. 能导入一条样例数据；
@@ -288,12 +288,12 @@ Mac 当前阶段必须通过：
 Windows 交付前补齐：
 
 1. Windows 上 `check_env.py` 的 `runtime` 和 `lark_cli` 检查结果；
-2. Windows Chrome Extension/profile 检查结果；
+2. Windows OpenCLI Browser Bridge/profile 检查结果；
 3. Windows 飞书用户身份检查结果；
 4. 业务人员自然语言使用说明。
 
 ## 13. 当前结论
 
-Chrome Extension 路线已经验证能读取正常 Chrome 已登录页面中的真实帖子 DOM，并能通过 `fb_dom_extractors.js` 提取帖子候选。
+OpenCLI Browser Bridge 是当前正式实时采集入口。它负责浏览器绑定、tab 选择、页面执行和 hover/network 等浏览器操作；Facebook 业务字段仍由本项目的 `fb_dom_extractors.js`、详情补全和质量门禁决定，不直接采用 OpenCLI 内置 `facebook feed` 的通用输出列。
 
-因此本项目不保留其他实时采集入口。后续所有优化都围绕 Chrome Extension 当前页读取、字段提取、去重、飞书同步和筛选展开。
+因此本项目不保留其他实时采集入口。后续所有优化都围绕 OpenCLI Browser Bridge 当前页读取、字段提取、去重、飞书同步和筛选展开。
