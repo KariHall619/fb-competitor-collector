@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlencode, unquote, urlparse, urlunparse
 from typing import Any
 
@@ -27,7 +27,7 @@ FACEBOOK_INTERNAL_HOSTS = {
 }
 ESTIMATED_TIME_SOURCES = {"relative_hour", "relative_estimated", "relative_label"}
 RELATIVE_TIME_RE = re.compile(
-    r"^(?:just now|yesterday|\d+\s*(?:m|min|h|hr|d|day|w|wk)|刚刚|\d+\s*分钟|\d+\s*小时|昨天|\d+\s*天|\d+\s*周)$",
+    r"^(?:just now|yesterday|\d+\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)(?:\s+ago)?|刚刚|\d+\s*分钟|\d+\s*小时|昨天|\d+\s*天|\d+\s*周)$",
     re.I,
 )
 TRACKING_QUERY_PREFIXES = ("utm_", "__")
@@ -76,6 +76,30 @@ def append_note(note: str, item: str) -> str:
     if item not in parts:
         parts.append(item)
     return "；".join(parts)
+
+
+def format_posted_at(value: datetime) -> str:
+    return f"{value.year}年{value.month}月{value.day}日 {value.hour:02d}:{value.minute:02d}"
+
+
+def parse_reference_time(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y年%m月%d日 %H:%M"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            pass
+    return None
 
 
 def parse_count(value: Any) -> int | None:
@@ -319,6 +343,57 @@ def is_relative_time_label(value: Any) -> bool:
     return bool(RELATIVE_TIME_RE.fullmatch(str(value).strip()))
 
 
+def estimate_posted_at_from_relative(value: Any, now: datetime | str | None = None) -> str:
+    """Estimate a post timestamp from Facebook relative labels.
+
+    The returned value is intentionally approximate. Callers must keep
+    time_source as an estimated source so output can mark it as "约".
+    """
+
+    if value in (None, ""):
+        return ""
+    text = str(value).strip().lower()
+    if not text:
+        return ""
+    reference = parse_reference_time(now) if isinstance(now, str) else now
+    if reference is None:
+        reference = datetime.now()
+
+    if text in {"just now", "刚刚"}:
+        return format_posted_at(reference)
+    if text in {"yesterday", "昨天"}:
+        return format_posted_at(reference - timedelta(days=1))
+
+    match = re.fullmatch(
+        r"(\d+)\s*(m|min|mins|minute|minutes|分钟|h|hr|hrs|hour|hours|小时|d|day|days|天|w|wk|wks|week|weeks|周)(?:\s+ago)?",
+        text,
+        flags=re.I,
+    )
+    if not match:
+        return ""
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    if unit in {"m", "min", "mins", "minute", "minutes", "分钟"}:
+        delta = timedelta(minutes=amount)
+    elif unit in {"h", "hr", "hrs", "hour", "hours", "小时"}:
+        delta = timedelta(hours=amount)
+    elif unit in {"d", "day", "days", "天"}:
+        delta = timedelta(days=amount)
+    elif unit in {"w", "wk", "wks", "week", "weeks", "周"}:
+        delta = timedelta(weeks=amount)
+    else:
+        return ""
+    return format_posted_at(reference - delta)
+
+
+def is_estimated_time_source(value: Any) -> bool:
+    return str(value or "") in ESTIMATED_TIME_SOURCES
+
+
+def has_output_post_time(post: dict[str, Any]) -> bool:
+    return bool(post.get("posted_at"))
+
+
 def normalize_post_time(value: Any, now: datetime | None = None) -> str:
     """Convert absolute post dates to YYMMDD.
 
@@ -341,6 +416,12 @@ def normalize_post_time(value: Any, now: datetime | None = None) -> str:
 
 def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) -> dict[str, Any]:
     defaults = defaults or {}
+    reference_time = (
+        parse_reference_time(raw.get("crawled_at"))
+        or parse_reference_time(raw.get("last_seen_at"))
+        or parse_reference_time(raw.get("first_seen_at"))
+        or datetime.now()
+    )
     raw_post_url = first_value(raw, POST_URL_KEYS)
     parent_post_url = clean_post_url(raw.get("parent_post_url") or "")
     post_url = parent_post_url or clean_post_url(raw_post_url)
@@ -354,7 +435,19 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
     if lead_link_status != "qualified" and lead_url_raw and lead_link_source in {"comment", "comment_reply"} and is_external_landing_url(landing_url):
         lead_link_status = "qualified"
     story_summary = first_value(raw, SUMMARY_KEYS)
+    relative_time_text = raw.get("relative_time_text") or raw.get("post_time_text") or ""
     posted_at = normalize_posted_at(first_value(raw, POSTED_AT_KEYS))
+    time_source = raw.get("time_source") or defaults.get("time_source", "")
+    if not posted_at and relative_time_text:
+        estimated = estimate_posted_at_from_relative(relative_time_text, reference_time)
+        if estimated:
+            posted_at = estimated
+            time_source = time_source or "relative_estimated"
+            note = append_note(
+                raw.get("note") or raw.get("备注") or "",
+                f"发帖时间为相对时间估算（{relative_time_text}），非Facebook精确时间",
+            )
+            raw = {**raw, "note": note}
     posted_date_source = raw.get("posted_date") or posted_at or raw.get("post_time") or raw.get("发帖时间") or ""
     posted_date = normalize_post_time(posted_date_source)
     engagement_raw = raw.get("engagement_data") or raw.get("互动数据") or ""
@@ -366,7 +459,11 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
     if views is None and likes is None and comments is None and shares is None:
         note = append_note(note, "互动数据未确认")
 
-    time_source = raw.get("time_source") or defaults.get("time_source", "")
+    time_confirmed = (
+        bool(raw.get("time_confirmed"))
+        if "time_confirmed" in raw
+        else bool(posted_at and not is_estimated_time_source(time_source))
+    )
     post = {
         "account_name": raw.get("account_name") or raw.get("账号名") or defaults.get("account_name", ""),
         "account_url": raw.get("account_url") or raw.get("账号主页链接") or defaults.get("account_url", ""),
@@ -379,7 +476,7 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
         "post_type": raw.get("post_type") or raw.get("帖子类型") or defaults.get("post_type", ""),
         "posted_date": posted_date,
         "posted_at": posted_at,
-        "relative_time_text": raw.get("relative_time_text") or raw.get("post_time_text") or "",
+        "relative_time_text": relative_time_text,
         "article_url": article_url,
         "lead_url_raw": lead_url_raw,
         "landing_url": landing_url,
@@ -390,26 +487,25 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
         "likes": likes,
         "comments": comments,
         "shares": shares,
-        "crawled_at": raw.get("crawled_at") or datetime.now().isoformat(timespec="seconds"),
+        "crawled_at": raw.get("crawled_at") or reference_time.isoformat(timespec="seconds"),
         "source_skill": raw.get("source_skill") or defaults.get("source_skill", "manual-import"),
         "note": note,
         "engagement_raw": engagement_raw,
         "crawl_status": raw.get("crawl_status") or defaults.get("crawl_status", "imported"),
         "output_status": raw.get("output_status") or defaults.get("output_status", ""),
-        "time_confirmed": bool(raw.get("time_confirmed")) if "time_confirmed" in raw else bool(posted_at),
+        "time_confirmed": time_confirmed,
         "time_source": time_source,
         "summary_source": raw.get("summary_source") or ("article" if raw.get("article_summary") else ""),
         "coverage_note": raw.get("coverage_note") or defaults.get("coverage_note", ""),
-        "first_seen_at": raw.get("first_seen_at") or datetime.now().isoformat(timespec="seconds"),
-        "last_seen_at": raw.get("last_seen_at") or datetime.now().isoformat(timespec="seconds"),
+        "first_seen_at": raw.get("first_seen_at") or reference_time.isoformat(timespec="seconds"),
+        "last_seen_at": raw.get("last_seen_at") or reference_time.isoformat(timespec="seconds"),
         "raw_payload": json.dumps(raw, ensure_ascii=False),
     }
     if not post["output_status"]:
         required_ok = all(
             [
                 post.get("post_url"),
-                post.get("posted_at"),
-                post.get("time_confirmed"),
+                has_output_post_time(post),
                 post.get("story_summary"),
                 post.get("summary_source") == "article",
                 post.get("lead_link_status") == "qualified",

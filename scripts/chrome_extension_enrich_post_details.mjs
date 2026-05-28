@@ -358,7 +358,6 @@ function outputStatusFor(post) {
   const requiredOk = Boolean(
     post.post_url
     && post.posted_at
-    && post.time_confirmed
     && post.story_summary
     && post.summary_source === "article"
     && post.lead_link_status === "qualified"

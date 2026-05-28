@@ -106,7 +106,7 @@ Preferred fields:
 - `fb_link_kind`: `parent_post`, `reel`, `photo`, `video`, or `facebook`
 - `post_type`
 - `posted_date`: `YYMMDD`
-- `posted_at`: hour-level or better post time, e.g. `2026年5月19日 17:00`
+- `posted_at`: hour-level or better post time, e.g. `2026年5月19日 17:00`; if only a Facebook relative label is available, estimate from crawl time and mark `time_source=relative_estimated`
 - `relative_time_text`: visible FB label, e.g. `1h`
 - `article_url`
 - `lead_url_raw`
@@ -130,15 +130,14 @@ Rules:
 - Capture must keep `photo.php`, `/photo/`, `/reel/`, `/watch/`, and `/videos/` candidates. These are valid FB content candidates and must not be dropped just because a parent `/posts/` link is missing.
 - Parent post links are best-effort dedupe helpers. If a parent link is available, store it in `parent_post_url`; if not, keep the original `raw_fb_url` / `post_url` and leave later similarity review to a separate pass.
 - Formal output requires a lead link posted by the account in the comment area or a comment reply. The link must resolve outside Facebook/Meta and be stored as `landing_url`; set `lead_link_status=qualified`.
-- Missing share count, parent post URL, exact time, summary, or lead link must not drop the candidate at capture time. Keep the candidate as `needs_enrichment`; only `ready_for_output` rows may sync to Feishu.
-- Do not sync live capture rows unless `posted_at` is confirmed at least to the hour, formatted like `2026年5月19日 17:00`.
-- Reject estimated relative-time sources such as `relative_estimated`, `relative_hour`, or `relative_label` during Feishu sync, even if a `posted_at` value is present.
+- Missing share count, parent post URL, time, summary, or lead link must not drop the candidate at capture time. Keep the candidate as `needs_enrichment`; only `ready_for_output` rows may sync to Feishu.
+- Do not sync live capture rows unless `posted_at` exists at least to the hour, formatted like `2026年5月19日 17:00`. Exact Facebook time is preferred; if only a relative label such as `4h` is available, estimate from crawl time, keep `time_confirmed=false`, set `time_source=relative_estimated`, and write the Feishu time as `约2026年5月19日 17:00`.
 - Do not sync live capture rows whose story summary is copied from Facebook text. The summary must be a Chinese summary based on linked article material and marked `summary_source=article`.
-- Relative labels such as `19m`, `2h`, or `1d` are clues only. Do not convert them into `posted_at` for formal output. Confirm `posted_at` from Facebook's timestamp tooltip or DOM attributes such as `aria-label`, `title`, `datetime`, or `data-tooltip-*`.
-- Timestamp tooltip capture is automated by the skill. First try synthetic page hover through Codex Chrome Extension; if Facebook does not show the tooltip, the skill may use Codex Chrome Extension mouse movement as an automated fallback. Do not ask the business user to manually hover timestamps.
+- Relative labels such as `19m`, `2h`, or `1d` should first be upgraded to exact `posted_at` from Facebook's timestamp tooltip or DOM attributes such as `aria-label`, `title`, `datetime`, or `data-tooltip-*`. If exact time is unavailable, convert the relative label into an approximate `posted_at` from the crawl timestamp and mark the Feishu time with `约`.
+- Timestamp tooltip capture is automated by the skill in the dedicated capture profile. First try synthetic page hover; if Facebook does not show the tooltip, the skill may use automated CDP mouse movement as a fallback. Do not ask the business user to manually hover timestamps.
 - Human intervention is only for blocking states such as login expiry, visitor preview, CAPTCHA/risk control, the wrong Chrome profile, or a page where posts are not visibly loaded.
-- Before deleting any remaining relative-time fallback code, run the exact-time verifier against a real logged-in Facebook tab through the trusted Codex Chrome Extension runtime and require `status=exact_time_confirmed`.
-- Short posts must be kept if they have a valid FB content URL. If comment/reply lead link, landing URL, article summary, engagement, or exact time is missing, keep them as `needs_enrichment` instead of dropping them.
+- Before deleting any remaining relative-time fallback code, run the exact-time verifier against a real logged-in Facebook tab and require `status=exact_time_confirmed`.
+- Short posts must be kept if they have a valid FB content URL. If comment/reply lead link, landing URL, article summary, engagement, or all time signals are missing, keep them as `needs_enrichment` instead of dropping them.
 
 ## Feishu Workflow
 

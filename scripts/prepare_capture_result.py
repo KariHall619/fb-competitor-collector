@@ -14,8 +14,10 @@ from models import (
     clean_article_url,
     clean_post_url,
     canonicalize_post_url,
+    estimate_posted_at_from_relative,
     facebook_link_kind,
     is_external_landing_url,
+    is_estimated_time_source,
     normalize_posted_at,
     parse_count,
 )
@@ -56,7 +58,6 @@ def output_status_for(record: dict[str, Any]) -> str:
         [
             record.get("post_url"),
             record.get("posted_at"),
-            record.get("time_confirmed"),
             record.get("story_summary"),
             record.get("summary_source") == "article",
             record.get("lead_link_status") == "qualified",
@@ -152,8 +153,14 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
         lead_link_status = "qualified"
     relative_time = str(raw.get("relative_time_text") or raw.get("post_time_text") or "").strip()
     posted_at = normalize_posted_at(raw.get("posted_at") or raw.get("posted_at_raw") or "")
-    time_confirmed = bool(posted_at)
     time_source = raw.get("time_source") or ("exact" if posted_at else "")
+    crawled_at = raw.get("crawled_at") or datetime.now().isoformat(timespec="seconds")
+    if not posted_at and relative_time:
+        estimated_at = estimate_posted_at_from_relative(relative_time, crawled_at)
+        if estimated_at:
+            posted_at = estimated_at
+            time_source = "relative_estimated"
+    time_confirmed = bool(posted_at and not is_estimated_time_source(time_source))
     candidate_date = raw.get("posted_date") or ""
     if not candidate_date and posted_at:
         candidate_date = datetime.strptime(posted_at, "%Y年%m月%d日 %H:%M").strftime("%y%m%d")
@@ -164,6 +171,8 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
     note_parts = []
     if not posted_at:
         note_parts.append("发帖时间待确认，需通过FB时间悬停提示获取精确时间")
+    elif is_estimated_time_source(time_source):
+        note_parts.append(f"发帖时间为相对时间估算（{relative_time}），非Facebook精确时间")
     if target_date and not candidate_date:
         note_parts.append("目标日期待确认")
     if not article_url:
@@ -203,6 +212,7 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
         "engagement_data": engagement,
         "crawl_status": "captured",
         "coverage_note": raw.get("coverage_note") or "",
+        "crawled_at": crawled_at,
         "note": "；".join(note_parts),
         "raw_payload": raw,
     }
