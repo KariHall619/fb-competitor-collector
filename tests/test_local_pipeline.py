@@ -1007,6 +1007,155 @@ def assert_filter_sync_applies_output_quality_gate(tmp_path: Path) -> None:
     assert "quality_gate" in filtered.stdout
 
 
+def assert_quality_gate_requires_comment_lead_source(tmp_path: Path) -> None:
+    sample = tmp_path / "bad_lead_status.json"
+    config = tmp_path / "settings_bad_lead_status.yaml"
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "post_url": "https://www.facebook.com/example/posts/bad-lead-status",
+                        "posted_at": "2026年5月27日 10:00",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                        "article_url": "https://site.test/story",
+                        "landing_url": "https://site.test/story",
+                        "lead_link_status": "qualified",
+                        "article_summary": "文章来源概要",
+                        "summary_source": "article",
+                        "output_status": "ready_for_output",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config_text = config.read_text(encoding="utf-8").replace(
+        "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'bad_lead_status.sqlite'}"
+    )
+    config.write_text(config_text, encoding="utf-8")
+    sync = run(
+        [
+            PYTHON,
+            "scripts/import_existing_result.py",
+            "--config",
+            str(config),
+            "--input",
+            str(sample),
+            "--sync",
+            "--dry-run",
+        ]
+    )
+    assert sync.returncode == 1, sync.stdout
+    assert "missing_qualified_comment_lead_link" in sync.stdout
+
+
+def assert_detail_enrichment_ignores_page_shell_ad_links() -> None:
+    script = """
+import fs from 'node:fs';
+const source = fs.readFileSync('./scripts/chrome_extension_enrich_post_details.mjs', 'utf8');
+const start = source.indexOf('async function extractLeadLink');
+const end = source.indexOf('\\nfunction outputStatusFor', start);
+const fnSource = source.slice(start, end);
+const captured = {};
+const tab = {
+  playwright: {
+    async evaluate(fn, arg) {
+      captured.fn = fn;
+      captured.arg = arg;
+      return [];
+    }
+  }
+};
+global.COMMENT_EXPAND_ROUNDS = 0;
+global.REPLY_EXPAND_ROUNDS = 0;
+global.sleep = async () => {};
+global.expandCommentsAndReplies = async () => {};
+global.resolveLandingUrl = async (href) => href;
+const extractLeadLink = eval(`${fnSource}; extractLeadLink`);
+await extractLeadLink(tab, 'Lessons Taught By Life');
+
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() {
+    return this.innerText;
+  }
+  get href() {
+    return this.attrs.href ? new URL(this.attrs.href, global.location.href).href : '';
+  }
+  getAttribute(name) {
+    return this.attrs[name] || '';
+  }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (selector.includes('[role="complementary"]') && node.attrs.role === 'complementary') return node;
+      if (selector.includes('[role="navigation"]') && node.attrs.role === 'navigation') return node;
+      if (selector.includes('[role="contentinfo"]') && node.attrs.role === 'contentinfo') return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a[href]') return node.tagName === 'A' && !!node.attrs.href;
+      if (current === '[role="article"]') return node.attrs.role === 'article';
+      if (current === 'div[aria-label]') return node.tagName === 'DIV' && !!node.attrs['aria-label'];
+      if (current === 'li') return node.tagName === 'LI';
+      if (current === 'div') return node.tagName === 'DIV';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+const adShell = new Node('div', { role: 'complementary' }, [
+  new Node('div', {}, [
+    new Node('span', {}, [], 'Sponsored'),
+    new Node('a', { href: 'https://l.facebook.com/l.php?u=https%3A%2F%2Fwww.shopify.com%2Ffree-trial' }, [], 'shopify.com')
+  ], 'Harness the Power of AI')
+]);
+const realComment = new Node('div', { role: 'article' }, [
+  new Node('span', {}, [], 'Lessons Taught By Life'),
+  new Node('span', {}, [], 'Full story here'),
+  new Node('a', { href: 'https://l.facebook.com/l.php?u=https%3A%2F%2Fexample.test%2Fstory' }, [], 'example.test'),
+  new Node('a', { href: '/LessonsTaughtByLifepage/posts/pfbid?comment_id=123' }, [], '48m'),
+  new Node('span', {}, [], 'Reply')
+]);
+const body = new Node('body', {}, [adShell, realComment]);
+global.document = {
+  querySelectorAll: (selector) => body.querySelectorAll(selector),
+};
+global.location = new URL('https://www.facebook.com/LessonsTaughtByLifepage/posts/pfbid');
+const results = captured.fn(captured.arg);
+if (results.length !== 1 || !results[0].href.includes('example.test') || results[0].href.includes('shopify')) {
+  console.error(JSON.stringify(results, null, 2));
+  process.exit(1);
+}
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_prepare_capture_has_no_base_time_argument() -> None:
     help_result = run([PYTHON, "scripts/prepare_capture_result.py", "--help"])
     assert help_result.returncode == 0, help_result.stderr
@@ -1316,6 +1465,8 @@ def main() -> int:
         assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path)
         assert_article_url_alone_does_not_qualify_lead_link(tmp_path)
         assert_filter_sync_applies_output_quality_gate(tmp_path)
+        assert_quality_gate_requires_comment_lead_source(tmp_path)
+        assert_detail_enrichment_ignores_page_shell_ad_links()
         assert_prepare_capture_has_no_base_time_argument()
         assert_exact_time_verifier_summary_contract()
         assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path)
