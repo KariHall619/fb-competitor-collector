@@ -9,13 +9,29 @@ from typing import Any
 from config_loader import load_config
 from lark_io import write_rows
 from models import POST_HEADERS, output_row
+from output_quality import output_quality_errors, ready_for_output
 from store import all_posts, connect
 
 
 def sync_posts(config: dict[str, Any], posts: list[dict[str, Any]], sheet_key: str, mode: str, dry_run: bool) -> dict[str, Any]:
-    rows = [output_row(post) for post in posts]
+    ready_posts, skipped_posts = ready_for_output(posts)
+    errors = output_quality_errors(ready_posts)
+    if errors:
+        return {"ok": False, "stage": "quality_gate", "errors": errors}
+    if not ready_posts:
+        return {
+            "ok": False,
+            "stage": "quality_gate",
+            "message": "没有字段完整、可写最终表的记录。",
+            "ready_for_output": 0,
+            "needs_enrichment_skipped": len(skipped_posts),
+        }
+    rows = [output_row(post) for post in ready_posts]
     headers = POST_HEADERS if mode == "overwrite" else None
-    return write_rows(config, sheet_key, rows, headers=headers, mode=mode, dry_run=dry_run)
+    result = write_rows(config, sheet_key, rows, headers=headers, mode=mode, dry_run=dry_run)
+    result["ready_for_output"] = len(ready_posts)
+    result["needs_enrichment_skipped"] = len(skipped_posts)
+    return result
 
 
 def main() -> int:

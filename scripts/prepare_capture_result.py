@@ -146,7 +146,10 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
     landing_url = clean_article_url(raw.get("landing_url") or raw.get("article_url"))
     lead_url_raw = clean_article_url(raw.get("lead_url_raw") or raw.get("comment_article_url") or "")
     article_url = landing_url
-    lead_link_status = raw.get("lead_link_status") or ("qualified" if is_external_landing_url(landing_url) else "")
+    lead_link_source = raw.get("lead_link_source") or ""
+    lead_link_status = raw.get("lead_link_status") or ""
+    if lead_link_status != "qualified" and lead_url_raw and lead_link_source in {"comment", "comment_reply"} and is_external_landing_url(landing_url):
+        lead_link_status = "qualified"
     relative_time = str(raw.get("relative_time_text") or raw.get("post_time_text") or "").strip()
     posted_at = normalize_posted_at(raw.get("posted_at") or raw.get("posted_at_raw") or "")
     time_confirmed = bool(posted_at)
@@ -185,7 +188,7 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
         "lead_url_raw": lead_url_raw,
         "landing_url": landing_url,
         "lead_link_status": lead_link_status,
-        "lead_link_source": raw.get("lead_link_source") or "",
+        "lead_link_source": lead_link_source,
         "story_summary": clean_story_placeholder(raw),
         "summary_source": "article" if raw.get("article_summary") else "pending_article_summary",
         "posted_date": candidate_date,

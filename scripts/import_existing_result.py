@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from config_loader import load_config
-from models import ESTIMATED_TIME_SOURCES, normalize_post, output_row
+from models import normalize_post, output_row
+from output_quality import output_quality_errors
 from store import connect, mark_output_synced, upsert_posts
 from lark_io import write_rows
 
@@ -40,29 +41,6 @@ def load_metadata(path: str | Path) -> dict[str, Any]:
         return {}
     data = json.loads(p.read_text(encoding="utf-8"))
     return data if isinstance(data, dict) else {}
-
-
-def sync_quality_errors(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    errors: list[dict[str, Any]] = []
-    for index, post in enumerate(posts, 1):
-        row_errors = []
-        if not post.get("time_confirmed") or not post.get("posted_at"):
-            row_errors.append("missing_hour_level_posted_at")
-        if post.get("time_source") in ESTIMATED_TIME_SOURCES:
-            row_errors.append("estimated_relative_time_not_allowed")
-        if post.get("summary_source") != "article" or not post.get("story_summary"):
-            row_errors.append("missing_article_summary")
-        if post.get("lead_link_status") != "qualified" or not (post.get("landing_url") or post.get("article_url")):
-            row_errors.append("missing_qualified_comment_lead_link")
-        if row_errors:
-            errors.append(
-                {
-                    "index": index,
-                    "post_url": post.get("post_url"),
-                    "errors": row_errors,
-                }
-            )
-    return errors
 
 
 def main() -> int:
@@ -123,7 +101,7 @@ def main() -> int:
     if should_sync:
         sync_candidates = result.get("sync_candidates") or result["inserted"]
         ready_posts = [post for post in sync_candidates if post.get("output_status") == "ready_for_output"]
-        quality_errors = sync_quality_errors(ready_posts)
+        quality_errors = output_quality_errors(ready_posts)
         if quality_errors:
             print(
                 json.dumps(

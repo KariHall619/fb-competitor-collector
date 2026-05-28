@@ -7,6 +7,7 @@
 
 import { createRequire } from "node:module";
 import fs from "node:fs";
+import path from "node:path";
 
 const require = createRequire(import.meta.url);
 const { browserExactTimeHelpersExpression } = require("./fb_time_extractors.js");
@@ -20,15 +21,55 @@ function argValue(name, fallback = "") {
 
 const INPUT = argValue("--input");
 const OUTPUT = argValue("--output");
+const CONFIG = argValue("--config", "config/settings.yaml");
 const LIMIT = Number(argValue("--limit", "0"));
 const ALLOW_REAL_MOUSE_HOVER = args.includes("--allow-real-mouse-hover");
-const COMMENT_EXPAND_ROUNDS = Number(argValue("--comment-expand-rounds", "3"));
-const REPLY_EXPAND_ROUNDS = Number(argValue("--reply-expand-rounds", "3"));
+const configuredLeadLink = readLeadLinkConfig(CONFIG);
+const COMMENT_EXPAND_ROUNDS = Number(argValue("--comment-expand-rounds", configuredLeadLink.commentExpandRounds));
+const REPLY_EXPAND_ROUNDS = Number(argValue("--reply-expand-rounds", configuredLeadLink.replyExpandRounds));
+const RESOLVE_TIMEOUT_MS = Number(argValue("--resolve-timeout-ms", String(configuredLeadLink.resolveTimeoutSeconds * 1000)));
+const ALLOWED_DOMAINS = argValue("--allowed-domains", configuredLeadLink.allowedDomains.join(","))
+  .split(",")
+  .map((item) => item.trim().replace(/^www\./i, "").toLowerCase())
+  .filter(Boolean);
 
 if (!INPUT || !OUTPUT) {
   console.error("Usage: chrome_extension_enrich_post_details.mjs --input prepared.json --output enriched.json [--limit N]");
   process.exitCode = 2;
   throw new Error("missing required arguments");
+}
+
+function readLeadLinkConfig(configPath) {
+  const fallback = {
+    commentExpandRounds: 3,
+    replyExpandRounds: 3,
+    resolveTimeoutSeconds: 20,
+    allowedDomains: [],
+  };
+  try {
+    const resolved = path.resolve(configPath);
+    if (!fs.existsSync(resolved)) return fallback;
+    const text = fs.readFileSync(resolved, "utf8");
+    const section = text.match(/^lead_link:\s*\n([\s\S]*?)(?=^\S|\z)/m);
+    if (!section) return fallback;
+    const body = section[1];
+    const valueFor = (key) => {
+      const match = body.match(new RegExp(`^\\s+${key}:\\s*(.*)$`, "m"));
+      return match ? match[1].trim() : "";
+    };
+    const domainsRaw = valueFor("allowed_domains");
+    const allowedDomains = domainsRaw.startsWith("[")
+      ? domainsRaw.replace(/[[\]"']/g, "").split(",").map((item) => item.trim()).filter(Boolean)
+      : [];
+    return {
+      commentExpandRounds: Number(valueFor("comment_expand_rounds") || fallback.commentExpandRounds),
+      replyExpandRounds: Number(valueFor("reply_expand_rounds") || fallback.replyExpandRounds),
+      resolveTimeoutSeconds: Number(valueFor("resolve_timeout_seconds") || fallback.resolveTimeoutSeconds),
+      allowedDomains,
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 function sleep(ms) {
@@ -210,6 +251,47 @@ function cleanExternalUrl(href) {
   }
 }
 
+function allowedLandingUrl(href) {
+  if (!href) return false;
+  if (!ALLOWED_DOMAINS.length) return true;
+  try {
+    const host = new URL(href).hostname.replace(/^www\./i, "").toLowerCase();
+    return ALLOWED_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`));
+  } catch {
+    return false;
+  }
+}
+
+async function resolveLandingUrl(href) {
+  const cleaned = cleanExternalUrl(href);
+  if (!cleaned) return "";
+  const tryFetch = async (method) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), RESOLVE_TIMEOUT_MS);
+    const response = await fetch(cleaned, {
+      method,
+      redirect: "follow",
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    return cleanExternalUrl(response.url || cleaned) || cleaned;
+  };
+  try {
+    const resolved = await tryFetch("HEAD");
+    if (allowedLandingUrl(resolved)) return resolved;
+  } catch {
+    // Some story sites block HEAD; fall back to a small GET request and still
+    // rely on fetch redirect handling to determine the final URL.
+  }
+  try {
+    const resolved = await tryFetch("GET");
+    if (allowedLandingUrl(resolved)) return resolved;
+  } catch {
+    // Keep the cleaned URL as a candidate only when it already satisfies domain policy.
+  }
+  return allowedLandingUrl(cleaned) ? cleaned : "";
+}
+
 async function extractLeadLink(tab, accountName = "") {
   await expandCommentsAndReplies(tab);
   const candidates = await tab.playwright.evaluate((expectedAccountName) => {
@@ -260,7 +342,7 @@ async function extractLeadLink(tab, accountName = "") {
   if (!selected) {
     return { status: "missing", candidates: candidates || [] };
   }
-  const landingUrl = cleanExternalUrl(selected.href);
+  const landingUrl = await resolveLandingUrl(selected.href);
   return {
     status: landingUrl ? "qualified" : "missing",
     lead_url_raw: selected.href,

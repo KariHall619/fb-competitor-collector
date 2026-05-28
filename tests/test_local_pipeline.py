@@ -791,6 +791,95 @@ def assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path: Path) ->
     assert '"rows": 1' in second.stdout
 
 
+def assert_article_url_alone_does_not_qualify_lead_link(tmp_path: Path) -> None:
+    sample = tmp_path / "article_only.json"
+    config = tmp_path / "settings_article_only.yaml"
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "post_url": "https://www.facebook.com/example/posts/article-only",
+                        "posted_at": "2026年5月27日 10:00",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                        "article_url": "https://site.test/story",
+                        "article_summary": "文章来源概要",
+                        "summary_source": "article",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config_text = config.read_text(encoding="utf-8").replace(
+        "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'article_only.sqlite'}"
+    )
+    config.write_text(config_text, encoding="utf-8")
+    sync = run(
+        [
+            PYTHON,
+            "scripts/import_existing_result.py",
+            "--config",
+            str(config),
+            "--input",
+            str(sample),
+            "--sync",
+            "--dry-run",
+        ]
+    )
+    assert sync.returncode == 1, sync.stdout
+    assert "ready_for_output" in sync.stdout
+    assert "needs_enrichment_skipped" in sync.stdout
+
+
+def assert_filter_sync_applies_output_quality_gate(tmp_path: Path) -> None:
+    sample = tmp_path / "filter_gate.json"
+    config = tmp_path / "settings_filter_gate.yaml"
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "post_url": "https://www.facebook.com/example/posts/filter-gate",
+                        "posted_at": "2026年5月27日 10:00",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                        "article_url": "https://site.test/story",
+                        "article_summary": "文章来源概要",
+                        "summary_source": "article",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config_text = config.read_text(encoding="utf-8").replace(
+        "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'filter_gate.sqlite'}"
+    )
+    config.write_text(config_text, encoding="utf-8")
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
+    assert imported.returncode == 0, imported.stdout
+    filtered = run(
+        [
+            PYTHON,
+            "scripts/filter_posts.py",
+            "--config",
+            str(config),
+            "--date",
+            "260527",
+            "--sync",
+            "--dry-run",
+        ]
+    )
+    assert filtered.returncode == 1, filtered.stdout
+    assert "quality_gate" in filtered.stdout
+
+
 def assert_prepare_capture_has_no_base_time_argument() -> None:
     help_result = run([PYTHON, "scripts/prepare_capture_result.py", "--help"])
     assert help_result.returncode == 0, help_result.stderr
@@ -1094,6 +1183,8 @@ def main() -> int:
         assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path)
         assert_sync_blocks_estimated_relative_time(tmp_path)
         assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path)
+        assert_article_url_alone_does_not_qualify_lead_link(tmp_path)
+        assert_filter_sync_applies_output_quality_gate(tmp_path)
         assert_prepare_capture_has_no_base_time_argument()
         assert_exact_time_verifier_summary_contract()
         assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path)

@@ -349,7 +349,10 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
     article_url = clean_article_url(first_value(raw, ARTICLE_URL_KEYS))
     landing_url = clean_article_url(raw.get("landing_url") or article_url)
     lead_url_raw = clean_article_url(raw.get("lead_url_raw") or raw.get("comment_article_url") or "")
-    lead_link_status = raw.get("lead_link_status") or ("qualified" if is_external_landing_url(landing_url) else "")
+    lead_link_source = raw.get("lead_link_source") or ""
+    lead_link_status = raw.get("lead_link_status") or ""
+    if lead_link_status != "qualified" and lead_url_raw and lead_link_source in {"comment", "comment_reply"} and is_external_landing_url(landing_url):
+        lead_link_status = "qualified"
     story_summary = first_value(raw, SUMMARY_KEYS)
     posted_at = normalize_posted_at(first_value(raw, POSTED_AT_KEYS))
     posted_date_source = raw.get("posted_date") or posted_at or raw.get("post_time") or raw.get("发帖时间") or ""
@@ -381,7 +384,7 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
         "lead_url_raw": lead_url_raw,
         "landing_url": landing_url,
         "lead_link_status": lead_link_status,
-        "lead_link_source": raw.get("lead_link_source") or "",
+        "lead_link_source": lead_link_source,
         "story_summary": story_summary,
         "views": views,
         "likes": likes,

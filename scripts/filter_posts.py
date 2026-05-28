@@ -10,6 +10,7 @@ from typing import Any
 from config_loader import deep_get, load_config
 from lark_io import write_rows
 from models import POST_HEADERS, normalize_date, output_row
+from output_quality import output_quality_errors, ready_for_output
 from store import connect, query_posts
 
 
@@ -63,7 +64,41 @@ def main() -> int:
     print(json.dumps({"count": len(posts), "hit_rule": hit_rule}, ensure_ascii=False, indent=2))
     if args.sync:
         headers = POST_HEADERS
-        rows = [output_row(post) for post in posts]
+        ready_posts, skipped_posts = ready_for_output(posts)
+        errors = output_quality_errors(ready_posts)
+        if errors:
+            print(
+                json.dumps(
+                    {
+                        "feishu_sync": {
+                            "ok": False,
+                            "stage": "quality_gate",
+                            "errors": errors,
+                        }
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
+        if not ready_posts:
+            print(
+                json.dumps(
+                    {
+                        "feishu_sync": {
+                            "ok": False,
+                            "stage": "quality_gate",
+                            "message": "筛选结果中没有字段完整、可写最终表的记录。",
+                            "ready_for_output": 0,
+                            "needs_enrichment_skipped": len(skipped_posts),
+                        }
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
+        rows = [output_row(post) for post in ready_posts]
         result = write_rows(
             config,
             "filter_result",
@@ -72,6 +107,8 @@ def main() -> int:
             mode="overwrite",
             dry_run=args.dry_run,
         )
+        result["ready_for_output"] = len(ready_posts)
+        result["needs_enrichment_skipped"] = len(skipped_posts)
         print(json.dumps({"feishu_sync": result}, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 1
     return 0
