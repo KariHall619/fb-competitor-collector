@@ -1,0 +1,52 @@
+lark_cli_path: auto
+codex_home: auto
+codex_chrome_plugin_base: auto
+timezone: Asia/Shanghai
+database_path: data/posts.sqlite
+
+platform_overrides:
+  darwin:
+    lark_cli_path: /Users/a1/.npm-global/bin/lark-cli
+  windows:
+    lark_cli_path: lark-cli.cmd
+  linux:
+    lark_cli_path: lark-cli
+
+feishu:
+  source_wiki_url: ""
+  source_spreadsheet_token: ""
+  source_spreadsheet_url: ""
+  output_wiki_url: ""
+  output_spreadsheet_token: ""
+  output_spreadsheet_url: ""
+  spreadsheet_url: ""
+  sheets:
+    accounts: "账号配置"
+    account_detail: ""
+    domains: ""
+    all_posts: "全量内容库"
+    daily_new: "每日新增"
+    filter_result: "筛选结果"
+    errors: "异常记录"
+  write_mode:
+    all_posts: append
+    daily_new: overwrite
+    filter_result: overwrite
+    errors: append
+
+crawl:
+  initial_days: 30
+  daily_hours: 24
+  default_run_time: "10:00"
+  dedupe_key: post_url
+  live_capture_route: codex_chrome_extension
+
+lead_link:
+  comment_expand_rounds: 3
+  reply_expand_rounds: 3
+  resolve_timeout_seconds: 20
+  allowed_domains: []
+
+filters:
+  hot_views: 100000
+  hot_likes: 100

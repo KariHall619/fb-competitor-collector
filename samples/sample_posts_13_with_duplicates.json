@@ -1,0 +1,88 @@
+[
+  {
+    "account_name": "Example Page",
+    "account_url": "https://www.facebook.com/example",
+    "account_type": "competitor",
+    "post_url": "https://www.facebook.com/example/posts/1001?mibextid=abc",
+    "article_url": "https://site.test/a1",
+    "story_summary": "样例 1",
+    "posted_date": "260521"
+  },
+  {
+    "account_name": "Example Page",
+    "account_url": "https://www.facebook.com/example",
+    "account_type": "competitor",
+    "post_url": "https://m.facebook.com/example/posts/1001?ref=share",
+    "article_url": "https://site.test/a1",
+    "story_summary": "样例 1 重复",
+    "posted_date": "260521"
+  },
+  {
+    "account_name": "Example Page",
+    "account_url": "https://www.facebook.com/example",
+    "account_type": "competitor",
+    "post_url": "https://www.facebook.com/story.php?story_fbid=1002&id=999",
+    "article_url": "https://site.test/a2",
+    "story_summary": "样例 2",
+    "posted_date": "260521"
+  },
+  {
+    "account_name": "Example Page",
+    "account_url": "https://www.facebook.com/example",
+    "account_type": "competitor",
+    "post_url": "https://www.facebook.com/reel/1003/?s=single_unit",
+    "story_summary": "样例 3",
+    "posted_date": "260521",
+    "views": "12万"
+  },
+  {
+    "post_url": "https://www.facebook.com/example/posts/1004",
+    "story_summary": "样例 4",
+    "posted_date": "260521"
+  },
+  {
+    "post_url": "https://www.facebook.com/example/posts/1005",
+    "story_summary": "样例 5",
+    "posted_date": "260521"
+  },
+  {
+    "post_url": "https://www.facebook.com/example/posts/1006",
+    "story_summary": "样例 6",
+    "posted_date": "260521"
+  },
+  {
+    "post_url": "https://www.facebook.com/example/posts/1007",
+    "story_summary": "样例 7",
+    "posted_date": "260521"
+  },
+  {
+    "post_url": "https://www.facebook.com/example/posts/1008",
+    "story_summary": "样例 8",
+    "posted_date": "260521"
+  },
+  {
+    "post_url": "https://www.facebook.com/example/posts/1009",
+    "story_summary": "样例 9",
+    "posted_date": "260521"
+  },
+  {
+    "post_url": "https://www.facebook.com/example/posts/1010",
+    "story_summary": "样例 10",
+    "posted_date": "260521"
+  },
+  {
+    "post_url": "https://www.facebook.com/example/posts/1011",
+    "story_summary": "样例 11",
+    "posted_date": "260521"
+  },
+  {
+    "post_url": "https://www.facebook.com/example/posts/1012",
+    "story_summary": "样例 12",
+    "posted_date": "260521"
+  },
+  {
+    "post_url": "https://www.facebook.com/example/posts/1013",
+    "story_summary": "样例 13",
+    "posted_date": "260521"
+  }
+]

@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Import existing skill output into SQLite and optionally sync to Feishu."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import sqlite3
+from pathlib import Path
+from typing import Any
+
+from config_loader import load_config
+from models import ESTIMATED_TIME_SOURCES, normalize_post, output_row
+from store import connect, mark_output_synced, upsert_posts
+from lark_io import write_rows
+
+
+def load_records(path: str | Path) -> list[dict[str, Any]]:
+    p = Path(path)
+    if p.suffix.lower() == ".json":
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            if "posts" in data:
+                data = data["posts"]
+            elif "items" in data:
+                data = data["items"]
+            else:
+                data = [data]
+        return list(data)
+    if p.suffix.lower() == ".csv":
+        with p.open(newline="", encoding="utf-8-sig") as handle:
+            return list(csv.DictReader(handle))
+    raise ValueError(f"Unsupported input type: {p.suffix}")
+
+
+def load_metadata(path: str | Path) -> dict[str, Any]:
+    p = Path(path)
+    if p.suffix.lower() != ".json":
+        return {}
+    data = json.loads(p.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else {}
+
+
+def sync_quality_errors(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+    for index, post in enumerate(posts, 1):
+        row_errors = []
+        if not post.get("time_confirmed") or not post.get("posted_at"):
+            row_errors.append("missing_hour_level_posted_at")
+        if post.get("time_source") in ESTIMATED_TIME_SOURCES:
+            row_errors.append("estimated_relative_time_not_allowed")
+        if post.get("summary_source") != "article" or not post.get("story_summary"):
+            row_errors.append("missing_article_summary")
+        if post.get("lead_link_status") != "qualified" or not (post.get("landing_url") or post.get("article_url")):
+            row_errors.append("missing_qualified_comment_lead_link")
+        if row_errors:
+            errors.append(
+                {
+                    "index": index,
+                    "post_url": post.get("post_url"),
+                    "errors": row_errors,
+                }
+            )
+    return errors
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config/settings.yaml")
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--account-name", default="")
+    parser.add_argument("--account-url", default="")
+    parser.add_argument("--account-type", default="competitor")
+    parser.add_argument("--source-skill", default="manual-import")
+    parser.add_argument("--sync", action="store_true")
+    parser.add_argument("--no-sync", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+    defaults = {
+        "account_name": args.account_name,
+        "account_url": args.account_url,
+        "account_type": args.account_type,
+        "source_skill": args.source_skill,
+    }
+    raw_records = load_records(args.input)
+    metadata = load_metadata(args.input)
+    posts = [normalize_post(record, defaults) for record in raw_records]
+    conn = connect(config.get("database_path", "data/posts.sqlite"))
+    try:
+        result = upsert_posts(conn, posts)
+    except sqlite3.OperationalError as exc:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "stage": "sqlite_write",
+                    "error": str(exc),
+                    "database_path": config.get("database_path", "data/posts.sqlite"),
+                    "message": "本地内容库不可写，已停止导入；请确认当前执行环境有项目目录写权限。",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 1
+    print(
+        json.dumps(
+            {
+                "input": len(raw_records),
+                "inserted": len(result["inserted"]),
+                "updated": result["updated"],
+                "errors": result["errors"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+    should_sync = args.sync and not args.no_sync
+    if should_sync:
+        sync_candidates = result.get("sync_candidates") or result["inserted"]
+        ready_posts = [post for post in sync_candidates if post.get("output_status") == "ready_for_output"]
+        quality_errors = sync_quality_errors(ready_posts)
+        if quality_errors:
+            print(
+                json.dumps(
+                    {
+                        "feishu_sync": {
+                            "ok": False,
+                            "stage": "quality_gate",
+                            "message": "同步已停止：存在未确认小时级发帖时间、未生成文章来源中文概要，或缺少评论/回复引流落地链接的记录。",
+                            "errors": quality_errors,
+                        }
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
+        skipped = len(sync_candidates) - len(ready_posts)
+        if not ready_posts:
+            print(
+                json.dumps(
+                    {
+                        "feishu_sync": {
+                            "ok": False,
+                            "stage": "quality_gate",
+                            "message": "同步已停止：当前没有字段完整、可写最终表的记录；候选已保存在本地库，需继续补齐精确时间、摘要和评论/回复引流落地链接。",
+                            "ready_for_output": 0,
+                            "needs_enrichment_skipped": skipped,
+                        }
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
+        rows = [output_row(post) for post in ready_posts]
+        sync_result = write_rows(
+            config,
+            "all_posts",
+            rows,
+            headers=None,
+            mode="append",
+            dry_run=args.dry_run,
+        )
+        if sync_result.get("ok") and not args.dry_run:
+            mark_output_synced(conn, ready_posts)
+        sync_result["ready_for_output"] = len(ready_posts)
+        sync_result["needs_enrichment_skipped"] = skipped
+        print(json.dumps({"feishu_sync": sync_result}, ensure_ascii=False, indent=2))
+        return 0 if sync_result.get("ok") else 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,8 @@
+interface:
+  display_name: "FB 竞品采集"
+  short_description: "用当前 Chrome 页面采集、入库、筛选并同步 FB 链接"
+  brand_color: "#2563EB"
+  default_prompt: "Use $fb-competitor-collector to collect visible Facebook posts from my logged-in Chrome tab, deduplicate them, and sync the rows to Feishu."
+
+policy:
+  allow_implicit_invocation: true
