@@ -164,7 +164,7 @@ def canonicalize_post_url(value: Any) -> str:
             return f"https://facebook.com/reel/{parts[idx + 1]}"
     if "watch" in parts and qs.get("v"):
         return f"https://facebook.com/watch/{qs['v'][0]}"
-    if "photo.php" in path and story_fbid:
+    if ("photo.php" in path or parts == ["photo"]) and story_fbid:
         return f"https://facebook.com/photo/{story_fbid}"
 
     return urlunparse(("https", netloc or "facebook.com", path, "", "", ""))
@@ -427,6 +427,8 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
     post_url = parent_post_url or clean_post_url(raw_post_url)
     raw_fb_url = clean_post_url(raw.get("raw_fb_url") or raw_post_url)
     canonical_post_url = raw.get("canonical_post_url") or canonicalize_post_url(parent_post_url or raw_fb_url or post_url)
+    if canonical_post_url == "https://facebook.com/photo":
+        canonical_post_url = canonicalize_post_url(parent_post_url or raw_fb_url or post_url)
     article_url = clean_article_url(first_value(raw, ARTICLE_URL_KEYS))
     landing_url = clean_article_url(raw.get("landing_url") or article_url)
     lead_url_raw = clean_article_url(raw.get("lead_url_raw") or raw.get("comment_article_url") or "")
@@ -564,10 +566,13 @@ def output_row(post: dict[str, Any]) -> list[Any]:
         parts.append(f"分享数：{post.get('shares')}")
     engagement = "；".join(parts) or post.get("engagement_raw") or ""
     account = post.get("account_name") or post.get("account_url") or ""
+    posted_at = post.get("posted_at") or post.get("posted_date", "")
+    if posted_at and is_estimated_time_source(post.get("time_source")):
+        posted_at = f"约{posted_at}"
     return [
         account,
         post.get("post_url") or post.get("raw_fb_url", ""),
-        post.get("posted_at") or post.get("posted_date", ""),
+        posted_at,
         post.get("landing_url") or post.get("article_url", ""),
         post.get("story_summary", ""),
         engagement,

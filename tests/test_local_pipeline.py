@@ -36,6 +36,10 @@ def assert_url_canonicalization() -> None:
         canonicalize_post_url("https://www.facebook.com/photo.php?fbid=789&set=a.123")
         == "https://facebook.com/photo/789"
     )
+    assert (
+        canonicalize_post_url("https://www.facebook.com/photo/?fbid=790&set=a.123")
+        == "https://facebook.com/photo/790"
+    )
 
 
 def assert_mobile_dom_extractor_can_see_story_links() -> None:
@@ -614,6 +618,37 @@ def assert_comments_and_shares_are_output_as_engagement() -> None:
     assert "点赞量：81" in row[5]
     assert "评论数：29" in row[5]
     assert "分享数：3" in row[5]
+
+
+def assert_generic_photo_canonical_is_recomputed() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+
+    post = normalize_post(
+        {
+            "post_url": "https://facebook.com/photo/?fbid=790",
+            "canonical_post_url": "https://facebook.com/photo",
+        },
+        {},
+    )
+    assert post["canonical_post_url"] == "https://facebook.com/photo/790"
+
+
+def assert_legacy_output_row_marks_estimated_time() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import output_row
+
+    row = output_row(
+        {
+            "account_name": "Story Hub",
+            "post_url": "https://facebook.com/story/posts/estimated",
+            "posted_at": "2026年5月28日 13:00",
+            "time_source": "relative_estimated",
+            "landing_url": "https://story.example/article",
+            "story_summary": "文章概要",
+        }
+    )
+    assert row[2] == "约2026年5月28日 13:00"
 
 
 def assert_output_rows_follow_feishu_headers() -> None:
@@ -1407,6 +1442,8 @@ def main() -> int:
     assert_url_canonicalization()
     assert_exact_time_parsing_and_relative_time_estimation()
     assert_comments_and_shares_are_output_as_engagement()
+    assert_generic_photo_canonical_is_recomputed()
+    assert_legacy_output_row_marks_estimated_time()
     assert_mobile_dom_extractor_can_see_story_links()
     assert_dom_extractor_does_not_treat_story_clock_as_post_time()
     assert_dom_extractor_excludes_profile_shell_with_external_link()

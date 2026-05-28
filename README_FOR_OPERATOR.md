@@ -56,6 +56,8 @@ If the environment check says the extension is missing or disabled, stop and fix
 
 If the page shows a login prompt, visitor preview, or only one preview post, stop immediately with `human_intervention_required`. The operator must manually log in or confirm the Chrome profile before retrying. Do not keep scrolling, import, or sync from that state.
 
+For "today's posts" on a Facebook page, always reload/open the account homepage from the top and collect posts in visible homepage time order until the current-day boundary is covered. Do not continue from a previously low scroll position: Facebook virtualizes the feed DOM, so continuing from the current low position can omit newer posts above it. When the business user provides visible labels such as `38m, 1h, 2h ... 17h`, treat that sequence as the coverage checklist and open each post detail/comment area to find the account's comment or reply lead link.
+
 ## Chrome Extension Troubleshooting
 
 Use these checks when Codex cannot verify exact Facebook time from the normal Chrome tab:
