@@ -232,7 +232,7 @@ async function ensureFacebookTab({ opencliCommand, session, accountUrl }) {
     };
   }
 
-  if (selected.page) {
+  if (selected.page && !selected.current) {
     const select = await runOpencli(["browser", session, "tab", "select", selected.page], { command: opencliCommand });
     if (!select.ok) {
       return {

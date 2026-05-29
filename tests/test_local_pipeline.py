@@ -439,6 +439,12 @@ def assert_opencli_extract_script_requires_human_intervention() -> None:
     assert "已停止采集" in script_text
 
 
+def assert_opencli_runtime_keeps_current_bound_tab() -> None:
+    script_text = (ROOT / "scripts" / "opencli_runtime.mjs").read_text(encoding="utf-8")
+    assert "selected.page && !selected.current" in script_text
+    assert '"tab", "select", selected.page' in script_text
+
+
 def assert_feishu_writes_require_user_identity() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from lark_io import require_user_identity
@@ -584,6 +590,17 @@ const scrambled = {
   h: 15,
 };
 if (!isLikelyHeaderTimeElement(scrambled, 739)) process.exit(5);
+const midPageRelative = {
+  text: '50m',
+  aria: '',
+  title: '',
+  href: 'https://www.facebook.com/LessonsTaughtByLifepage/posts/pfbid-real',
+  x: 530,
+  y: 522,
+  w: 28,
+  h: 16,
+};
+if (!isLikelyHeaderTimeElement(midPageRelative, 739)) process.exit(6);
 """
     result = run(["node", "-e", js])
     assert result.returncode == 0, result.stderr or result.stdout
@@ -1137,6 +1154,7 @@ def main() -> int:
     assert_dom_extractor_blocks_visitor_preview()
     assert_dom_extractor_prefers_parent_post_over_photo_link()
     assert_opencli_extract_script_requires_human_intervention()
+    assert_opencli_runtime_keeps_current_bound_tab()
     assert_feishu_writes_require_user_identity()
     assert_check_env_prefers_opencli_route()
     assert_config_resolves_platform_defaults()

@@ -117,8 +117,8 @@ function isLikelyHeaderTimeElement(item, viewportHeight = 800) {
   const title = clean(item.title);
   const hasTime = isRelativeTimeText(text) || parseExactFacebookTime(aria) || parseExactFacebookTime(title);
   if (item.w <= 0 || item.h <= 0) return false;
-  const inHeaderBand = item.y > 40 && item.y < Math.min(300, viewportHeight * 0.45);
-  if (!inHeaderBand) return false;
+  const inVisiblePage = item.y > 40 && item.y < Math.max(120, viewportHeight - 24);
+  if (!inVisiblePage) return false;
   if (hasTime) return true;
 
   // Facebook may render the visible "3h" as a tiny link whose DOM text is
