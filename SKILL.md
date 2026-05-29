@@ -83,7 +83,8 @@ Run all commands from the skill root.
 | Filter local library | `python3 scripts/filter_posts.py --config config/settings.yaml ...` |
 | Filter and sync | `python3 scripts/filter_posts.py --config config/settings.yaml ... --sync` |
 | Prepare raw OpenCLI capture | `python3 scripts/prepare_capture_result.py --input <raw.json> --output <prepared.json> --target-date YYMMDD` |
-| Fetch article material | `python3 scripts/enrich_article_summaries.py --input <prepared.json> --output <with_article_material.json>` |
+| Detail enrichment | `node scripts/opencli_enrich_post_details.mjs --input <prepared.json> --output <detail_enriched.json> --target-date YYMMDD` |
+| Fetch article material | `python3 scripts/enrich_article_summaries.py --input <detail_enriched.json> --output <with_article_material.json>` |
 | Apply Codex Chinese summaries | `python3 scripts/apply_article_summaries.py --input <with_article_material.json> --summaries <summaries.json> --output <ready.json>` |
 | Local acceptance test | `python3 tests/test_local_pipeline.py` |
 
@@ -154,7 +155,8 @@ Configured source/output documents:
 - Source/read-only account workbook: `source_spreadsheet_url`
 - Output/write workbook: `output_spreadsheet_url`
 - Current output sheet id: `44013b`
-- Current output columns are the Feishu A-K headers: `账号`, `账户类型`, `帖子链接`, `帖子类型`, `发帖时间`, `文章链接`, `故事概要`, `互动数据（点赞量）`, `浏览量`, `是否采用`, `对应站内链接`.
+- Current output columns are the Feishu A-K headers from `feishu.field_schema.output_headers`: `账号`, `账户类型`, `帖子链接`, `帖子类型`, `发帖时间`, `文章链接`, `故事概要`, `互动数据（点赞量）`, `浏览量`, `是否采用`, `对应站内链接`.
+- `scripts/field_schema.py` owns output header aliases, account-sheet header roles, and output row ordering. Do not create another Feishu row mapping in a separate script.
 - Never write to the source account workbook.
 
 Before real sync:
@@ -180,14 +182,12 @@ First stage only:
 
 Do not implement article generation, site publishing, FB lead-post generation, subagent chaining, or hot-theme similarity matching in this stage.
 
-## Userscript Research Boundary
-
-Public userscripts under `research/userscripts` are research references only. Do not install or run them in the business profile as part of this skill.
-
-Adopted ideas are implemented in project-owned code:
+## Project-Owned Extractors
 
 - `scripts/fb_dom_extractors.js`: visible DOM post-link, timestamp, external-link, and engagement extraction.
 - `scripts/opencli_extract_current_tab.mjs`: syntax-checkable reference for the current-tab route. Actual live execution should use the OpenCLI Browser Bridge runtime.
+- `scripts/opencli_enrich_post_details.mjs`: post detail exact-time, comment/reply expansion, lead-link resolution, target-date filtering, and ready/needs-enrichment status updates.
+- `scripts/field_schema.py`: Feishu A-K output format and account/source sheet header aliases.
 - OpenCLI's built-in Facebook adapter is a browser/connectivity dependency and research reference; do not use its generic `facebook feed` columns as this project's final business contract.
 
 ## Cross-platform Runtime Detection

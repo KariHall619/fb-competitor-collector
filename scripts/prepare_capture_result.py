@@ -16,6 +16,7 @@ from models import (
     canonicalize_post_url,
     comment_lead_landing_url,
     facebook_link_kind,
+    has_qualified_comment_lead_link,
     is_external_landing_url,
     normalize_posted_at,
     parse_count,
@@ -60,8 +61,7 @@ def output_status_for(record: dict[str, Any]) -> str:
             record.get("time_confirmed"),
             record.get("story_summary"),
             record.get("summary_source") == "article",
-            record.get("lead_link_status") == "qualified",
-            record.get("landing_url") or record.get("article_url"),
+            has_qualified_comment_lead_link(record),
         ]
     )
     return "ready_for_output" if required_ok else "needs_enrichment"

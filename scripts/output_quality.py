@@ -5,7 +5,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from models import ESTIMATED_TIME_SOURCES
+from models import COMMENT_LEAD_SOURCES, ESTIMATED_TIME_SOURCES
+
+
+def has_qualified_comment_lead_link(post: dict[str, Any]) -> bool:
+    return (
+        post.get("lead_link_status") == "qualified"
+        and post.get("lead_link_source") in COMMENT_LEAD_SOURCES
+        and bool(post.get("landing_url") or post.get("article_url"))
+    )
 
 
 def output_quality_errors(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -18,7 +26,7 @@ def output_quality_errors(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
             row_errors.append("estimated_relative_time_not_allowed")
         if post.get("summary_source") != "article" or not post.get("story_summary"):
             row_errors.append("missing_article_summary")
-        if post.get("lead_link_status") != "qualified" or not (post.get("landing_url") or post.get("article_url")):
+        if not has_qualified_comment_lead_link(post):
             row_errors.append("missing_qualified_comment_lead_link")
         if row_errors:
             errors.append(

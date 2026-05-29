@@ -58,6 +58,8 @@ If the environment check says OpenCLI or Browser Bridge is not ready, stop and f
 
 If the page shows a login prompt, visitor preview, or only one preview post, stop immediately with `human_intervention_required`. The operator must manually log in or confirm the Chrome profile before retrying. Do not keep scrolling, import, or sync from that state.
 
+For "today's posts" on a Facebook page, always reload/open the account homepage from the top and collect posts in visible homepage time order until the current-day boundary is covered. Do not continue from a previously low scroll position: Facebook virtualizes the feed DOM, so continuing from the current low position can omit newer posts above it. When the business user provides visible labels such as `38m, 1h, 2h ... 17h`, treat that sequence as the coverage checklist and open each post detail/comment area to find the account's comment or reply lead link.
+
 ## OpenCLI Browser Bridge Troubleshooting
 
 Use these checks when Codex cannot verify exact Facebook time from the normal Chrome tab:
@@ -122,7 +124,7 @@ python3 scripts/import_existing_result.py \
 ```
 
 Important: write only to the output workbook `FB竞品帖子链接`. The account source workbook is read-only for this tool.
-The current output workbook uses A-K columns: `账号`, `账户类型`, `帖子链接`, `帖子类型`, `发帖时间`, `文章链接`, `故事概要`, `互动数据（点赞量）`, `浏览量`, `是否采用`, `对应站内链接`.
+The current output workbook uses A-K columns from `feishu.field_schema.output_headers`: `账号`, `账户类型`, `帖子链接`, `帖子类型`, `发帖时间`, `文章链接`, `故事概要`, `互动数据（点赞量）`, `浏览量`, `是否采用`, `对应站内链接`. `scripts/field_schema.py` is the single code source for those columns and known header aliases.
 
 Before syncing live FB capture results, the quality gate requires:
 
@@ -155,11 +157,20 @@ python3 scripts/prepare_capture_result.py \
   --target-date 260527
 ```
 
+Open each prepared candidate detail page, confirm exact time, and capture the comment/reply lead link:
+
+```bash
+node scripts/opencli_enrich_post_details.mjs \
+  --input exports/prepared.json \
+  --output exports/detail_enriched.json \
+  --target-date 260527
+```
+
 Attach article material for Codex summarization:
 
 ```bash
 python3 scripts/enrich_article_summaries.py \
-  --input exports/prepared.json \
+  --input exports/detail_enriched.json \
   --output exports/with_article_material.json
 ```
 
@@ -218,7 +229,10 @@ python3 scripts/filter_posts.py \
 python3 tests/test_local_pipeline.py
 PYTHONPYCACHEPREFIX=/private/tmp/fb-competitor-pycache python3 -m py_compile scripts/*.py tests/test_local_pipeline.py
 node -c scripts/fb_dom_extractors.js
+node -c scripts/check_opencli_runtime_backend.mjs
+node -c scripts/opencli_enrich_post_details.mjs
 node -c scripts/opencli_extract_current_tab.mjs
+node -c scripts/opencli_runtime.mjs
 node -c scripts/opencli_verify_exact_time.mjs
 ```
 

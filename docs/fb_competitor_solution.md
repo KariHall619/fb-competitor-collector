@@ -42,8 +42,6 @@
 fb-competitor-collector/
   SKILL.md
   README_FOR_OPERATOR.md
-  agents/
-    openai.yaml
   config/
     settings.yaml
     settings.yaml.example
@@ -56,13 +54,21 @@ fb-competitor-collector/
     sample_posts_13_with_duplicates.json
   scripts/
     check_env.py
-    opencli_extract_current_tab.mjs
+    check_opencli_runtime_backend.mjs
     config_loader.py
     fb_dom_extractors.js
+    fb_time_extractors.js
+    field_schema.py
     filter_posts.py
     import_existing_result.py
     lark_io.py
     models.py
+    opencli_enrich_post_details.mjs
+    opencli_extract_current_tab.mjs
+    opencli_runtime.mjs
+    opencli_verify_exact_time.mjs
+    output_quality.py
+    prepare_capture_result.py
     read_accounts.py
     store.py
     sync_feishu.py
@@ -96,6 +102,19 @@ feishu:
     daily_new: "44013b"
     filter_result: "44013b"
     errors: "异常记录"
+  field_schema:
+    output_headers:
+      - "账号"
+      - "账户类型"
+      - "帖子链接"
+      - "帖子类型"
+      - "发帖时间"
+      - "文章链接"
+      - "故事概要"
+      - "互动数据（点赞量）"
+      - "浏览量"
+      - "是否采用"
+      - "对应站内链接"
 
 crawl:
   initial_days: 30
@@ -113,7 +132,8 @@ filters:
 
 1. 不保存密码、cookie、token；
 2. `lark_cli_path: auto` 和 `opencli_path: auto` 会按当前系统自动解析 Mac/Windows 路径；OpenCLI 优先使用全局命令，缺失时可通过 `npx -y @jackwener/opencli` 运行；
-3. 账号来源表和输出表必须分开。
+3. 账号来源表和输出表必须分开；
+4. 飞书输出列以 `feishu.field_schema.output_headers` 和 `scripts/field_schema.py` 为准，不在导入、筛选、同步脚本里重复写一套列顺序。
 
 如果 Windows 业务机没有把 `lark-cli.cmd` 放进 PATH，只需要在 `platform_overrides.windows.lark_cli_path` 写入完整安装路径。
 
@@ -122,11 +142,12 @@ filters:
 使用 `lark-cli` 读写飞书普通表格：
 
 1. `scripts/read_accounts.py` 读取账号来源表；
-2. `scripts/lark_io.py` 统一封装读写；
-3. 写入前调用 `lark-cli auth status`，必须满足：
+2. `scripts/field_schema.py` 识别账号来源表里的竞品/内部/通用账号列；
+3. `scripts/lark_io.py` 统一封装读写；
+4. 写入前调用 `lark-cli auth status`，必须满足：
    - `identity=user`
    - `tokenStatus=valid`
-4. 项目要求：
+5. 项目要求：
    - `lark-cli config default-as user`
    - `lark-cli config strict-mode user`
 
@@ -146,8 +167,11 @@ filters:
 3. claim 该标签页；
 4. 在页面内执行 `scripts/fb_dom_extractors.js` 的 DOM 提取逻辑；
 5. 过滤掉登录页、空白动态壳、评论片段和无正文候选；
-6. 得到帖子链接、文章链接、正文/概要、时间文本、互动文本；
-7. 标准化后入库。
+6. 得到帖子链接、候选文章链接、正文、相对时间文本、互动文本；
+7. `prepare_capture_result.py` 标准化候选并保留 `needs_enrichment`；
+8. `opencli_enrich_post_details.mjs` 打开候选详情页，确认精确时间、评论/回复引流链接和目标日期；
+9. `enrich_article_summaries.py` 抓取落地页材料，`apply_article_summaries.py` 写入 Codex 中文摘要；
+10. 只有 `output_quality.py` 判定为 `ready_for_output` 的记录才允许同步飞书。
 
 采集阶段不得因为链接形态过早丢弃内容。`/posts/`、`story.php`、`permalink.php`、`reel`、`photo.php`、`watch`、`videos` 都先作为 FB 内容候选保存。父帖链接只作为优先去重依据；抓不到父帖时保留原始内容链接，后续再做相似度/人工复核去重。
 
@@ -176,6 +200,9 @@ filters:
 4. 在人工确认能连续看到多条帖子前，不入库、不同步飞书。
 
 `scripts/opencli_extract_current_tab.mjs` 是该路线的可检查参考脚本。实际运行时应由 OpenCLI Browser Bridge runtime 控制当前标签页。
+`scripts/opencli_runtime.mjs` 统一封装 OpenCLI 命令解析、session bind、tab 选择和页面 eval。
+`scripts/check_opencli_runtime_backend.mjs` 只检查 OpenCLI CLI/daemon/Browser Bridge 是否可用，不替代业务采集。
+`scripts/opencli_verify_exact_time.mjs` 是真实 Facebook tab 上的精确时间验证器，输出 `status=exact_time_confirmed` 才代表时间链路可用。
 
 ## 7. 数据库设计
 
@@ -198,7 +225,10 @@ source_skill
 note
 engagement_raw
 crawl_status
+output_status
 time_confirmed
+time_source
+summary_source
 coverage_note
 first_seen_at
 last_seen_at
@@ -230,12 +260,21 @@ raw_payload
 对应站内链接
 ```
 
+`scripts/field_schema.py` 是输出格式的唯一代码来源。它负责：
+
+1. A-K 默认表头；
+2. 表头别名到内部字段的映射；
+3. `competitor/internal` 到 `竞品/内部` 的输出转换；
+4. 互动数据汇总；
+5. 账号来源表中竞品、内部、通用账号列的识别。
+
 输出规则：
 
 1. 新增内容追加到输出表；
 2. 筛选结果覆盖写入指定结果区域或同一 sheet；
 3. 互动数据不可见时留空；
 4. 不向账号来源表写入任何结果数据。
+5. `relative_estimated`、`relative_hour`、`relative_label` 这类估算时间不能进入正式同步。
 
 ## 9. 常用执行路径
 
@@ -257,6 +296,25 @@ python3 scripts/read_accounts.py --config config/settings.yaml
 python3 scripts/import_existing_result.py --config config/settings.yaml --input samples/sample_posts.json --no-sync
 ```
 
+准备 OpenCLI 首页采集结果：
+
+```bash
+python3 scripts/prepare_capture_result.py --input exports/raw.json --output exports/prepared.json --target-date 260529
+```
+
+详情补全：
+
+```bash
+node scripts/opencli_enrich_post_details.mjs --input exports/prepared.json --output exports/detail_enriched.json --target-date 260529
+```
+
+文章材料和中文摘要：
+
+```bash
+python3 scripts/enrich_article_summaries.py --input exports/detail_enriched.json --output exports/with_article_material.json
+python3 scripts/apply_article_summaries.py --input exports/with_article_material.json --summaries exports/article_summaries.json --output exports/ready.json
+```
+
 筛选：
 
 ```bash
@@ -276,11 +334,12 @@ python3 scripts/filter_posts.py --config config/settings.yaml --date 260521 --ac
 3. 确认页面上能看到真实帖子列表和帖子正文；
 4. 在 Codex 中说：“使用 FB 竞品采集 skill，采集当前 Chrome 页面里可见的帖子，并同步到飞书”；
 5. Codex 执行环境检查；
-6. Codex 读取当前页面；
-7. Codex 汇总提取结果，让操作者确认是否合理；
-8. Codex 入库去重；
-9. Codex 写入飞书输出表；
-10. Codex 返回新增数、重复数、异常数和飞书写入结果。
+6. Codex 读取当前主页候选，并用 `3h/12h/1d` 等相对时间决定候选窗口；
+7. Codex 打开候选帖子详情页，确认精确 `posted_at`、评论/回复引流链接和落地页；
+8. Codex 基于落地页材料生成或应用中文故事概要；
+9. Codex 入库去重，字段不完整的候选保留为 `needs_enrichment`；
+10. Codex 只把 `ready_for_output` 且符合 A-K 表格格式的记录写入飞书输出表；
+11. Codex 返回新增数、重复数、异常数、跳过补全数和飞书写入结果。
 
 ## 11. Mac/Windows 迁移
 
@@ -304,8 +363,10 @@ Mac 当前阶段必须通过：
 6. 重复导入同一帖子不会新增重复行；
 7. 能按日期和账号类型筛选；
 8. 能 dry-run 写入正确输出表；
-9. 浏览量/点赞量缺失时不阻塞；
-10. 插件不可用或页面没有真实帖子时停止。
+9. A-K 输出列顺序和 `feishu.field_schema.output_headers` 一致；
+10. 浏览量/点赞量缺失时不阻塞本地入库；
+11. 估算时间、缺评论/回复引流链接、缺文章摘要的记录不会同步正式飞书输出；
+12. 插件不可用或页面没有真实帖子时停止。
 
 Windows 交付前补齐：
 

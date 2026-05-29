@@ -9,6 +9,8 @@ from datetime import datetime
 from urllib.parse import parse_qs, urlencode, unquote, urlparse, urlunparse
 from typing import Any
 
+from field_schema import DEFAULT_OUTPUT_HEADERS, output_row_for_headers
+
 
 POST_URL_KEYS = ("post_url", "fb_post_url", "Facebook帖子链接", "帖子链接")
 ARTICLE_URL_KEYS = ("article_url", "landing_url", "comment_article_url", "文章链接")
@@ -141,7 +143,7 @@ def canonicalize_post_url(value: Any) -> str:
             return f"https://facebook.com/reel/{parts[idx + 1]}"
     if "watch" in parts and qs.get("v"):
         return f"https://facebook.com/watch/{qs['v'][0]}"
-    if "photo.php" in path and story_fbid:
+    if ("photo.php" in path or parts == ["photo"]) and story_fbid:
         return f"https://facebook.com/photo/{story_fbid}"
 
     return urlunparse(("https", netloc or "facebook.com", path, "", "", ""))
@@ -255,6 +257,14 @@ def comment_lead_landing_url(lead_url_raw: Any, lead_link_source: Any) -> str:
     return cleaned if is_external_landing_url(cleaned) else ""
 
 
+def has_qualified_comment_lead_link(post: dict[str, Any]) -> bool:
+    return (
+        post.get("lead_link_status") == "qualified"
+        and post.get("lead_link_source") in COMMENT_LEAD_SOURCES
+        and bool(post.get("landing_url") or post.get("article_url"))
+    )
+
+
 def normalize_date(value: Any) -> str:
     if value in (None, ""):
         return ""
@@ -362,6 +372,8 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
     post_url = parent_post_url or clean_post_url(raw_post_url)
     raw_fb_url = clean_post_url(raw.get("raw_fb_url") or raw_post_url)
     canonical_post_url = raw.get("canonical_post_url") or canonicalize_post_url(parent_post_url or raw_fb_url or post_url)
+    if canonical_post_url == "https://facebook.com/photo":
+        canonical_post_url = canonicalize_post_url(parent_post_url or raw_fb_url or post_url)
     lead_url_raw = clean_article_url(raw.get("lead_url_raw") or raw.get("comment_article_url") or "")
     lead_link_source = raw.get("lead_link_source") or ""
     lead_link_status = raw.get("lead_link_status") or ""
@@ -431,8 +443,7 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
                 post.get("time_confirmed"),
                 post.get("story_summary"),
                 post.get("summary_source") == "article",
-                post.get("lead_link_status") == "qualified",
-                post.get("landing_url") or post.get("article_url"),
+                has_qualified_comment_lead_link(post),
             ]
         )
         post["output_status"] = "ready_for_output" if required_ok else "needs_enrichment"
@@ -463,50 +474,8 @@ def feishu_row(post: dict[str, Any], extra: dict[str, Any] | None = None) -> lis
     return row
 
 
-POST_HEADERS = [
-    "账号",
-    "账户类型",
-    "帖子链接",
-    "帖子类型",
-    "发帖时间",
-    "文章链接",
-    "故事概要",
-    "互动数据（点赞量）",
-    "浏览量",
-    "是否采用",
-    "对应站内链接",
-]
-
-
-def output_account_type(value: Any) -> str:
-    text = str(value or "").strip()
-    if text == "competitor":
-        return "竞品"
-    if text == "internal":
-        return "内部"
-    return text
+POST_HEADERS = DEFAULT_OUTPUT_HEADERS
 
 
 def output_row(post: dict[str, Any]) -> list[Any]:
-    parts = []
-    if post.get("likes") is not None:
-        parts.append(f"点赞量：{post.get('likes')}")
-    if post.get("comments") is not None:
-        parts.append(f"评论数：{post.get('comments')}")
-    if post.get("shares") is not None:
-        parts.append(f"分享数：{post.get('shares')}")
-    engagement = "；".join(parts) or post.get("engagement_raw") or ""
-    account = post.get("account_name") or post.get("account_url") or ""
-    return [
-        account,
-        output_account_type(post.get("account_type")),
-        post.get("post_url") or post.get("raw_fb_url", ""),
-        post.get("post_type", ""),
-        post.get("posted_at") or post.get("posted_date", ""),
-        post.get("landing_url") or post.get("article_url", ""),
-        post.get("story_summary", ""),
-        engagement,
-        post.get("views") if post.get("views") is not None else "",
-        "",
-        "",
-    ]
+    return output_row_for_headers(post, POST_HEADERS)

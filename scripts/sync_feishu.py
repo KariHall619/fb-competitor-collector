@@ -7,8 +7,8 @@ import argparse
 from typing import Any
 
 from config_loader import load_config
+from field_schema import configured_output_headers, output_row_for_headers
 from lark_io import write_rows
-from models import POST_HEADERS, output_row
 from output_quality import output_quality_errors, ready_for_output
 from store import all_posts, connect
 
@@ -26,8 +26,9 @@ def sync_posts(config: dict[str, Any], posts: list[dict[str, Any]], sheet_key: s
             "ready_for_output": 0,
             "needs_enrichment_skipped": len(skipped_posts),
         }
-    rows = [output_row(post) for post in ready_posts]
-    headers = POST_HEADERS if mode == "overwrite" else None
+    output_headers = configured_output_headers(config)
+    rows = [output_row_for_headers(post, output_headers) for post in ready_posts]
+    headers = output_headers if mode == "overwrite" else None
     result = write_rows(config, sheet_key, rows, headers=headers, mode=mode, dry_run=dry_run)
     result["ready_for_output"] = len(ready_posts)
     result["needs_enrichment_skipped"] = len(skipped_posts)

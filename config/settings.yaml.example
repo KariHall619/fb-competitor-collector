@@ -35,6 +35,19 @@ feishu:
     daily_new: overwrite
     filter_result: overwrite
     errors: append
+  field_schema:
+    output_headers:
+      - "账号"
+      - "账户类型"
+      - "帖子链接"
+      - "帖子类型"
+      - "发帖时间"
+      - "文章链接"
+      - "故事概要"
+      - "互动数据（点赞量）"
+      - "浏览量"
+      - "是否采用"
+      - "对应站内链接"
 
 crawl:
   initial_days: 30

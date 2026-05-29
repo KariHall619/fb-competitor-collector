@@ -36,6 +36,10 @@ def assert_url_canonicalization() -> None:
         canonicalize_post_url("https://www.facebook.com/photo.php?fbid=789&set=a.123")
         == "https://facebook.com/photo/789"
     )
+    assert (
+        canonicalize_post_url("https://www.facebook.com/photo/?fbid=790&set=a.123")
+        == "https://facebook.com/photo/790"
+    )
 
 
 def assert_mobile_dom_extractor_can_see_story_links() -> None:
@@ -646,6 +650,59 @@ def assert_comments_and_shares_are_output_as_engagement() -> None:
     assert row[8] == 1200
 
 
+def assert_field_schema_controls_output_rows() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from field_schema import (
+        account_column_roles,
+        configured_output_headers,
+        normalize_account_type,
+        output_row_for_headers,
+    )
+
+    post = {
+        "account_name": "Story Hub",
+        "account_type": "competitor",
+        "post_url": "https://facebook.com/story/posts/1",
+        "post_type": "文本",
+        "posted_at": "2026年5月28日 13:00",
+        "time_source": "relative_estimated",
+        "landing_url": "https://story.example/article",
+        "story_summary": "文章概要",
+        "likes": 81,
+        "comments": 29,
+        "shares": 3,
+        "views": 120000,
+    }
+    headers = ["文章链接", "账号", "账户类型", "发帖时间", "互动数据（点赞量）", "浏览量"]
+    row = output_row_for_headers(post, headers)
+    assert row == [
+        "https://story.example/article",
+        "Story Hub",
+        "竞品",
+        "约2026年5月28日 13:00",
+        "点赞量：81；评论数：29；分享数：3",
+        120000,
+    ]
+    assert configured_output_headers({"feishu": {"field_schema": {"output_headers": ["账号", "帖子链接"]}}}) == ["账号", "帖子链接"]
+    assert account_column_roles(["竞品fb账户", "内部FB账户"]) == {0: "competitor", 1: "internal"}
+    assert normalize_account_type("内部主页") == "internal"
+    assert normalize_account_type("竞品账号") == "competitor"
+
+
+def assert_generic_photo_canonical_is_recomputed() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+
+    post = normalize_post(
+        {
+            "post_url": "https://facebook.com/photo/?fbid=790",
+            "canonical_post_url": "https://facebook.com/photo",
+        },
+        {},
+    )
+    assert post["canonical_post_url"] == "https://facebook.com/photo/790"
+
+
 def assert_comment_lead_link_overrides_ad_links(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
@@ -1249,6 +1306,8 @@ def main() -> int:
     assert_url_canonicalization()
     assert_exact_time_parsing_and_no_relative_time_estimation()
     assert_comments_and_shares_are_output_as_engagement()
+    assert_field_schema_controls_output_rows()
+    assert_generic_photo_canonical_is_recomputed()
     assert_mobile_dom_extractor_can_see_story_links()
     assert_dom_extractor_does_not_treat_story_clock_as_post_time()
     assert_dom_extractor_excludes_profile_shell_with_external_link()

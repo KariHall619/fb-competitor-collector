@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from config_loader import load_config
-from models import normalize_post, output_row
+from field_schema import configured_output_headers, output_row_for_headers
+from models import normalize_post
 from output_quality import output_quality_errors
 from store import connect, mark_output_synced, upsert_posts
 from lark_io import write_rows
@@ -136,7 +137,8 @@ def main() -> int:
                 )
             )
             return 1
-        rows = [output_row(post) for post in ready_posts]
+        headers = configured_output_headers(config)
+        rows = [output_row_for_headers(post, headers) for post in ready_posts]
         sync_result = write_rows(
             config,
             "all_posts",

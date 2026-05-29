@@ -470,6 +470,7 @@ function outputStatusFor(post) {
     && post.story_summary
     && post.summary_source === "article"
     && post.lead_link_status === "qualified"
+    && ["comment", "comment_reply"].includes(post.lead_link_source || "")
     && (post.landing_url || post.article_url)
   );
   return requiredOk ? "ready_for_output" : "needs_enrichment";

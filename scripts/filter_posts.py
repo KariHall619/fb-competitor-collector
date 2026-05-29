@@ -8,8 +8,9 @@ import json
 from typing import Any
 
 from config_loader import deep_get, load_config
+from field_schema import configured_output_headers, output_row_for_headers
 from lark_io import write_rows
-from models import POST_HEADERS, normalize_date, output_row
+from models import normalize_date
 from output_quality import output_quality_errors, ready_for_output
 from store import connect, query_posts
 
@@ -63,7 +64,7 @@ def main() -> int:
     ) or "all"
     print(json.dumps({"count": len(posts), "hit_rule": hit_rule}, ensure_ascii=False, indent=2))
     if args.sync:
-        headers = POST_HEADERS
+        headers = configured_output_headers(config)
         ready_posts, skipped_posts = ready_for_output(posts)
         errors = output_quality_errors(ready_posts)
         if errors:
@@ -98,7 +99,7 @@ def main() -> int:
                 )
             )
             return 1
-        rows = [output_row(post) for post in ready_posts]
+        rows = [output_row_for_headers(post, headers) for post in ready_posts]
         result = write_rows(
             config,
             "filter_result",

@@ -212,3 +212,20 @@ Sheet id: 44013b
 10. 能按日期和账号类型筛选；
 11. 浏览量/点赞量缺失时不阻塞流程；
 12. 插件不可用或页面不可见真实帖子时停止，不写假结果。
+
+## 11. 当前实现事实
+
+当前正式实时采集入口是 OpenCLI Browser Bridge，不保留 Codex Chrome Extension 或其他浏览器实时采集入口。OpenCLI 只负责浏览器连接、tab 绑定、页面 eval、滚动、hover 和详情页打开；Facebook 业务字段仍由项目内脚本决定。
+
+项目内主要脚本职责：
+
+1. `scripts/check_env.py`：检查平台、`lark-cli`、OpenCLI CLI/daemon/Browser Bridge、飞书读写配置和推荐采集路线；
+2. `scripts/read_accounts.py`：从飞书账号来源表读取竞品/内部账号，支持竞品列、内部列和通用账号列；
+3. `scripts/opencli_extract_current_tab.mjs`：当前 Chrome Facebook tab 首页候选提取参考入口；
+4. `scripts/prepare_capture_result.py`：把首页候选标准化，保留短帖、媒体链接和缺字段候选为 `needs_enrichment`；
+5. `scripts/opencli_enrich_post_details.mjs`：打开候选详情页，确认精确时间，展开评论/回复，解析账号自发引流链接，并按目标日期过滤；
+6. `scripts/enrich_article_summaries.py` 与 `scripts/apply_article_summaries.py`：基于落地页材料生成或应用中文概要；
+7. `scripts/output_quality.py`：最终输出质量门禁；
+8. `scripts/field_schema.py`：飞书 A-K 输出列、表头别名和账号来源表表头识别。
+
+当前飞书输出表使用 A-K 列：`账号`, `账户类型`, `帖子链接`, `帖子类型`, `发帖时间`, `文章链接`, `故事概要`, `互动数据（点赞量）`, `浏览量`, `是否采用`, `对应站内链接`。这个顺序写在 `config/settings.yaml` 的 `feishu.field_schema.output_headers`，代码实现以 `scripts/field_schema.py` 为准。
