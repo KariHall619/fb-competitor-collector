@@ -14,6 +14,7 @@ from models import (
     clean_article_url,
     clean_post_url,
     canonicalize_post_url,
+    comment_lead_landing_url,
     facebook_link_kind,
     is_external_landing_url,
     normalize_posted_at,
@@ -143,12 +144,15 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
     if not post_url or not canonical:
         return None, "missing_post_url"
 
-    landing_url = clean_article_url(raw.get("landing_url") or raw.get("article_url"))
     lead_url_raw = clean_article_url(raw.get("lead_url_raw") or raw.get("comment_article_url") or "")
-    article_url = landing_url
     lead_link_source = raw.get("lead_link_source") or ""
     lead_link_status = raw.get("lead_link_status") or ""
-    if lead_link_status != "qualified" and lead_url_raw and lead_link_source in {"comment", "comment_reply"} and is_external_landing_url(landing_url):
+    comment_landing_url = comment_lead_landing_url(lead_url_raw, lead_link_source)
+    landing_url = comment_landing_url or clean_article_url(raw.get("landing_url") or raw.get("article_url"))
+    article_url = landing_url
+    if comment_landing_url:
+        lead_link_status = "qualified"
+    elif lead_link_status != "qualified" and lead_url_raw and lead_link_source in {"comment", "comment_reply"} and is_external_landing_url(landing_url):
         lead_link_status = "qualified"
     relative_time = str(raw.get("relative_time_text") or raw.get("post_time_text") or "").strip()
     posted_at = normalize_posted_at(raw.get("posted_at") or raw.get("posted_at_raw") or "")

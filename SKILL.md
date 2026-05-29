@@ -8,7 +8,10 @@ description: Use when a business user wants to collect visible Facebook competit
 This skill turns business-language requests into the first-stage FB competitor workflow:
 
 ```text
-Chrome 已登录页面可见内容 -> 提取帖子 -> 标准化 -> SQLite 去重入库 -> 飞书同步 -> 条件筛选
+Chrome 已登录主页可见内容
+-> 用 3h/12h/1d 等相对时间确定候选窗口
+-> 打开候选帖子详情页确认精确发帖时间和评论引流链接
+-> 标准化 -> SQLite 去重入库 -> 飞书同步 -> 条件筛选
 ```
 
 Keep the user-facing interaction in natural language. Do not ask business users to run shell commands unless they explicitly want commands.
@@ -43,7 +46,8 @@ Map common requests as follows:
   - Run the environment check first.
   - Use `scripts/read_accounts.py` if the first account URL is needed from Feishu.
   - Ask the user to keep the target Facebook account page open in normal Chrome if no matching tab is available.
-  - Extract visible post candidates with `scripts/fb_dom_extractors.js`.
+  - Extract visible post candidates with `scripts/fb_dom_extractors.js`. Treat relative labels such as `3h`, `12h`, and `1d` as homepage candidate-window clues only.
+  - Open each candidate post detail page with OpenCLI Browser Bridge to confirm exact `posted_at`, expand comments/replies, and capture the account-owned lead link.
   - If extraction reports `capture_blocked`, `login_required`, or `visitor_preview`, stop immediately and ask for human intervention.
   - Import/sync only after extracted candidates are non-empty and plausible.
 
@@ -130,11 +134,12 @@ Rules:
 - Capture must keep `photo.php`, `/photo/`, `/reel/`, `/watch/`, and `/videos/` candidates. These are valid FB content candidates and must not be dropped just because a parent `/posts/` link is missing.
 - Parent post links are best-effort dedupe helpers. If a parent link is available, store it in `parent_post_url`; if not, keep the original `raw_fb_url` / `post_url` and leave later similarity review to a separate pass.
 - Formal output requires a lead link posted by the account in the comment area or a comment reply. The link must resolve outside Facebook/Meta and be stored as `landing_url`; set `lead_link_status=qualified`.
+- A comment/reply lead link already captured from the homepage or post comments is authoritative. Detail-page enrichment must not overwrite it with unrelated external links from right-column ads, suggested posts, feed ads, or other non-comment page surfaces.
 - Missing share count, parent post URL, exact time, summary, or lead link must not drop the candidate at capture time. Keep the candidate as `needs_enrichment`; only `ready_for_output` rows may sync to Feishu.
 - Do not sync live capture rows unless `posted_at` is confirmed at least to the hour, formatted like `2026年5月19日 17:00`.
 - Reject estimated relative-time sources such as `relative_estimated`, `relative_hour`, or `relative_label` during Feishu sync, even if a `posted_at` value is present.
 - Do not sync live capture rows whose story summary is copied from Facebook text. The summary must be a Chinese summary based on linked article material and marked `summary_source=article`.
-- Relative labels such as `19m`, `2h`, or `1d` are clues only. Do not convert them into `posted_at` for formal output. Confirm `posted_at` from Facebook's timestamp tooltip or DOM attributes such as `aria-label`, `title`, `datetime`, or `data-tooltip-*`.
+- Relative labels such as `19m`, `2h`, `12h`, or `1d` are homepage windowing clues only. Use them to decide which visible posts should be opened for detail enrichment and where the scroll boundary probably is. Do not convert them into `posted_at` for formal output. Confirm `posted_at` from Facebook's timestamp tooltip or DOM attributes such as `aria-label`, `title`, `datetime`, or `data-tooltip-*`.
 - Timestamp tooltip capture is automated by the skill. First try synthetic page hover through OpenCLI Browser Bridge; if Facebook does not show the tooltip, the skill may use OpenCLI Browser Bridge mouse movement as an automated fallback. Do not ask the business user to manually hover timestamps.
 - Human intervention is only for blocking states such as login expiry, visitor preview, CAPTCHA/risk control, the wrong Chrome profile, or a page where posts are not visibly loaded.
 - Before deleting any remaining relative-time fallback code, run the exact-time verifier against a real logged-in Facebook tab through the trusted OpenCLI Browser Bridge runtime and require `status=exact_time_confirmed`.
@@ -149,6 +154,7 @@ Configured source/output documents:
 - Source/read-only account workbook: `source_spreadsheet_url`
 - Output/write workbook: `output_spreadsheet_url`
 - Current output sheet id: `44013b`
+- Current output columns are the Feishu A-K headers: `账号`, `账户类型`, `帖子链接`, `帖子类型`, `发帖时间`, `文章链接`, `故事概要`, `互动数据（点赞量）`, `浏览量`, `是否采用`, `对应站内链接`.
 - Never write to the source account workbook.
 
 Before real sync:

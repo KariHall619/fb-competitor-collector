@@ -26,6 +26,7 @@ FACEBOOK_INTERNAL_HOSTS = {
     "www.messenger.com",
 }
 ESTIMATED_TIME_SOURCES = {"relative_hour", "relative_estimated", "relative_label"}
+COMMENT_LEAD_SOURCES = {"comment", "comment_reply"}
 RELATIVE_TIME_RE = re.compile(
     r"^(?:just now|yesterday|\d+\s*(?:m|min|h|hr|d|day|w|wk)|刚刚|\d+\s*分钟|\d+\s*小时|昨天|\d+\s*天|\d+\s*周)$",
     re.I,
@@ -239,6 +240,21 @@ def clean_article_url(value: Any) -> str:
     return urlunparse((parsed.scheme or "https", netloc, parsed.path, "", cleaned_query, ""))
 
 
+def comment_lead_landing_url(lead_url_raw: Any, lead_link_source: Any) -> str:
+    """Return the comment/reply lead URL when it is a real external landing page.
+
+    Facebook detail pages can contain unrelated right-column or feed ads. A link
+    found in the account's own comment/reply is more authoritative than generic
+    external links discovered elsewhere on the page.
+    """
+
+    source = str(lead_link_source or "").strip()
+    if source not in COMMENT_LEAD_SOURCES:
+        return ""
+    cleaned = clean_article_url(lead_url_raw)
+    return cleaned if is_external_landing_url(cleaned) else ""
+
+
 def normalize_date(value: Any) -> str:
     if value in (None, ""):
         return ""
@@ -346,12 +362,15 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
     post_url = parent_post_url or clean_post_url(raw_post_url)
     raw_fb_url = clean_post_url(raw.get("raw_fb_url") or raw_post_url)
     canonical_post_url = raw.get("canonical_post_url") or canonicalize_post_url(parent_post_url or raw_fb_url or post_url)
-    article_url = clean_article_url(first_value(raw, ARTICLE_URL_KEYS))
-    landing_url = clean_article_url(raw.get("landing_url") or article_url)
     lead_url_raw = clean_article_url(raw.get("lead_url_raw") or raw.get("comment_article_url") or "")
     lead_link_source = raw.get("lead_link_source") or ""
     lead_link_status = raw.get("lead_link_status") or ""
-    if lead_link_status != "qualified" and lead_url_raw and lead_link_source in {"comment", "comment_reply"} and is_external_landing_url(landing_url):
+    article_url = clean_article_url(first_value(raw, ARTICLE_URL_KEYS))
+    lead_landing_url = comment_lead_landing_url(lead_url_raw, lead_link_source)
+    landing_url = lead_landing_url or clean_article_url(raw.get("landing_url") or article_url)
+    if lead_landing_url:
+        article_url = lead_landing_url
+    if lead_link_status != "qualified" and lead_landing_url:
         lead_link_status = "qualified"
     story_summary = first_value(raw, SUMMARY_KEYS)
     posted_at = normalize_posted_at(first_value(raw, POSTED_AT_KEYS))
@@ -446,20 +465,30 @@ def feishu_row(post: dict[str, Any], extra: dict[str, Any] | None = None) -> lis
 
 POST_HEADERS = [
     "账号",
+    "账户类型",
     "帖子链接",
+    "帖子类型",
     "发帖时间",
     "文章链接",
     "故事概要",
-    "互动数据（浏览量、点赞量）",
+    "互动数据（点赞量）",
+    "浏览量",
     "是否采用",
     "对应站内链接",
 ]
 
 
+def output_account_type(value: Any) -> str:
+    text = str(value or "").strip()
+    if text == "competitor":
+        return "竞品"
+    if text == "internal":
+        return "内部"
+    return text
+
+
 def output_row(post: dict[str, Any]) -> list[Any]:
     parts = []
-    if post.get("views") is not None:
-        parts.append(f"浏览量：{post.get('views')}")
     if post.get("likes") is not None:
         parts.append(f"点赞量：{post.get('likes')}")
     if post.get("comments") is not None:
@@ -470,11 +499,14 @@ def output_row(post: dict[str, Any]) -> list[Any]:
     account = post.get("account_name") or post.get("account_url") or ""
     return [
         account,
+        output_account_type(post.get("account_type")),
         post.get("post_url") or post.get("raw_fb_url", ""),
+        post.get("post_type", ""),
         post.get("posted_at") or post.get("posted_date", ""),
         post.get("landing_url") or post.get("article_url", ""),
         post.get("story_summary", ""),
         engagement,
+        post.get("views") if post.get("views") is not None else "",
         "",
         "",
     ]

@@ -49,6 +49,8 @@ Supported route:
 ```text
 business user opens the visible Facebook page in normal Chrome
 -> OpenCLI Browser Bridge reads the current tab DOM
+-> homepage relative labels such as 3h/12h/1d define the candidate window
+-> each candidate post detail page confirms exact posted_at and comment lead link
 -> normalize -> SQLite dedupe -> Feishu sync
 ```
 
@@ -120,6 +122,7 @@ python3 scripts/import_existing_result.py \
 ```
 
 Important: write only to the output workbook `FB竞品帖子链接`. The account source workbook is read-only for this tool.
+The current output workbook uses A-K columns: `账号`, `账户类型`, `帖子链接`, `帖子类型`, `发帖时间`, `文章链接`, `故事概要`, `互动数据（点赞量）`, `浏览量`, `是否采用`, `对应站内链接`.
 
 Before syncing live FB capture results, the quality gate requires:
 
@@ -127,6 +130,7 @@ Before syncing live FB capture results, the quality gate requires:
 - `posted_at` must be confirmed from Facebook's exact timestamp tooltip or timestamp DOM attributes. Estimated relative-time sources such as `relative_estimated`, `relative_hour`, or `relative_label` are rejected at sync time.
 - Timestamp tooltip capture is automated. The skill first tries synthetic hover through the OpenCLI Browser Bridge, then can fall back to automated extension mouse movement. Operators should not manually hover timestamps except when debugging with Codex.
 - a lead link posted by the account in the comment area or a comment reply. The link must resolve to an external non-Facebook site and be stored as `landing_url` with `lead_link_status=qualified`.
+- The homepage/comment lead link is authoritative. If the post detail page also exposes unrelated right-column/feed ads, those ad links must not overwrite a previously captured comment/reply lead link.
 - story summary generated from the landing page/article, with `summary_source=article`
 - short posts are kept if they have a valid FB content URL, but remain `needs_enrichment` until lead link, landing URL, summary, and time are confirmed
 
@@ -140,7 +144,7 @@ Media handling rule:
 
 If a candidate has no share count, add a coverage warning. It may still be a valid post, and the detail enrichment step should continue to check comments/replies for lead links.
 
-Relative FB labels such as `19m`, `1h`, `16h`, or `1d` are stored only as `relative_time_text`. They are not converted into `posted_at` for formal output. `posted_at` must come from Facebook's exact timestamp tooltip or DOM attributes such as `aria-label`, `title`, `datetime`, or `data-tooltip-*`. The hover step is performed automatically by the skill; human intervention is reserved for login/risk-control/page-loading blockers.
+Relative FB labels such as `19m`, `1h`, `16h`, or `1d` are stored as `relative_time_text` and used to decide how far the homepage scroll should go. They are not converted into `posted_at` for formal output. `posted_at` must come from Facebook's exact timestamp tooltip or DOM attributes such as `aria-label`, `title`, `datetime`, or `data-tooltip-*`. The hover step is performed automatically by the skill; human intervention is reserved for login/risk-control/page-loading blockers.
 
 Prepare raw OpenCLI Browser Bridge capture output:
 
@@ -180,17 +184,22 @@ Passing output contains `status=exact_time_confirmed` and at least one `confirme
 
 ## Date Filtering Policy
 
-Facebook often shows relative labels on feed pages. The workflow therefore uses two layers:
+Facebook often shows relative labels on feed pages. The proven workflow uses two layers:
 
 - `posted_at`: hour-level or better time. This is the time field accepted for final Feishu output.
-- `relative_time_text`: visible label such as `1h` or `1d`. This remains a clue only and must not be used as the final output time.
+- `relative_time_text`: visible label such as `3h`, `12h`, or `1d`. This is the homepage candidate-window clue and must not be used as the final output time.
 
 For a specific calendar day request, the reliable process is:
 
-1. collect enough visible posts around the target day;
-2. open/detail-check each candidate when possible;
-3. keep records without hour-level time in local SQLite as `needs_enrichment`;
-4. sync only rows whose `posted_at` and article summary are confirmed.
+1. On the account homepage, scroll and collect visible posts while using relative labels to keep a broad candidate window around the target day. For "today", labels such as `3h` or `12h` are included; the first stable `1d` boundary is a stopping clue, not a final date proof.
+2. Preserve every plausible parent post/reel/photo/watch/video candidate; do not drop short-text posts at homepage capture time.
+3. Open each candidate detail page through OpenCLI Browser Bridge and confirm exact `posted_at` from tooltip/DOM time attributes.
+4. Expand comments/replies and prefer the account-owned comment/reply lead link. Resolve that link to the final external landing page.
+5. Generate the Chinese story summary from the resolved landing page/article, not from Facebook text and not from unrelated ad pages.
+6. Keep records without exact time, qualified lead link, or article summary in local SQLite as `needs_enrichment`.
+7. Sync only rows whose `posted_at`, qualified lead link, landing URL, and article summary are confirmed.
+
+In the GLAS Story validation run, several homepage labels that looked like "today" resolved to the previous calendar date after detail-page exact-time confirmation. This is expected and is why formal sync is gated on exact detail time rather than homepage relative labels.
 
 Dry-run example:
 

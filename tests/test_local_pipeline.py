@@ -608,12 +608,15 @@ if (!isLikelyHeaderTimeElement(midPageRelative, 739)) process.exit(6);
 
 def assert_comments_and_shares_are_output_as_engagement() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
-    from models import normalize_post, output_row
+    from models import POST_HEADERS, normalize_post, output_row
 
     post = normalize_post(
         {
             "post_url": "https://www.facebook.com/example/posts/engagement",
             "posted_at": "2026年5月27日 14:03",
+            "account_type": "competitor",
+            "post_type": "文本",
+            "views": "1.2K",
             "article_summary": "文章概要",
             "reactions": "81",
             "comments": "29",
@@ -621,9 +624,95 @@ def assert_comments_and_shares_are_output_as_engagement() -> None:
         }
     )
     row = output_row(post)
-    assert "点赞量：81" in row[5]
-    assert "评论数：29" in row[5]
-    assert "分享数：3" in row[5]
+    assert POST_HEADERS == [
+        "账号",
+        "账户类型",
+        "帖子链接",
+        "帖子类型",
+        "发帖时间",
+        "文章链接",
+        "故事概要",
+        "互动数据（点赞量）",
+        "浏览量",
+        "是否采用",
+        "对应站内链接",
+    ]
+    assert len(row) == len(POST_HEADERS)
+    assert row[1] == "竞品"
+    assert row[3] == "文本"
+    assert "点赞量：81" in row[7]
+    assert "评论数：29" in row[7]
+    assert "分享数：3" in row[7]
+    assert row[8] == 1200
+
+
+def assert_comment_lead_link_overrides_ad_links(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+
+    raw = tmp_path / "ad_polluted_raw.json"
+    prepared = tmp_path / "ad_polluted_prepared.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "post_url": "https://www.facebook.com/Glasstory89/posts/pfbid-story",
+                        "posted_at": "2026年5月29日 12:32",
+                        "time_source": "synthetic_hover_tooltip",
+                        "article_url": "https://www.proxy-cheap.com/?utm_source=facebook",
+                        "landing_url": "https://www.proxy-cheap.com/?utm_source=facebook",
+                        "lead_url_raw": "https://l.facebook.com/l.php?u=https%3A%2F%2Fkaylestore.net%2Fdoctors-gave-the-millionaires-son%2F%3Ffbclid%3Dabc",
+                        "lead_link_source": "comment",
+                        "article_summary": "富豪儿子被医生判定只剩数日生命，女孩揭开蓝色果汁背后的真相。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    result = run(
+        [
+            PYTHON,
+            "scripts/prepare_capture_result.py",
+            "--input",
+            str(raw),
+            "--output",
+            str(prepared),
+            "--target-date",
+            "260529",
+            "--account-name",
+            "GLAS Story",
+            "--account-url",
+            "https://www.facebook.com/Glasstory89",
+        ]
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(prepared.read_text(encoding="utf-8"))
+    post = data["posts"][0]
+    assert post["article_url"] == "https://kaylestore.net/doctors-gave-the-millionaires-son/"
+    assert post["landing_url"] == "https://kaylestore.net/doctors-gave-the-millionaires-son/"
+    assert post["lead_link_status"] == "qualified"
+    assert post["output_status"] == "ready_for_output"
+
+    normalized = normalize_post(
+        {
+            "post_url": "https://www.facebook.com/Glasstory89/posts/pfbid-story",
+            "posted_at": "2026年5月29日 12:32",
+            "time_source": "synthetic_hover_tooltip",
+            "time_confirmed": True,
+            "article_url": "https://www.shopify.com/free-trial?fbadid=1",
+            "landing_url": "https://www.shopify.com/free-trial?fbadid=1",
+            "lead_url_raw": "https://l.facebook.com/l.php?u=https%3A%2F%2Fkaylestore.net%2Fright-after-giving-birth%2F%3Ffbclid%3Dabc",
+            "lead_link_source": "comment_reply",
+            "article_summary": "产后母亲被女儿提醒有人要带走新生儿，秘密录音揭开婆婆计划。",
+        },
+        {"account_type": "competitor"},
+    )
+    assert normalized["article_url"] == "https://kaylestore.net/right-after-giving-birth/"
+    assert normalized["landing_url"] == "https://kaylestore.net/right-after-giving-birth/"
+    assert normalized["lead_link_status"] == "qualified"
 
 
 def assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path: Path) -> None:
@@ -979,6 +1068,18 @@ if (missing.ok || missing.status !== 'exact_time_not_found' || missing.confirmed
     assert no_run.stdout == ""
 
 
+def assert_opencli_detail_enrichment_supports_target_date_filter() -> None:
+    js = """
+import { dateKeyFromPostedAt } from './scripts/opencli_enrich_post_details.mjs';
+
+if (dateKeyFromPostedAt('2026年5月29日 12:32') !== '260529') process.exit(1);
+if (dateKeyFromPostedAt('2026年11月3日 01:05') !== '261103') process.exit(2);
+if (dateKeyFromPostedAt('3h') !== '') process.exit(3);
+"""
+    result = run(["node", "--input-type=module", "-e", js])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path: Path) -> None:
     raw = tmp_path / "photo_raw.json"
     prepared = tmp_path / "photo_prepared.json"
@@ -1206,8 +1307,10 @@ def main() -> int:
         assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path)
         assert_article_url_alone_does_not_qualify_lead_link(tmp_path)
         assert_filter_sync_applies_output_quality_gate(tmp_path)
+        assert_comment_lead_link_overrides_ad_links(tmp_path)
         assert_prepare_capture_has_no_base_time_argument()
         assert_exact_time_verifier_summary_contract()
+        assert_opencli_detail_enrichment_supports_target_date_filter()
         assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path)
         assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp_path)
         assert_article_material_extractor(tmp_path)

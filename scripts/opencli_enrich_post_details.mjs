@@ -10,6 +10,7 @@
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   evaluateInSession,
   extractArgs,
@@ -21,12 +22,14 @@ import {
 
 const require = createRequire(import.meta.url);
 const { browserExactTimeHelpersExpression } = require("./fb_time_extractors.js");
-const { value, has } = extractArgs();
+const PROCESS = globalThis.process || { argv: [], env: {} };
+const { value, has } = extractArgs(Array.isArray(PROCESS.argv) ? PROCESS.argv.slice(2) : []);
 
 const INPUT = value("--input");
 const OUTPUT = value("--output");
 const CONFIG = value("--config", "config/settings.yaml");
 const LIMIT = Number(value("--limit", "0"));
+const TARGET_DATE = value("--target-date", "");
 const ALLOW_REAL_MOUSE_HOVER = has("--allow-real-mouse-hover");
 const configuredLeadLink = readLeadLinkConfig(CONFIG);
 const COMMENT_EXPAND_ROUNDS = Number(value("--comment-expand-rounds", configuredLeadLink.commentExpandRounds));
@@ -36,10 +39,13 @@ const ALLOWED_DOMAINS = value("--allowed-domains", configuredLeadLink.allowedDom
   .split(",")
   .map((item) => item.trim().replace(/^www\./i, "").toLowerCase())
   .filter(Boolean);
+const CURRENT_FILE = fileURLToPath(import.meta.url);
+const INVOKED_FILE = PROCESS.argv?.[1] ? path.resolve(PROCESS.argv[1]) : "";
+const RUN_MAIN = CURRENT_FILE === INVOKED_FILE || has("--run");
 
-if (!INPUT || !OUTPUT) {
+if (RUN_MAIN && (!INPUT || !OUTPUT)) {
   console.error("Usage: opencli_enrich_post_details.mjs --input prepared.json --output enriched.json [--limit N]");
-  process.exitCode = 2;
+  if (globalThis.process) globalThis.process.exitCode = 2;
   throw new Error("missing required arguments");
 }
 
@@ -74,6 +80,13 @@ function readLeadLinkConfig(configPath) {
   } catch {
     return fallback;
   }
+}
+
+function dateKeyFromPostedAt(postedAt) {
+  const match = String(postedAt || "").match(/^(20\d\d)年(\d{1,2})月(\d{1,2})日\s+\d{2}:\d{2}$/);
+  if (!match) return "";
+  const [, year, month, day] = match;
+  return `${year.slice(2)}${month.padStart(2, "0")}${day.padStart(2, "0")}`;
 }
 
 async function evalPayload(context, js) {
@@ -318,6 +331,12 @@ function allowedLandingUrl(href) {
   }
 }
 
+function sameNormalizedUrl(left, right) {
+  const cleanLeft = cleanExternalUrl(left);
+  const cleanRight = cleanExternalUrl(right);
+  return Boolean(cleanLeft && cleanRight && cleanLeft === cleanRight);
+}
+
 async function resolveLandingUrl(href) {
   const cleaned = cleanExternalUrl(href);
   if (!cleaned) return "";
@@ -409,6 +428,40 @@ async function extractLeadLink(context, accountName = "") {
   };
 }
 
+function hasQualifiedLeadLink(post) {
+  return Boolean(
+    post.lead_link_status === "qualified"
+    && ["comment", "comment_reply"].includes(post.lead_link_source || "")
+    && post.lead_url_raw
+    && (post.landing_url || post.article_url)
+  );
+}
+
+async function resolvedExistingLeadLink(post) {
+  if (!hasQualifiedLeadLink(post)) return null;
+  const resolved = await resolveLandingUrl(post.lead_url_raw);
+  const current = post.landing_url || post.article_url || "";
+  const landingUrl = resolved || cleanExternalUrl(current);
+  if (!landingUrl) return null;
+  return {
+    status: "qualified",
+    lead_url_raw: post.lead_url_raw,
+    landing_url: landingUrl,
+    lead_link_source: post.lead_link_source,
+    owner_matched: true,
+    comment_excerpt: post.comment_lead_excerpt || "",
+    candidates: [],
+    preserved_existing: true,
+  };
+}
+
+function shouldReplaceLeadLink(post, leadLink) {
+  if (!leadLink || leadLink.status !== "qualified") return false;
+  if (!hasQualifiedLeadLink(post)) return true;
+  return sameNormalizedUrl(post.lead_url_raw, leadLink.lead_url_raw)
+    || sameNormalizedUrl(post.landing_url || post.article_url, leadLink.landing_url);
+}
+
 function outputStatusFor(post) {
   const requiredOk = Boolean(
     post.post_url
@@ -448,6 +501,7 @@ async function main() {
       if (exactTime.posted_at) {
         post.posted_at_raw = exactTime.posted_at_raw;
         post.posted_at = exactTime.posted_at;
+        post.posted_date = dateKeyFromPostedAt(exactTime.posted_at) || post.posted_date || "";
         post.time_source = exactTime.time_source;
         post.time_confirmed = true;
       }
@@ -457,8 +511,12 @@ async function main() {
         if (engagement.comments) post.comments = engagement.comments;
         if (engagement.shares) post.shares = engagement.shares;
       }
-      const leadLink = await extractLeadLink(context, post.account_name || "");
-      if (leadLink.status === "qualified") {
+      let leadLink = await extractLeadLink(context, post.account_name || "");
+      if (!shouldReplaceLeadLink(post, leadLink)) {
+        const preserved = await resolvedExistingLeadLink(post);
+        if (preserved) leadLink = preserved;
+      }
+      if (leadLink.status === "qualified" && shouldReplaceLeadLink(post, leadLink)) {
         post.lead_url_raw = leadLink.lead_url_raw;
         post.landing_url = leadLink.landing_url;
         post.article_url = leadLink.landing_url;
@@ -477,13 +535,38 @@ async function main() {
       if (context) await closePostTab(context);
     }
   }
+  if (TARGET_DATE) {
+    const kept = [];
+    const dateFilteredOut = [];
+    for (const post of posts) {
+      const exactDate = post.posted_date || dateKeyFromPostedAt(post.posted_at);
+      if (exactDate && exactDate !== TARGET_DATE) {
+        dateFilteredOut.push({
+          post_url: post.post_url,
+          posted_at: post.posted_at || "",
+          posted_date: exactDate,
+          target_date: TARGET_DATE,
+          reason: "outside_target_date_after_detail_enrichment",
+        });
+      } else {
+        kept.push(post);
+      }
+    }
+    payload.posts = kept;
+    payload.date_filtered_out = dateFilteredOut;
+    payload.input_after_date_filter = kept.length;
+  }
   payload.detail_enriched = enriched.length;
   payload.detail_enrichment_errors = errors;
   fs.writeFileSync(OUTPUT, JSON.stringify(payload, null, 2), "utf8");
   outputJson({ ok: true, route: "opencli_browser_bridge", enriched: enriched.length, errors: errors.length, output: OUTPUT });
 }
 
-main().catch((error) => {
-  outputJson({ ok: false, route: "opencli_browser_bridge", error: String(error.stack || error) });
-  process.exitCode = 1;
-});
+if (RUN_MAIN) {
+  main().catch((error) => {
+    outputJson({ ok: false, route: "opencli_browser_bridge", error: String(error.stack || error) });
+    if (globalThis.process) globalThis.process.exitCode = 1;
+  });
+}
+
+export { CURRENT_FILE, INVOKED_FILE, RUN_MAIN, dateKeyFromPostedAt };
