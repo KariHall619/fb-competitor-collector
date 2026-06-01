@@ -28,6 +28,11 @@ const SCROLL_PIXELS = Number(value("--scroll-pixels", "1400"));
 const CURRENT_FILE = fileURLToPath(import.meta.url);
 const INVOKED_FILE = process.argv?.[1] ? path.resolve(process.argv[1]) : "";
 const RUN_MAIN = CURRENT_FILE === INVOKED_FILE;
+const evalAccessStats = {
+  direct_tab: 0,
+  select_fallback: 0,
+  modes: new Set(),
+};
 
 function cleanUrl(value) {
   try {
@@ -82,6 +87,9 @@ async function evalPage(opencliCommand, session, tab, js) {
   if (!result.ok) {
     throw new Error(result.stderr || result.stdout || "OpenCLI eval failed");
   }
+  if (result.tab_access_mode) evalAccessStats.modes.add(result.tab_access_mode);
+  evalAccessStats.direct_tab += Number(result.direct_tab || 0);
+  evalAccessStats.select_fallback += Number(result.select_fallback || 0);
   return result.payload || {};
 }
 
@@ -218,9 +226,9 @@ async function main() {
     route: "opencli_browser_bridge",
     opencli_command: opencliCommand,
     opencli_session: session,
-    tab_access_mode: evalResult.tab_access_mode || tabResult.tab_access_mode || "",
-    direct_tab: evalResult.direct_tab || 0,
-    select_fallback: evalResult.select_fallback || 0,
+    tab_access_mode: [...evalAccessStats.modes].at(-1) || tabResult.tab_access_mode || "",
+    direct_tab: evalAccessStats.direct_tab,
+    select_fallback: evalAccessStats.select_fallback,
     tab: tabResult.tab,
     raw_candidate_count: Math.max(0, ...capture.snapshots.map((item) => item.raw_candidate_count || 0)),
     post_count: posts.length,

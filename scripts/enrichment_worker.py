@@ -175,6 +175,51 @@ def detail_stage_satisfied(post: dict[str, Any], stage: str) -> bool:
     return True
 
 
+def post_task_key(post: dict[str, Any], task: dict[str, Any] | None = None) -> str:
+    return str(
+        post.get("canonical_post_url")
+        or (task or {}).get("canonical_post_url")
+        or post.get("post_url")
+        or (task or {}).get("post_url")
+        or ""
+    )
+
+
+def detail_units_for_tasks(
+    conn: sqlite3.Connection, detail_tasks: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], int]:
+    units_by_key: dict[str, dict[str, Any]] = {}
+    missing_posts = 0
+    for task in detail_tasks:
+        post = post_for_task(conn, task)
+        if not post:
+            mark_task_failed(conn, task["id"], "post not found")
+            missing_posts += 1
+            continue
+        key = post_task_key(post, task)
+        if not key:
+            mark_task_failed(conn, task["id"], "post key not found")
+            missing_posts += 1
+            continue
+        unit = units_by_key.setdefault(key, {"key": key, "post": post, "tasks": [], "stages": set()})
+        unit["tasks"].append(task)
+        unit["stages"].add(task["stage"])
+    return list(units_by_key.values()), missing_posts
+
+
+def batches_for_detail_units(units: list[dict[str, Any]], batch_size: int) -> list[list[dict[str, Any]]]:
+    grouped: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for unit in units:
+        stage_key = tuple(sorted(unit["stages"]))
+        grouped.setdefault(stage_key, []).append(unit)
+    batches: list[list[dict[str, Any]]] = []
+    for stage_key in sorted(grouped):
+        group = grouped[stage_key]
+        for index in range(0, len(group), batch_size):
+            batches.append(group[index : index + batch_size])
+    return batches
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/settings.yaml")
@@ -199,34 +244,30 @@ def main() -> int:
         detail_concurrency = args.detail_concurrency or int(deep_get(config, "performance.detail_concurrency", 2))
         for task in detail_tasks:
             mark_task_running(conn, task["id"])
-        task_posts = [(task, post_for_task(conn, task)) for task in detail_tasks]
-        task_posts = [(task, post) for task, post in task_posts if post]
-        posts = [post for _task, post in task_posts]
-        stage_set = {task["stage"] for task in detail_tasks}
-        batches = [posts[index : index + detail_concurrency] for index in range(0, len(posts), detail_concurrency)]
-        detail_result_by_post: dict[str, bool] = {}
-        for batch in batches:
+        detail_units, missing_posts = detail_units_for_tasks(conn, detail_tasks)
+        failed += missing_posts
+        batches = batches_for_detail_units(detail_units, max(1, detail_concurrency))
+        for batch_units in batches:
+            batch = [unit["post"] for unit in batch_units]
+            stage_set = set().union(*(unit["stages"] for unit in batch_units))
             batch_start = time.monotonic()
+            batch_succeeded = False
             try:
                 result = run_detail_batch(args.config, config, batch, stage_set, args.target_date)
                 if not result.get("ok"):
                     raise RuntimeError(result.get("error") or "detail enrichment failed")
                 apply_detail_results(conn, batch, result.get("posts", []))
-                for post in batch:
-                    detail_result_by_post[post.get("canonical_post_url") or post.get("post_url")] = True
+                batch_succeeded = True
             except Exception as exc:
-                for post in batch:
-                    detail_result_by_post[post.get("canonical_post_url") or post.get("post_url")] = False
                 batch_error = str(exc)
             else:
                 batch_error = ""
             duration_ms = int((time.monotonic() - batch_start) * 1000)
-            for post in batch:
-                key = post.get("canonical_post_url") or post.get("post_url")
-                matched_tasks = [task for task in detail_tasks if task.get("canonical_post_url") == key or task.get("post_url") == post.get("post_url")]
+            for unit in batch_units:
+                post = unit["post"]
                 stored = row_for_post(conn, post) or post
-                for task in matched_tasks:
-                    if detail_result_by_post.get(key) and detail_stage_satisfied(stored, task["stage"]):
+                for task in unit["tasks"]:
+                    if batch_succeeded and detail_stage_satisfied(stored, task["stage"]):
                         mark_task_done(conn, task["id"], duration_ms=duration_ms)
                         completed += 1
                     else:

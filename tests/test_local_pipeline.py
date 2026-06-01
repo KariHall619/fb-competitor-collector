@@ -462,6 +462,7 @@ def assert_opencli_detail_enrichment_reuses_tab_with_fallback() -> None:
     script_text = (ROOT / "scripts" / "opencli_enrich_post_details.mjs").read_text(encoding="utf-8")
     assert "async function openReusablePostTab" in script_text
     assert "async function navigatePostTab" in script_text
+    assert "async function waitForDetailReady" in script_text
     assert '"open",' in script_text
     assert '"--tab",' in script_text
     assert "async function enrichPostWithFreshTab" in script_text
@@ -469,6 +470,8 @@ def assert_opencli_detail_enrichment_reuses_tab_with_fallback() -> None:
     assert "restorePost(post, before)" in script_text
     assert "fresh_tab_fallback" in script_text
     assert "low_disturbance" in script_text
+    assert "landingUrlCache" in script_text
+    assert 'resolution_source: "existing_landing_url"' in script_text
 
 
 def assert_opencli_detail_enrichment_blocks_for_human_login() -> None:
@@ -1751,6 +1754,43 @@ def assert_partial_review_status_and_task_queue(tmp_path: Path) -> None:
     assert sorted(task["stage"] for task in tasks) == ["article_material", "detail_time", "lead_link", "summary"]
 
 
+def assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts
+    import enrichment_worker
+
+    conn = connect(tmp_path / "detail-grouping.sqlite")
+    post = normalize_post(
+        {
+            "account_name": "Story Hub",
+            "account_url": "https://www.facebook.com/storyhub",
+            "post_url": "https://www.facebook.com/storyhub/posts/pfbid-detail-group",
+            "post_time_text": "2h",
+            "story_summary": "A visible homepage candidate.",
+            "crawled_at": "2026-05-28T10:00:00",
+        },
+        {"source_skill": "test"},
+    )
+    from store import upsert_post, pending_enrichment_tasks
+
+    upsert_post(conn, post)
+    enqueue_enrichment_tasks_for_posts(conn, [post])
+    detail_tasks = [task for task in pending_enrichment_tasks(conn, stages=["detail_time", "lead_link"], limit=20)]
+    assert sorted(task["stage"] for task in detail_tasks) == ["detail_time", "lead_link"]
+
+    units, missing = enrichment_worker.detail_units_for_tasks(conn, detail_tasks)
+    assert missing == 0
+    assert len(units) == 1
+    assert units[0]["key"] == post["canonical_post_url"]
+    assert sorted(units[0]["stages"]) == ["detail_time", "lead_link"]
+    assert sorted(task["stage"] for task in units[0]["tasks"]) == ["detail_time", "lead_link"]
+
+    batches = enrichment_worker.batches_for_detail_units(units, batch_size=2)
+    assert len(batches) == 1
+    assert len(batches[0]) == 1
+
+
 def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
     config = tmp_path / "settings.yaml"
     db_path = tmp_path / "worker.sqlite"
@@ -1970,6 +2010,7 @@ def main() -> int:
         assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp_path)
         assert_article_material_extractor(tmp_path)
         assert_partial_review_status_and_task_queue(tmp_path)
+        assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path)
         assert_enrichment_worker_article_cache_and_summary(tmp_path)
         assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path)
 

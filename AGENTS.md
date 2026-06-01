@@ -100,7 +100,7 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 - `scripts/prepare_capture_result.py`: normalize raw homepage capture and keep incomplete candidates as `needs_enrichment`.
 - `scripts/opencli_enrich_post_details.mjs`: open detail pages, confirm exact time, expand comments/replies, resolve lead links, apply target-date filtering.
 - `scripts/run_capture_pipeline.py`: fast account-level entrypoint that discovers visible candidates, prepares/imports them as partial records, and queues enrichment.
-- `scripts/enrichment_worker.py`: resumes queued `detail_time`, `lead_link`, `article_material`, and `summary` tasks with local concurrency limits.
+- `scripts/enrichment_worker.py`: resumes queued `detail_time`, `lead_link`, `article_material`, and `summary` tasks with local concurrency limits. Detail tasks are grouped by post, so one post with both `detail_time` and `lead_link` pending should open the detail page only once in that worker batch.
 - `scripts/enrich_article_summaries.py`: fetch article/landing material for summarization.
 - `scripts/apply_article_summaries.py`: apply Codex-written Chinese summaries and recompute `output_status`.
 - `scripts/import_existing_result.py`: import JSON/CSV into SQLite and optionally sync ready rows.
@@ -196,6 +196,13 @@ node -c scripts/opencli_verify_exact_time.mjs
 ```
 
 Current latest passing commit before this file: `0bd5ca0ac1ebdc87da95883159d36b74c9ba22ec`.
+
+## Performance Notes
+
+- The accuracy contract is unchanged: `ready_for_output` still requires detail-confirmed time, qualified account-owned comment/comment-reply lead link, external landing URL, and article-based Chinese summary.
+- Detail enrichment uses bounded readiness waits. `open_tab_wait_seconds`, `detail_navigation_wait_seconds`, `synthetic_tooltip_wait_ms`, and `real_mouse_tooltip_wait_ms` are maximum waits; the script should continue earlier once the detail DOM, tooltip, or comment expansion signal is available.
+- Do not replace these readiness waits with fixed sleeps unless OpenCLI/Facebook behavior changes and tests are updated. Fixed waits directly increase per-post latency.
+- `enrichment_worker.py` should keep grouping detail tasks by canonical post URL. Splitting `detail_time` and `lead_link` into separate page opens is a regression for the sub-two-minute-per-post target.
 
 ## Git/Workspace Notes
 

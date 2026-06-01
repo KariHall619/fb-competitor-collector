@@ -34,14 +34,18 @@ const ALLOW_REAL_MOUSE_HOVER = has("--allow-real-mouse-hover");
 const SKIP_TIME = has("--skip-time");
 const SKIP_LEAD_LINK = has("--skip-lead-link");
 const configuredLeadLink = readLeadLinkConfig(CONFIG);
+const configuredPerformance = readPerformanceConfig(CONFIG);
 const COMMENT_EXPAND_ROUNDS = Number(value("--comment-expand-rounds", configuredLeadLink.commentExpandRounds));
 const REPLY_EXPAND_ROUNDS = Number(value("--reply-expand-rounds", configuredLeadLink.replyExpandRounds));
 const RESOLVE_TIMEOUT_MS = Number(value("--resolve-timeout-ms", String(configuredLeadLink.resolveTimeoutSeconds * 1000)));
+const SYNTHETIC_TOOLTIP_WAIT_MS = Number(value("--synthetic-tooltip-wait-ms", String(configuredPerformance.syntheticTooltipWaitMs)));
+const REAL_MOUSE_TOOLTIP_WAIT_MS = Number(value("--real-mouse-tooltip-wait-ms", String(configuredPerformance.realMouseTooltipWaitMs)));
 const ALLOWED_DOMAINS = value("--allowed-domains", configuredLeadLink.allowedDomains.join(","))
   .split(",")
   .map((item) => item.trim().replace(/^www\./i, "").toLowerCase())
   .filter(Boolean);
 const COMMENT_MODE_SEQUENCE = ["default", "all_comments", "newest"];
+const landingUrlCache = new Map();
 const CURRENT_FILE = fileURLToPath(import.meta.url);
 const INVOKED_FILE = PROCESS.argv?.[1] ? path.resolve(PROCESS.argv[1]) : "";
 const RUN_MAIN = CURRENT_FILE === INVOKED_FILE || has("--run");
@@ -79,6 +83,31 @@ function readLeadLinkConfig(configPath) {
       replyExpandRounds: Number(valueFor("reply_expand_rounds") || fallback.replyExpandRounds),
       resolveTimeoutSeconds: Number(valueFor("resolve_timeout_seconds") || fallback.resolveTimeoutSeconds),
       allowedDomains,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function readPerformanceConfig(configPath) {
+  const fallback = {
+    syntheticTooltipWaitMs: 1200,
+    realMouseTooltipWaitMs: 1800,
+  };
+  try {
+    const resolved = path.resolve(configPath);
+    if (!fs.existsSync(resolved)) return fallback;
+    const text = fs.readFileSync(resolved, "utf8");
+    const section = text.match(/^performance:\s*\n([\s\S]*?)(?=^\S|\z)/m);
+    if (!section) return fallback;
+    const body = section[1];
+    const valueFor = (key) => {
+      const match = body.match(new RegExp(`^\\s+${key}:\\s*(.*)$`, "m"));
+      return match ? match[1].trim() : "";
+    };
+    return {
+      syntheticTooltipWaitMs: Number(valueFor("synthetic_tooltip_wait_ms") || fallback.syntheticTooltipWaitMs),
+      realMouseTooltipWaitMs: Number(valueFor("real_mouse_tooltip_wait_ms") || fallback.realMouseTooltipWaitMs),
     };
   } catch {
     return fallback;
@@ -123,6 +152,62 @@ async function waitSeconds(context, seconds) {
   ], { command: context.opencliCommand });
 }
 
+async function waitForDetailReady(context, seconds, options = {}) {
+  const timeoutMs = Math.max(0, Math.round(Number(seconds || 0) * 1000));
+  if (!timeoutMs) return { ready: false, skipped: true, elapsed_ms: 0 };
+  const minMs = Math.max(0, Math.round(Number(options.minSeconds ?? 0.35) * 1000));
+  const expectedUrl = String(options.expectedUrl || context.tab?.url || "");
+  return await evalPayload(context, `(async () => {
+    const timeoutMs = ${JSON.stringify(timeoutMs)};
+    const minMs = ${JSON.stringify(minMs)};
+    const expectedUrl = ${JSON.stringify(expectedUrl)};
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const urlReady = () => {
+      if (!expectedUrl) return true;
+      try {
+        const expected = new URL(expectedUrl);
+        const current = new URL(location.href);
+        const expectedParts = expected.pathname.split("/").filter(Boolean);
+        const currentText = current.pathname + " " + current.search;
+        const required = expectedParts.filter((part) => !["www.facebook.com", "m.facebook.com", "facebook.com"].includes(part));
+        const keyParts = required.filter((part) => /^(pfbid|posts|reel|videos?|photo|story\\.php)|\\d{6,}/i.test(part));
+        return current.hostname.endsWith("facebook.com")
+          && (keyParts.length === 0 || keyParts.some((part) => currentText.includes(part)))
+          && (!expected.searchParams.get("story_fbid") || current.searchParams.get("story_fbid") === expected.searchParams.get("story_fbid"));
+      } catch {
+        return true;
+      }
+    };
+    const hasHeaderTimeSignal = () => [...document.querySelectorAll("a, abbr, span")].some((el) => {
+      const text = clean(el.innerText || el.textContent || "");
+      const aria = clean(el.getAttribute("aria-label") || "");
+      const title = clean(el.getAttribute("title") || "");
+      const href = el.href || "";
+      return /\\b\\d+\\s*(m|min|h|hr|d|day|w|wk)\\b|\\d+\\s*(分钟|小时|天)|just now|刚刚/i.test(text)
+        || /20\\d\\d|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|上午|下午|at\\s+\\d{1,2}:\\d{2}/i.test(aria + " " + title)
+        || /\\/posts\\/|story_fbid=|\\/reel\\/|\\/videos?\\/|photo\\.php|\\/photo\\//i.test(href);
+    });
+    const ready = () => {
+      const body = document.body?.innerText || "";
+      const loaded = document.readyState === "interactive" || document.readyState === "complete";
+      const hasPostRoot = Boolean(document.querySelector('[role="article"], article'));
+      return urlReady() && loaded && body.length >= 220 && (hasPostRoot || hasHeaderTimeSignal());
+    };
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (Date.now() - started >= minMs && ready()) {
+        return { ready: true, elapsed_ms: Date.now() - started };
+      }
+      await sleep(120);
+    }
+    return { ready: ready(), timeout: true, elapsed_ms: Date.now() - started };
+  })()`).catch(async () => {
+    await waitSeconds(context, seconds);
+    return { ready: false, fallback_wait_seconds: seconds };
+  });
+}
+
 async function openPostTab(baseContext, url) {
   const result = await runOpencli(["browser", baseContext.session, "tab", "new", url], {
     command: baseContext.opencliCommand,
@@ -134,7 +219,7 @@ async function openPostTab(baseContext, url) {
   const tab = { page: payload.page, url, title: "" };
   const context = { ...baseContext, tab };
   const waitSecondsValue = Number(value("--open-tab-wait-seconds", String(baseContext.config?.performance?.open_tab_wait_seconds || 1.5)));
-  await waitSeconds(context, waitSecondsValue);
+  await waitForDetailReady(context, waitSecondsValue, { minSeconds: 0.3, expectedUrl: url });
   return context;
 }
 
@@ -157,7 +242,8 @@ async function navigatePostTab(context, url) {
     throw new Error(result.stderr || result.stdout || `OpenCLI failed to navigate reusable tab for ${url}`);
   }
   context.tab.url = url;
-  await waitSeconds(context, 3.5);
+  const waitSecondsValue = Number(value("--navigation-wait-seconds", String(context.config?.performance?.detail_navigation_wait_seconds || 3.5)));
+  await waitForDetailReady(context, waitSecondsValue, { minSeconds: 0.45, expectedUrl: url });
   return context;
 }
 
@@ -220,6 +306,7 @@ async function readTooltipTimeWithSyntheticHover(context, target) {
   return await evalPayload(context, `(async () => {
     const helpers = ${browserExactTimeHelpersExpression()};
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const timeoutMs = Math.max(300, Number(${JSON.stringify(SYNTHETIC_TOOLTIP_WAIT_MS)}) || 1200);
     const elements = [...document.querySelectorAll("a, abbr, span")];
     const el = elements[${JSON.stringify(target.index)}];
     if (!el) return { posted_at_raw: "", posted_at: "", time_source: "" };
@@ -241,17 +328,20 @@ async function readTooltipTimeWithSyntheticHover(context, target) {
         ? PointerEvent
         : typeof MouseEvent === "function"
           ? MouseEvent
-          : null;
+        : null;
       if (!EventCtor) continue;
       el.dispatchEvent(new EventCtor(eventName, eventInit));
     }
-    await sleep(1200);
-    const texts = [...document.querySelectorAll('[role="tooltip"], div, span')]
-      .map((node) => helpers.clean(node.innerText || node.textContent || ""))
-      .filter(Boolean);
-    for (const text of texts) {
-      const parsed = helpers.parseExactFacebookTime(text);
-      if (parsed) return { posted_at_raw: text, posted_at: parsed, time_source: "synthetic_hover_tooltip" };
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const texts = [...document.querySelectorAll('[role="tooltip"], div, span')]
+        .map((node) => helpers.clean(node.innerText || node.textContent || ""))
+        .filter(Boolean);
+      for (const text of texts) {
+        const parsed = helpers.parseExactFacebookTime(text);
+        if (parsed) return { posted_at_raw: text, posted_at: parsed, time_source: "synthetic_hover_tooltip" };
+      }
+      await sleep(100);
     }
     return { posted_at_raw: "", posted_at: "", time_source: "" };
   })()`);
@@ -269,14 +359,19 @@ async function readTooltipTimeWithRealMouse(context, target) {
     "--tab",
     context.tab.page,
   ], { command: context.opencliCommand });
-  await waitSeconds(context, 1.8);
-  return await evalPayload(context, `(() => {
+  return await evalPayload(context, `(async () => {
     const helpers = ${browserExactTimeHelpersExpression()};
-    const tooltip = [...document.querySelectorAll('[role="tooltip"], div, span')]
-      .map((el) => helpers.clean(el.innerText || el.textContent || ""))
-      .find((text) => helpers.parseExactFacebookTime(text));
-    if (!tooltip) return { posted_at_raw: "", posted_at: "", time_source: "" };
-    return { posted_at_raw: tooltip, posted_at: helpers.parseExactFacebookTime(tooltip), time_source: "real_mouse_tooltip" };
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const timeoutMs = Math.max(300, Number(${JSON.stringify(REAL_MOUSE_TOOLTIP_WAIT_MS)}) || 1800);
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const tooltip = [...document.querySelectorAll('[role="tooltip"], div, span')]
+        .map((el) => helpers.clean(el.innerText || el.textContent || ""))
+        .find((text) => helpers.parseExactFacebookTime(text));
+      if (tooltip) return { posted_at_raw: tooltip, posted_at: helpers.parseExactFacebookTime(tooltip), time_source: "real_mouse_tooltip" };
+      await sleep(100);
+    }
+    return { posted_at_raw: "", posted_at: "", time_source: "" };
   })()`);
 }
 
@@ -433,7 +528,7 @@ async function extractEngagement(context, target) {
 
 async function expandCommentsAndReplies(context) {
   for (let round = 0; round < Math.max(COMMENT_EXPAND_ROUNDS, REPLY_EXPAND_ROUNDS); round += 1) {
-    await evalPayload(context, `(() => {
+    const result = await evalPayload(context, `(async () => {
       const labels = [
         /view more comments/i,
         /see more comments/i,
@@ -448,19 +543,32 @@ async function expandCommentsAndReplies(context) {
         /查看更多回复/,
         /查看回复/,
       ];
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const bodyLengthBefore = document.body?.innerText?.length || 0;
+      let clicked = 0;
       for (const el of document.querySelectorAll('div[role="button"], span, a')) {
         const text = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || "");
         if (!text || !labels.some((re) => re.test(text))) continue;
         try {
           el.click();
+          clicked += 1;
         } catch {
           // Ignore click failures on virtualized comment controls.
         }
       }
-      return true;
+      if (!clicked) return { clicked, waited_ms: 0 };
+      const started = Date.now();
+      while (Date.now() - started < 900) {
+        await sleep(100);
+        const bodyLengthAfter = document.body?.innerText?.length || 0;
+        if (bodyLengthAfter > bodyLengthBefore + 20) {
+          return { clicked, waited_ms: Date.now() - started, body_length_changed: true };
+        }
+      }
+      return { clicked, waited_ms: Date.now() - started, body_length_changed: false };
     })()`).catch(() => {});
-    await waitSeconds(context, 0.9);
+    if (!result?.clicked) break;
   }
 }
 
@@ -641,6 +749,7 @@ function sameNormalizedUrl(left, right) {
 async function resolveLandingUrl(href) {
   const cleaned = cleanExternalUrl(href);
   if (!cleaned) return "";
+  if (landingUrlCache.has(cleaned)) return landingUrlCache.get(cleaned);
   const tryFetch = async (method) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), RESOLVE_TIMEOUT_MS);
@@ -654,17 +763,25 @@ async function resolveLandingUrl(href) {
   };
   try {
     const resolved = await tryFetch("HEAD");
-    if (allowedLandingUrl(resolved)) return resolved;
+    if (allowedLandingUrl(resolved)) {
+      landingUrlCache.set(cleaned, resolved);
+      return resolved;
+    }
   } catch {
     // Some story sites block HEAD; fall back to GET redirect handling.
   }
   try {
     const resolved = await tryFetch("GET");
-    if (allowedLandingUrl(resolved)) return resolved;
+    if (allowedLandingUrl(resolved)) {
+      landingUrlCache.set(cleaned, resolved);
+      return resolved;
+    }
   } catch {
     // Keep cleaned URL only when it already satisfies domain policy.
   }
-  return allowedLandingUrl(cleaned) ? cleaned : "";
+  const fallback = allowedLandingUrl(cleaned) ? cleaned : "";
+  landingUrlCache.set(cleaned, fallback);
+  return fallback;
 }
 
 async function extractLeadLink(context, accountName = "") {
@@ -730,8 +847,22 @@ function hasQualifiedLeadLink(post) {
 
 async function resolvedExistingLeadLink(post) {
   if (!hasQualifiedLeadLink(post)) return null;
-  const resolved = await resolveLandingUrl(post.lead_url_raw);
   const current = post.landing_url || post.article_url || "";
+  const currentClean = cleanExternalUrl(current);
+  if (currentClean && allowedLandingUrl(currentClean)) {
+    return {
+      status: "qualified",
+      lead_url_raw: post.lead_url_raw,
+      landing_url: currentClean,
+      lead_link_source: post.lead_link_source,
+      owner_matched: true,
+      comment_excerpt: post.comment_lead_excerpt || "",
+      candidates: [],
+      preserved_existing: true,
+      resolution_source: "existing_landing_url",
+    };
+  }
+  const resolved = await resolveLandingUrl(post.lead_url_raw);
   const landingUrl = resolved || cleanExternalUrl(current);
   if (!landingUrl) return null;
   return {
