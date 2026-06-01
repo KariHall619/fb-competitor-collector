@@ -928,6 +928,26 @@ function buildCoverageSummary(payload, inputCount) {
   };
 }
 
+function buildPerformanceSummary(enriched) {
+  const durations = (enriched || [])
+    .map((item) => Number(item.duration_ms || 0))
+    .filter((item) => Number.isFinite(item) && item > 0);
+  const totalMs = durations.reduce((sum, item) => sum + item, 0);
+  return {
+    measured_posts: durations.length,
+    total_ms: totalMs,
+    average_ms: durations.length ? Math.round(totalMs / durations.length) : 0,
+    max_ms: durations.length ? Math.max(...durations) : 0,
+    over_two_minute_posts: (enriched || [])
+      .filter((item) => Number(item.duration_ms || 0) > 120000)
+      .map((item) => ({
+        post_url: item.post_url,
+        duration_ms: item.duration_ms,
+        mode: item.mode,
+      })),
+  };
+}
+
 function enrichmentScore(post) {
   let score = 0;
   if (post.posted_at) score += 1;
@@ -1069,6 +1089,7 @@ async function main() {
   for (const [index, post] of posts.entries()) {
     if (LIMIT && index >= LIMIT) break;
     if (!post.post_url) continue;
+    const postStarted = Date.now();
     try {
       const before = { ...post };
       let mode = "reused_detail_tab";
@@ -1157,6 +1178,7 @@ async function main() {
       enriched.push({
         post_url: post.post_url,
         mode,
+        duration_ms: Date.now() - postStarted,
         exact_time: result.exact_time,
         engagement: result.engagement,
         lead_link: result.lead_link,
@@ -1190,6 +1212,7 @@ async function main() {
   }
   payload.detail_enriched = enriched.length;
   payload.detail_enrichment_errors = errors;
+  payload.performance_summary = buildPerformanceSummary(enriched);
   if (blockedResult) {
     payload.status = blockedResult.status;
     payload.action_required = "human_intervention_required";
@@ -1225,6 +1248,7 @@ export {
   INVOKED_FILE,
   RUN_MAIN,
   buildCoverageSummary,
+  buildPerformanceSummary,
   commentModeBrowserExpression,
   dateKeyFromPostedAt,
   detailEngagementBrowserExpression,

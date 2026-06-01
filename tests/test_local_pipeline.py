@@ -472,6 +472,8 @@ def assert_opencli_detail_enrichment_reuses_tab_with_fallback() -> None:
     assert "low_disturbance" in script_text
     assert "landingUrlCache" in script_text
     assert 'resolution_source: "existing_landing_url"' in script_text
+    assert "buildPerformanceSummary" in script_text
+    assert "over_two_minute_posts" in script_text
 
 
 def assert_opencli_detail_enrichment_blocks_for_human_login() -> None:

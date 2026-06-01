@@ -195,7 +195,7 @@ node -c scripts/opencli_runtime.mjs
 node -c scripts/opencli_verify_exact_time.mjs
 ```
 
-Current latest passing commit before this file: `0bd5ca0ac1ebdc87da95883159d36b74c9ba22ec`.
+Current latest passing commit before this file: `365608ba38d090f9b5f8f88e530baecd257d2ed6`.
 
 ## Performance Notes
 
@@ -203,6 +203,7 @@ Current latest passing commit before this file: `0bd5ca0ac1ebdc87da95883159d36b7
 - Detail enrichment uses bounded readiness waits. `open_tab_wait_seconds`, `detail_navigation_wait_seconds`, `synthetic_tooltip_wait_ms`, and `real_mouse_tooltip_wait_ms` are maximum waits; the script should continue earlier once the detail DOM, tooltip, or comment expansion signal is available.
 - Do not replace these readiness waits with fixed sleeps unless OpenCLI/Facebook behavior changes and tests are updated. Fixed waits directly increase per-post latency.
 - `enrichment_worker.py` should keep grouping detail tasks by canonical post URL. Splitting `detail_time` and `lead_link` into separate page opens is a regression for the sub-two-minute-per-post target.
+- `opencli_enrich_post_details.mjs` writes `performance_summary`, including `average_ms`, `max_ms`, and `over_two_minute_posts`, so real capture runs can verify the per-post target without relaxing quality gates.
 
 ## Git/Workspace Notes
 
