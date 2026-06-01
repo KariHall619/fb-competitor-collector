@@ -53,6 +53,7 @@ function summarizeExactTimeChecks({ scan, checks, tab, claimedFrom, allowRealMou
     status: confirmed.length > 0 ? "exact_time_confirmed" : "exact_time_not_found",
     route: "opencli_browser_bridge",
     allow_real_mouse_hover: allowRealMouseHover,
+    capture_profile: captureProfile,
     tab,
     target_count: scan.target_count,
     exact_dom_count: scan.exact_dom_count,
@@ -60,7 +61,7 @@ function summarizeExactTimeChecks({ scan, checks, tab, claimedFrom, allowRealMou
     confirmed_count: confirmed.length,
     confirmed_examples: confirmed.slice(0, 5),
     checks,
-    claimed_from: claimedFrom,
+    opened_from: openedFrom || claimedFrom,
     message: confirmed.length > 0
       ? "已确认能从 Facebook DOM 属性或时间悬停提示获取精确发帖时间。"
       : "未能从当前可见时间元素获取精确发帖时间；正式输出仍应保持时间缺失/待补全，不允许用相对时间估算代替。",

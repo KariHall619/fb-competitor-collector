@@ -56,13 +56,13 @@ business user opens the visible Facebook page in normal Chrome
 
 If the environment check says OpenCLI or Browser Bridge is not ready, stop and fix the OpenCLI CLI/daemon/extension/profile setup first. Do not use another browser route for live Facebook capture.
 
-If the page shows a login prompt, visitor preview, or only one preview post, stop immediately with `human_intervention_required`. The operator must manually log in or confirm the Chrome profile before retrying. Do not keep scrolling, import, or sync from that state.
+If the capture window shows a login prompt, visitor preview, or only one preview post, stop immediately with `human_intervention_required`. The operator must manually log in or confirm the Chrome profile in that new window before retrying. Do not keep scrolling, import, or sync from that state.
 
 For "today's posts" on a Facebook page, always reload/open the account homepage from the top and collect posts in visible homepage time order until the current-day boundary is covered. Do not continue from a previously low scroll position: Facebook virtualizes the feed DOM, so continuing from the current low position can omit newer posts above it. When the business user provides visible labels such as `38m, 1h, 2h ... 17h`, treat that sequence as the coverage checklist and open each post detail/comment area to find the account's comment or reply lead link.
 
 ## OpenCLI Browser Bridge Troubleshooting
 
-Use these checks when Codex cannot verify exact Facebook time from the normal Chrome tab:
+Use these checks when Codex cannot verify exact Facebook time from the same-profile capture window:
 
 ```bash
 opencli doctor

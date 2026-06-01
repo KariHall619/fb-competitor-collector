@@ -37,7 +37,7 @@ Map common requests as follows:
   - Report lark-cli status, Feishu source/output config, forced user identity, and OpenCLI Browser Bridge readiness.
   - If `recommended_capture_route.route` is not `opencli_browser_bridge`, stop before live capture.
 
-- “试一下当前 Chrome 页面能不能抓到帖子正文”
+- “试一下目标 Facebook 页面能不能抓到帖子正文”
   - Run `python3 scripts/check_env.py --config config/settings.yaml`.
   - If OpenCLI Browser Bridge is ready, use the OpenCLI Browser Bridge to list open tabs, claim the Facebook tab the user can visually see, then evaluate `scripts/fb_dom_extractors.js` in that tab.
   - Do not write Feishu during this test.
@@ -173,7 +173,7 @@ If Feishu sync fails, report the exact `lark-cli` error and keep local SQLite re
 
 First stage only:
 
-- collect visible FB post links and text from the current Chrome tab
+- collect visible FB post links and text from the same-profile capture window
 - import links
 - normalize fields
 - SQLite storage and dedupe

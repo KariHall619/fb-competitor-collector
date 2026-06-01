@@ -162,9 +162,9 @@ filters:
 
 实时采集由 OpenCLI Browser Bridge 执行：
 
-1. 列出用户当前打开的 Chrome 标签页；
-2. 选择业务人员肉眼可见帖子列表的 Facebook 标签页；
-3. claim 该标签页；
+1. 使用 Chrome 插件选中的同一 Chrome profile 新开一个采集窗口；
+2. 只认领这次新窗口里新出现的 `about:blank` 标签页；
+3. 在该受控标签页打开目标 Facebook 页面；
 4. 在页面内执行 `scripts/fb_dom_extractors.js` 的 DOM 提取逻辑；
 5. 过滤掉登录页、空白动态壳、评论片段和无正文候选；
 6. 得到帖子链接、候选文章链接、正文、相对时间文本、互动文本；
@@ -196,7 +196,7 @@ filters:
 
 1. 检测到 `登录 / 忘记账户了？`、登录表单、游客预览等信号时，立即停止；
 2. 返回 `human_intervention_required`；
-3. 提示业务人员在当前 Chrome profile 手动登录 Facebook；
+3. 提示业务人员在新打开的同 profile 采集窗口手动登录 Facebook；
 4. 在人工确认能连续看到多条帖子前，不入库、不同步飞书。
 
 `scripts/opencli_extract_current_tab.mjs` 是该路线的可检查参考脚本。实际运行时应由 OpenCLI Browser Bridge runtime 控制当前标签页。
@@ -329,10 +329,10 @@ python3 scripts/filter_posts.py --config config/settings.yaml --date 260521 --ac
 
 ## 10. 业务操作流程
 
-1. 业务人员在正常 Chrome 中登录 Facebook；
-2. 打开目标竞品账号主页；
+1. 业务人员在正常 Chrome profile 中登录 Facebook；
+2. 确认该 profile 能打开目标竞品账号主页；
 3. 确认页面上能看到真实帖子列表和帖子正文；
-4. 在 Codex 中说：“使用 FB 竞品采集 skill，采集当前 Chrome 页面里可见的帖子，并同步到飞书”；
+4. 在 Codex 中说：“使用 FB 竞品采集 skill，采集目标 Facebook 页面里可见的帖子，并同步到飞书”；
 5. Codex 执行环境检查；
 6. Codex 读取当前主页候选，并用 `3h/12h/1d` 等相对时间决定候选窗口；
 7. Codex 打开候选帖子详情页，确认精确 `posted_at`、评论/回复引流链接和落地页；
@@ -357,7 +357,7 @@ Mac 当前阶段必须通过：
 
 1. `check_env.py` 能报告 OpenCLI Browser Bridge 是否可用；
 2. 能读取飞书账号来源表；
-3. 能从当前 Chrome Facebook 页面提取真实帖子正文；
+3. 能从同 profile 新采集窗口的 Facebook 页面提取真实帖子正文；
 4. 能导入一条样例数据；
 5. 能写入 SQLite；
 6. 重复导入同一帖子不会新增重复行；

@@ -185,11 +185,11 @@ Sheet id: 44013b
 ```
 
 ```text
-使用 FB 竞品采集 skill，试一下当前 Chrome 页面能不能抓到帖子正文，不要写飞书。
+使用 FB 竞品采集 skill，试一下目标 Facebook 页面能不能抓到帖子正文，不要写飞书。
 ```
 
 ```text
-使用 FB 竞品采集 skill，采集当前 Chrome 页面里可见的帖子，并同步到飞书。
+使用 FB 竞品采集 skill，采集目标 Facebook 页面里可见的帖子，并同步到飞书。
 ```
 
 ```text

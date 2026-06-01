@@ -441,6 +441,8 @@ def assert_opencli_extract_script_requires_human_intervention() -> None:
     assert "human_intervention_required" in script_text
     assert "visitor_preview" in script_text
     assert "已停止采集" in script_text
+    assert "browser.user.openTabs()" not in script_text
+    assert "browser.user.claimTab" not in script_text
 
 
 def assert_opencli_runtime_keeps_current_bound_tab() -> None:
