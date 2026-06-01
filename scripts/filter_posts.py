@@ -11,7 +11,7 @@ from config_loader import deep_get, load_config
 from field_schema import configured_output_headers, output_row_for_headers
 from lark_io import write_rows
 from models import normalize_date
-from output_quality import output_quality_errors, ready_for_output
+from output_quality import output_quality_errors, partial_for_review, ready_for_output
 from store import connect, query_posts
 
 
@@ -28,6 +28,7 @@ def main() -> int:
     parser.add_argument("--hot-views", action="store_true")
     parser.add_argument("--hot-likes", action="store_true")
     parser.add_argument("--sync", action="store_true")
+    parser.add_argument("--sync-partial", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -63,6 +64,41 @@ def main() -> int:
         if part
     ) or "all"
     print(json.dumps({"count": len(posts), "hit_rule": hit_rule}, ensure_ascii=False, indent=2))
+    if args.sync_partial:
+        headers = configured_output_headers(config)
+        partial_posts, skipped_posts = partial_for_review(posts)
+        if not partial_posts:
+            print(
+                json.dumps(
+                    {
+                        "feishu_sync": {
+                            "ok": False,
+                            "stage": "partial_gate",
+                            "message": "筛选结果中没有可供业务预览的 partial_review 记录。",
+                            "partial_review": 0,
+                            "skipped": len(skipped_posts),
+                        }
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
+        rows = [output_row_for_headers(post, headers) for post in partial_posts]
+        result = write_rows(
+            config,
+            "filter_result",
+            rows,
+            headers=headers,
+            mode="overwrite",
+            dry_run=args.dry_run,
+        )
+        result["partial_review"] = len(partial_posts)
+        result["skipped"] = len(skipped_posts)
+        result["formal_output_unchanged"] = True
+        print(json.dumps({"feishu_sync": result}, ensure_ascii=False, indent=2))
+        return 0 if result.get("ok") else 1
+
     if args.sync:
         headers = configured_output_headers(config)
         ready_posts, skipped_posts = ready_for_output(posts)

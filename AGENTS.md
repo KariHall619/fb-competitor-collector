@@ -99,6 +99,8 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 - `scripts/fb_time_extractors.js`: exact Facebook time parsing and timestamp-target helpers.
 - `scripts/prepare_capture_result.py`: normalize raw homepage capture and keep incomplete candidates as `needs_enrichment`.
 - `scripts/opencli_enrich_post_details.mjs`: open detail pages, confirm exact time, expand comments/replies, resolve lead links, apply target-date filtering.
+- `scripts/run_capture_pipeline.py`: fast account-level entrypoint that discovers visible candidates, prepares/imports them as partial records, and queues enrichment.
+- `scripts/enrichment_worker.py`: resumes queued `detail_time`, `lead_link`, `article_material`, and `summary` tasks with local concurrency limits.
 - `scripts/enrich_article_summaries.py`: fetch article/landing material for summarization.
 - `scripts/apply_article_summaries.py`: apply Codex-written Chinese summaries and recompute `output_status`.
 - `scripts/import_existing_result.py`: import JSON/CSV into SQLite and optionally sync ready rows.
@@ -144,6 +146,18 @@ Import without Feishu write:
 
 ```bash
 python3 scripts/import_existing_result.py --config config/settings.yaml --input exports/ready.json --no-sync
+```
+
+Fast partial capture/import:
+
+```bash
+python3 scripts/run_capture_pipeline.py --config config/settings.yaml --account-url <facebook-account-url> --target-date YYMMDD --partial
+```
+
+Resume queued enrichment:
+
+```bash
+python3 scripts/enrichment_worker.py --config config/settings.yaml --stages detail_time,lead_link,article_material --limit 50
 ```
 
 Sync only ready rows:

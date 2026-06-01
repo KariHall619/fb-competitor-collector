@@ -533,16 +533,9 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
         "raw_payload": json.dumps(raw, ensure_ascii=False),
     }
     if not post["output_status"]:
-        required_ok = all(
-            [
-                post.get("post_url"),
-                has_output_post_time(post),
-                post.get("story_summary"),
-                post.get("summary_source") == "article",
-                has_qualified_comment_lead_link(post),
-            ]
-        )
-        post["output_status"] = "ready_for_output" if required_ok else "needs_enrichment"
+        from pipeline_status import output_status_for
+
+        post["output_status"] = output_status_for(post)
     if post["crawl_status"] in {"", "imported", "captured"}:
         post["crawl_status"] = post["output_status"] if post["output_status"] == "ready_for_output" else "needs_enrichment"
     return post

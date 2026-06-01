@@ -85,12 +85,12 @@ def fetch_url(url: str, timeout: int = 20) -> str:
         return response.read().decode(charset, errors="replace")
 
 
-def extract_material(url: str) -> dict[str, Any]:
+def extract_material(url: str, timeout: int = 20) -> dict[str, Any]:
     clean_url = clean_article_url(url)
     if not clean_url:
         return {"ok": False, "article_url": "", "error": "missing_article_url"}
     try:
-        html_text = fetch_url(clean_url)
+        html_text = fetch_url(clean_url, timeout=timeout)
     except Exception as exc:
         return {"ok": False, "article_url": clean_url, "error": str(exc)}
     parser = ArticleTextParser()

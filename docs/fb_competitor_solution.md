@@ -13,7 +13,8 @@
   -> OpenCLI Browser Bridge 读取当前标签页 DOM
   -> fb_dom_extractors.js 提取帖子候选
   -> 主页相对时间确定候选窗口
-  -> 帖子详情页确认精确时间和评论/回复引流链接
+  -> 候选先以 partial_review 入库并创建补全任务
+  -> enrichment_worker 分阶段确认精确时间、评论/回复引流链接和文章材料
   -> normalize_post 标准化字段
   -> SQLite 按 canonical_post_url 去重
   -> lark-cli 以用户身份写入 FB竞品帖子链接
@@ -176,6 +177,8 @@ filters:
 采集阶段不得因为链接形态过早丢弃内容。`/posts/`、`story.php`、`permalink.php`、`reel`、`photo.php`、`watch`、`videos` 都先作为 FB 内容候选保存。父帖链接只作为优先去重依据；抓不到父帖时保留原始内容链接，后续再做相似度/人工复核去重。
 
 详情补全阶段会进入每条候选内容，先从时间 tooltip 或 DOM 属性确认精确发帖时间，再展开评论和评论回复，寻找账号主发的引流链接。为了减少打扰，脚本优先复用一个详情标签页处理多条候选；如果复用标签页失败或采集结果变少，则对该帖子回退到原来的单帖新开详情页流程。只有当该链接最终解析到外部网站，并且精确时间、落地页摘要等字段齐全时，记录才进入 `ready_for_output` 并允许写入飞书最终表。字段不完整的有效候选仍先入库并保留为 `needs_enrichment`，后续继续补采。
+
+扩量提速后的补全任务状态保存在 SQLite `enrichment_tasks` 表中，按 `canonical_post_url + stage` 去重。`run_capture_pipeline.py` 先完成 discover/prepare/import，`enrichment_worker.py` 再按 `detail_time`, `lead_link`, `article_material`, `summary` 阶段恢复执行。`partial_review` 可用于业务预览，正式 `--sync` 仍只同步 `ready_for_output`。
 
 已验证的时间流程：
 

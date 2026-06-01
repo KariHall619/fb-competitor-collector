@@ -23,6 +23,7 @@ from models import (
     normalize_posted_at,
     parse_count,
 )
+from pipeline_status import crawl_status_for, output_status_for
 
 
 MEDIA_LINK_RE = re.compile(r"facebook\.com/(?:photo(?:\.php|/)|reel/|watch/|[^/]+/videos/|videos/)", re.I)
@@ -53,19 +54,6 @@ def parse_engagement(raw: dict[str, Any]) -> tuple[int | None, int | None, str]:
 def is_media_link(raw: dict[str, Any]) -> bool:
     post_url = str(raw.get("post_url") or "")
     return bool(MEDIA_LINK_RE.search(post_url))
-
-
-def output_status_for(record: dict[str, Any]) -> str:
-    required_ok = all(
-        [
-            record.get("post_url"),
-            record.get("posted_at"),
-            record.get("story_summary"),
-            record.get("summary_source") == "article",
-            has_qualified_comment_lead_link(record),
-        ]
-    )
-    return "ready_for_output" if required_ok else "needs_enrichment"
 
 
 def media_suspect_payload(raw: dict[str, Any]) -> dict[str, Any]:
@@ -221,7 +209,7 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
         "raw_payload": raw,
     }
     record["output_status"] = output_status_for(record)
-    record["crawl_status"] = record["output_status"] if record["output_status"] == "ready_for_output" else "needs_enrichment"
+    record["crawl_status"] = crawl_status_for(record)
     return record, ""
 
 
@@ -278,6 +266,7 @@ def main() -> int:
         "prepared": len(prepared),
         "ready": sum(1 for item in prepared if item.get("crawl_status") == "ready"),
         "ready_for_output": sum(1 for item in prepared if item.get("output_status") == "ready_for_output"),
+        "partial_review": sum(1 for item in prepared if item.get("output_status") == "partial_review"),
         "needs_enrichment": sum(1 for item in prepared if item.get("crawl_status") == "needs_enrichment"),
         "media_candidate_count": len(media_candidates),
         "media_suspect_count": len(media_suspects),

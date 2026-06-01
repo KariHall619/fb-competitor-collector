@@ -31,6 +31,8 @@ const CONFIG = value("--config", "config/settings.yaml");
 const LIMIT = Number(value("--limit", "0"));
 const TARGET_DATE = value("--target-date", "");
 const ALLOW_REAL_MOUSE_HOVER = has("--allow-real-mouse-hover");
+const SKIP_TIME = has("--skip-time");
+const SKIP_LEAD_LINK = has("--skip-lead-link");
 const configuredLeadLink = readLeadLinkConfig(CONFIG);
 const COMMENT_EXPAND_ROUNDS = Number(value("--comment-expand-rounds", configuredLeadLink.commentExpandRounds));
 const REPLY_EXPAND_ROUNDS = Number(value("--reply-expand-rounds", configuredLeadLink.replyExpandRounds));
@@ -131,7 +133,8 @@ async function openPostTab(baseContext, url) {
   }
   const tab = { page: payload.page, url, title: "" };
   const context = { ...baseContext, tab };
-  await waitSeconds(context, 3.5);
+  const waitSecondsValue = Number(value("--open-tab-wait-seconds", String(baseContext.config?.performance?.open_tab_wait_seconds || 1.5)));
+  await waitSeconds(context, waitSecondsValue);
   return context;
 }
 
@@ -754,6 +757,8 @@ function outputStatusFor(post) {
   const requiredOk = Boolean(
     post.post_url
     && post.posted_at
+    && post.time_confirmed
+    && !["relative_estimated", "relative_hour", "relative_label"].includes(post.time_source || "")
     && post.story_summary
     && post.summary_source === "article"
     && post.lead_link_status === "qualified"
@@ -806,8 +811,8 @@ function shouldFallbackAfterReusable({ before, after, exactTime, leadLink }) {
   if (!after.post_url) return false;
   if ((before.posted_at || before.time_confirmed) && !after.posted_at) return true;
   if (hasQualifiedLeadLink(before) && !hasQualifiedLeadLink(after)) return true;
-  if (!before.posted_at && !exactTime.posted_at) return true;
-  if (!hasQualifiedLeadLink(before) && leadLink.status !== "qualified") return true;
+  if (!SKIP_TIME && !before.posted_at && !exactTime.posted_at) return true;
+  if (!SKIP_LEAD_LINK && !hasQualifiedLeadLink(before) && leadLink.status !== "qualified") return true;
   return enrichmentScore(after) < enrichmentScore(before);
 }
 
@@ -818,12 +823,20 @@ function restorePost(post, snapshot) {
   Object.assign(post, snapshot);
 }
 
+function isHumanInterventionResult(result) {
+  return result?.status === "human_intervention_required";
+}
+
 async function enrichPostInContext(post, context) {
   const state = await pageState(context);
   if (state.loggedOut || state.visitorPreview) {
+    post.output_status = "blocked";
+    post.crawl_status = "blocked";
     return {
       ok: false,
       status: "human_intervention_required",
+      action_required: "human_intervention_required",
+      reason: state.loggedOut ? "login_required" : "visitor_preview",
       body_preview: state.bodyPreview,
       exact_time: { posted_at_raw: "", posted_at: "", time_source: "" },
       engagement: {},
@@ -831,10 +844,22 @@ async function enrichPostInContext(post, context) {
     };
   }
 
-  const target = await findHeaderTime(context);
-  let exactTime = await readExactTimeFromDom(context, target);
-  if (!exactTime.posted_at) exactTime = await readTooltipTimeWithSyntheticHover(context, target);
-  if (!exactTime.posted_at && ALLOW_REAL_MOUSE_HOVER) exactTime = await readTooltipTimeWithRealMouse(context, target);
+  let target = null;
+  let exactTime = {
+    posted_at_raw: post.posted_at_raw || "",
+    posted_at: post.posted_at || "",
+    time_source: post.time_source || "",
+    skipped: SKIP_TIME,
+  };
+  if (!SKIP_TIME && !(post.posted_at && post.time_confirmed)) {
+    target = await findHeaderTime(context);
+    exactTime = await readExactTimeFromDom(context, target);
+    if (!exactTime.posted_at) exactTime = await readTooltipTimeWithSyntheticHover(context, target);
+    if (!exactTime.posted_at && ALLOW_REAL_MOUSE_HOVER) exactTime = await readTooltipTimeWithRealMouse(context, target);
+  } else if (!SKIP_TIME) {
+    exactTime.preserved_existing = true;
+  }
+
   const engagement = await extractEngagement(context, target);
   if (exactTime.posted_at) {
     post.posted_at_raw = exactTime.posted_at_raw;
@@ -858,23 +883,31 @@ async function enrichPostInContext(post, context) {
     post.engagement_confidence = engagement.confidence || "unconfirmed";
     post.note = appendSemicolonNote(post.note, "互动数据待补采：详情页未能锚定当前主帖互动区");
   }
-  let leadLink = await extractLeadLink(context, post.account_name || "");
-  if (!shouldReplaceLeadLink(post, leadLink)) {
-    const preserved = await resolvedExistingLeadLink(post);
-    if (preserved) leadLink = preserved;
-  }
-  if (leadLink.status === "qualified" && shouldReplaceLeadLink(post, leadLink)) {
-    post.lead_url_raw = leadLink.lead_url_raw;
-    post.landing_url = leadLink.landing_url;
-    post.article_url = leadLink.landing_url;
-    post.lead_link_status = "qualified";
-    post.lead_link_source = leadLink.lead_link_source;
-    post.comment_lead_excerpt = leadLink.comment_excerpt;
-  } else if (!post.lead_link_status) {
-    post.lead_link_status = "missing";
-  }
-  if (leadLink.status !== "qualified") {
-    post.note = appendSemicolonNote(post.note, "评论区或评论回复引流链接待确认");
+
+  let leadLink = { status: post.lead_link_status || "skipped", skipped: SKIP_LEAD_LINK };
+  if (!SKIP_LEAD_LINK) {
+    if (hasQualifiedLeadLink(post)) {
+      leadLink = await resolvedExistingLeadLink(post) || { status: "qualified", preserved_existing: true };
+    } else {
+      leadLink = await extractLeadLink(context, post.account_name || "");
+    }
+    if (!shouldReplaceLeadLink(post, leadLink)) {
+      const preserved = await resolvedExistingLeadLink(post);
+      if (preserved) leadLink = preserved;
+    }
+    if (leadLink.status === "qualified" && shouldReplaceLeadLink(post, leadLink)) {
+      post.lead_url_raw = leadLink.lead_url_raw;
+      post.landing_url = leadLink.landing_url;
+      post.article_url = leadLink.landing_url;
+      post.lead_link_status = "qualified";
+      post.lead_link_source = leadLink.lead_link_source;
+      post.comment_lead_excerpt = leadLink.comment_excerpt;
+    } else if (!post.lead_link_status) {
+      post.lead_link_status = "missing";
+    }
+    if (leadLink.status !== "qualified") {
+      post.note = appendSemicolonNote(post.note, "评论区或评论回复引流链接待确认");
+    }
   }
   post.output_status = outputStatusFor(post);
   post.crawl_status = post.output_status === "ready_for_output" ? "ready_for_output" : "needs_enrichment";
@@ -901,6 +934,7 @@ async function main() {
   const errors = [];
   let reusableContext = null;
   const lowDisturbance = { reused_detail_tab: 0, fresh_tab_fallback: 0, reusable_errors: 0 };
+  let blockedResult = null;
   for (const [index, post] of posts.entries()) {
     if (LIMIT && index >= LIMIT) break;
     if (!post.post_url) continue;
@@ -913,11 +947,33 @@ async function main() {
         else await navigatePostTab(reusableContext, post.post_url);
         result = await enrichPostInContext(post, reusableContext);
         if (!result.ok) {
+          if (isHumanInterventionResult(result)) {
+            blockedResult = result;
+            errors.push({
+              post_url: post.post_url,
+              error: result.status,
+              reason: result.reason,
+              action_required: result.action_required,
+              body_preview: result.body_preview,
+            });
+            break;
+          }
           restorePost(post, before);
           mode = "fresh_tab_fallback";
           lowDisturbance.fresh_tab_fallback += 1;
           result = await enrichPostWithFreshTab(baseContext, post);
           if (!result.ok) {
+            if (isHumanInterventionResult(result)) {
+              blockedResult = result;
+              errors.push({
+                post_url: post.post_url,
+                error: result.status,
+                reason: result.reason,
+                action_required: result.action_required,
+                body_preview: result.body_preview,
+              });
+              break;
+            }
             errors.push({ post_url: post.post_url, error: result.status, body_preview: result.body_preview });
             continue;
           }
@@ -928,6 +984,17 @@ async function main() {
           lowDisturbance.fresh_tab_fallback += 1;
           result = await enrichPostWithFreshTab(baseContext, post);
           if (!result.ok) {
+            if (isHumanInterventionResult(result)) {
+              blockedResult = result;
+              errors.push({
+                post_url: post.post_url,
+                error: result.status,
+                reason: result.reason,
+                action_required: result.action_required,
+                body_preview: result.body_preview,
+              });
+              break;
+            }
             errors.push({ post_url: post.post_url, error: result.status, body_preview: result.body_preview });
             continue;
           }
@@ -941,6 +1008,17 @@ async function main() {
         lowDisturbance.fresh_tab_fallback += 1;
         result = await enrichPostWithFreshTab(baseContext, post);
         if (!result.ok) {
+          if (isHumanInterventionResult(result)) {
+            blockedResult = result;
+            errors.push({
+              post_url: post.post_url,
+              error: result.status,
+              reason: result.reason,
+              action_required: result.action_required,
+              body_preview: result.body_preview,
+            });
+            break;
+          }
           errors.push({ post_url: post.post_url, error: result.status, body_preview: result.body_preview });
           continue;
         }
@@ -955,6 +1033,7 @@ async function main() {
     } catch (error) {
       errors.push({ post_url: post.post_url, error: String(error.stack || error) });
     }
+    if (blockedResult) break;
   }
   if (reusableContext) await closePostTab(reusableContext);
   if (TARGET_DATE) {
@@ -980,17 +1059,27 @@ async function main() {
   }
   payload.detail_enriched = enriched.length;
   payload.detail_enrichment_errors = errors;
+  if (blockedResult) {
+    payload.status = blockedResult.status;
+    payload.action_required = "human_intervention_required";
+    payload.blocked_reason = blockedResult.reason;
+    payload.human_intervention_required = true;
+  }
   payload.coverage_summary = buildCoverageSummary(payload, inputPostCount);
   payload.low_disturbance = lowDisturbance;
   fs.writeFileSync(OUTPUT, JSON.stringify(payload, null, 2), "utf8");
   outputJson({
-    ok: true,
+    ok: !blockedResult,
     route: "opencli_browser_bridge",
+    status: blockedResult ? blockedResult.status : "ok",
+    action_required: blockedResult ? "human_intervention_required" : undefined,
+    blocked_reason: blockedResult?.reason,
     enriched: enriched.length,
     errors: errors.length,
     low_disturbance: lowDisturbance,
     output: OUTPUT,
   });
+  if (blockedResult && globalThis.process) globalThis.process.exitCode = 1;
 }
 
 if (RUN_MAIN) {

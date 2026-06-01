@@ -46,14 +46,14 @@ if (DEBUG_ENTRY) {
   if (globalThis.process) globalThis.process.exitCode = 0;
 }
 
-function summarizeExactTimeChecks({ scan, checks, tab, claimedFrom, allowRealMouseHover = false, captureProfile = "opencli_browser_bridge" }) {
+function summarizeExactTimeChecks({ scan, checks, tab, claimedFrom, allowRealMouseHover = false, captureProfile = "opencli_browser_bridge", openedFrom = "" }) {
   const confirmed = checks.filter((item) => item.confirmed);
   return {
     ok: confirmed.length > 0,
     status: confirmed.length > 0 ? "exact_time_confirmed" : "exact_time_not_found",
     route: "opencli_browser_bridge",
     allow_real_mouse_hover: allowRealMouseHover,
-    capture_profile: "",
+    capture_profile: captureProfile,
     tab,
     target_count: scan.target_count,
     exact_dom_count: scan.exact_dom_count,
@@ -61,7 +61,7 @@ function summarizeExactTimeChecks({ scan, checks, tab, claimedFrom, allowRealMou
     confirmed_count: confirmed.length,
     confirmed_examples: confirmed.slice(0, 5),
     checks,
-    opened_from: claimedFrom,
+    opened_from: openedFrom || claimedFrom,
     message: confirmed.length > 0
       ? "已确认能从 Facebook DOM 属性或时间悬停提示获取精确发帖时间。"
       : "未能从当前可见时间元素获取精确发帖时间；如果候选仍有相对时间标签，正式输出可以使用估算时间并在表格中标注“约”。",

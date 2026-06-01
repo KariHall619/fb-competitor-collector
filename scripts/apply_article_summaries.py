@@ -7,20 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
-from models import has_qualified_comment_lead_link
-
-
-def output_status_for(post: dict) -> str:
-    required_ok = all(
-        [
-            post.get("post_url"),
-            post.get("posted_at"),
-            post.get("story_summary"),
-            post.get("summary_source") == "article",
-            has_qualified_comment_lead_link(post),
-        ]
-    )
-    return "ready_for_output" if required_ok else "needs_enrichment"
+from pipeline_status import crawl_status_for, output_status_for
 
 
 def main() -> int:
@@ -46,13 +33,14 @@ def main() -> int:
         note = post.get("note") or ""
         post["note"] = "；".join(part for part in note.split("；") if part and part != "文章概要待生成")
         post["output_status"] = output_status_for(post)
-        post["crawl_status"] = post["output_status"] if post["output_status"] == "ready_for_output" else "needs_enrichment"
+        post["crawl_status"] = crawl_status_for(post)
         applied += 1
 
     payload["article_summary_applied"] = applied
     payload["article_summary_missing"] = missing
     payload["ready"] = sum(1 for item in posts if item.get("crawl_status") == "ready")
     payload["ready_for_output"] = sum(1 for item in posts if item.get("output_status") == "ready_for_output")
+    payload["partial_review"] = sum(1 for item in posts if item.get("output_status") == "partial_review")
     payload["needs_enrichment"] = sum(1 for item in posts if item.get("crawl_status") == "needs_enrichment")
     Path(args.output).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"ok": True, "applied": applied, "missing": len(missing), "output": args.output}, ensure_ascii=False, indent=2))

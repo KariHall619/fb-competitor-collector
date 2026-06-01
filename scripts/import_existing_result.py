@@ -13,8 +13,8 @@ from typing import Any
 from config_loader import load_config
 from field_schema import configured_output_headers, output_row_for_headers
 from models import normalize_post
-from output_quality import output_quality_errors
-from store import connect, mark_output_synced, upsert_posts
+from output_quality import output_quality_errors, partial_for_review
+from store import connect, enqueue_enrichment_tasks_for_posts, mark_output_synced, upsert_posts
 from lark_io import write_rows
 
 
@@ -53,6 +53,7 @@ def main() -> int:
     parser.add_argument("--account-type", default="competitor")
     parser.add_argument("--source-skill", default="manual-import")
     parser.add_argument("--sync", action="store_true")
+    parser.add_argument("--sync-partial", action="store_true")
     parser.add_argument("--no-sync", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -85,20 +86,53 @@ def main() -> int:
             )
         )
         return 1
-    print(
-        json.dumps(
-            {
-                "input": len(raw_records),
-                "inserted": len(result["inserted"]),
-                "updated": result["updated"],
-                "errors": result["errors"],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    task_result = enqueue_enrichment_tasks_for_posts(conn, result.get("sync_candidates") or posts)
+    import_summary = {
+        "input": len(raw_records),
+        "inserted": len(result["inserted"]),
+        "updated": result["updated"],
+        "errors": result["errors"],
+        "enrichment_tasks": task_result,
+    }
 
     should_sync = args.sync and not args.no_sync
+    should_sync_partial = args.sync_partial and not args.no_sync
+    if should_sync_partial:
+        sync_candidates = result.get("sync_candidates") or result["inserted"]
+        partial_posts, skipped_posts = partial_for_review(sync_candidates)
+        if not partial_posts:
+            print(
+                json.dumps(
+                    {**import_summary,
+                        "feishu_sync": {
+                            "ok": False,
+                            "stage": "partial_gate",
+                            "message": "当前没有可供业务预览的 partial_review 记录。",
+                            "partial_review": 0,
+                            "skipped": len(skipped_posts),
+                        }
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
+        headers = configured_output_headers(config)
+        rows = [output_row_for_headers(post, headers) for post in partial_posts]
+        sync_result = write_rows(
+            config,
+            "filter_result",
+            rows,
+            headers=headers,
+            mode="overwrite",
+            dry_run=args.dry_run,
+        )
+        sync_result["partial_review"] = len(partial_posts)
+        sync_result["skipped"] = len(skipped_posts)
+        sync_result["formal_output_unchanged"] = True
+        print(json.dumps({**import_summary, "feishu_sync": sync_result}, ensure_ascii=False, indent=2))
+        return 0 if sync_result.get("ok") else 1
+
     if should_sync:
         sync_candidates = result.get("sync_candidates") or result["inserted"]
         ready_posts = [post for post in sync_candidates if post.get("output_status") == "ready_for_output"]
@@ -106,7 +140,7 @@ def main() -> int:
         if quality_errors:
             print(
                 json.dumps(
-                    {
+                    {**import_summary,
                         "feishu_sync": {
                             "ok": False,
                             "stage": "quality_gate",
@@ -123,7 +157,7 @@ def main() -> int:
         if not ready_posts:
             print(
                 json.dumps(
-                    {
+                    {**import_summary,
                         "feishu_sync": {
                             "ok": False,
                             "stage": "quality_gate",
@@ -151,8 +185,9 @@ def main() -> int:
             mark_output_synced(conn, ready_posts)
         sync_result["ready_for_output"] = len(ready_posts)
         sync_result["needs_enrichment_skipped"] = skipped
-        print(json.dumps({"feishu_sync": sync_result}, ensure_ascii=False, indent=2))
+        print(json.dumps({**import_summary, "feishu_sync": sync_result}, ensure_ascii=False, indent=2))
         return 0 if sync_result.get("ok") else 1
+    print(json.dumps(import_summary, ensure_ascii=False, indent=2))
     return 0
 
 

@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+import json
+from datetime import datetime, timedelta
 from typing import Any
+
+from pipeline_status import missing_enrichment_stages
 
 
 POST_COLUMNS = [
@@ -45,6 +49,9 @@ POST_COLUMNS = [
     "last_seen_at",
     "raw_payload",
 ]
+
+ENRICHMENT_STAGES = ("detail_time", "lead_link", "article_material", "summary")
+TASK_OPEN_STATUSES = ("pending", "failed")
 
 
 SCHEMA_COLUMNS: dict[str, str] = {
@@ -135,6 +142,41 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS enrichment_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            canonical_post_url TEXT NOT NULL,
+            post_url TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            next_run_at TEXT,
+            locked_at TEXT,
+            duration_ms INTEGER,
+            payload TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(canonical_post_url, stage)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_enrichment_tasks_status_stage ON enrichment_tasks(status, stage, next_run_at)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS article_material_cache (
+            url TEXT PRIMARY KEY,
+            ok INTEGER NOT NULL DEFAULT 0,
+            material_json TEXT NOT NULL,
+            error TEXT,
+            fetched_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS crawl_errors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             account_name TEXT,
@@ -148,6 +190,10 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
+
+
+def utc_now() -> str:
+    return datetime.utcnow().isoformat(timespec="seconds")
 
 
 def upsert_post(conn: sqlite3.Connection, post: dict[str, Any]) -> str:
@@ -206,6 +252,203 @@ def upsert_posts(conn: sqlite3.Connection, posts: list[dict[str, Any]]) -> dict[
             errors += 1
             log_error(conn, post, "upsert", str(exc))
     return {"inserted": inserted, "sync_candidates": synced_candidates, "updated": updated, "errors": errors}
+
+
+def enqueue_enrichment_tasks(
+    conn: sqlite3.Connection,
+    post: dict[str, Any],
+    *,
+    stages: list[str] | tuple[str, ...] | None = None,
+) -> int:
+    canonical = post.get("canonical_post_url") or post.get("post_url")
+    post_url = post.get("post_url") or canonical
+    if not canonical or not post_url:
+        return 0
+    wanted = list(stages or missing_enrichment_stages(post))
+    for stage in wanted:
+        if stage not in ENRICHMENT_STAGES:
+            continue
+        conn.execute(
+            """
+            INSERT INTO enrichment_tasks
+            (canonical_post_url, post_url, stage, status, payload, next_run_at)
+            VALUES (?, ?, ?, 'pending', ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(canonical_post_url, stage) DO UPDATE SET
+                post_url = excluded.post_url,
+                status = CASE
+                    WHEN enrichment_tasks.status = 'done' THEN enrichment_tasks.status
+                    WHEN enrichment_tasks.status = 'running' THEN enrichment_tasks.status
+                    ELSE 'pending'
+                END,
+                next_run_at = CASE
+                    WHEN enrichment_tasks.status = 'done' THEN enrichment_tasks.next_run_at
+                    ELSE CURRENT_TIMESTAMP
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (canonical, post_url, stage, json.dumps({"post_url": post_url}, ensure_ascii=False)),
+        )
+    conn.commit()
+    return len([stage for stage in wanted if stage in ENRICHMENT_STAGES])
+
+
+def enqueue_enrichment_tasks_for_posts(conn: sqlite3.Connection, posts: list[dict[str, Any]]) -> dict[str, Any]:
+    before = conn.total_changes
+    for post in posts:
+        enqueue_enrichment_tasks(conn, post)
+    return {"queued_or_refreshed": conn.total_changes - before}
+
+
+def pending_enrichment_tasks(
+    conn: sqlite3.Connection,
+    *,
+    stages: list[str] | tuple[str, ...] | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    clauses = ["status IN ('pending', 'failed')", "(next_run_at IS NULL OR next_run_at <= CURRENT_TIMESTAMP)"]
+    params: list[Any] = []
+    if stages:
+        placeholders = ", ".join("?" for _ in stages)
+        clauses.append(f"stage IN ({placeholders})")
+        params.extend(stages)
+    rows = conn.execute(
+        f"""
+        SELECT * FROM enrichment_tasks
+        WHERE {' AND '.join(clauses)}
+        ORDER BY
+            CASE stage
+                WHEN 'detail_time' THEN 1
+                WHEN 'lead_link' THEN 2
+                WHEN 'article_material' THEN 3
+                WHEN 'summary' THEN 4
+                ELSE 5
+            END,
+            attempts ASC,
+            id ASC
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def mark_task_running(conn: sqlite3.Connection, task_id: int) -> None:
+    conn.execute(
+        """
+        UPDATE enrichment_tasks
+        SET status = 'running', locked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (task_id,),
+    )
+    conn.commit()
+
+
+def mark_task_done(conn: sqlite3.Connection, task_id: int, *, duration_ms: int | None = None) -> None:
+    conn.execute(
+        """
+        UPDATE enrichment_tasks
+        SET status = 'done',
+            duration_ms = COALESCE(?, duration_ms),
+            last_error = NULL,
+            locked_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (duration_ms, task_id),
+    )
+    conn.commit()
+
+
+def mark_task_failed(
+    conn: sqlite3.Connection,
+    task_id: int,
+    error: str,
+    *,
+    duration_ms: int | None = None,
+    retry_seconds: int = 900,
+) -> None:
+    next_run_at = (datetime.utcnow() + timedelta(seconds=retry_seconds)).isoformat(timespec="seconds")
+    conn.execute(
+        """
+        UPDATE enrichment_tasks
+        SET status = 'failed',
+            attempts = attempts + 1,
+            last_error = ?,
+            next_run_at = ?,
+            duration_ms = COALESCE(?, duration_ms),
+            locked_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (error[:1000], next_run_at, duration_ms, task_id),
+    )
+    conn.commit()
+
+
+def task_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    rows = conn.execute(
+        "SELECT stage, status, COUNT(*) AS count FROM enrichment_tasks GROUP BY stage, status"
+    ).fetchall()
+    return {f"{row['stage']}:{row['status']}": int(row["count"]) for row in rows}
+
+
+def posts_for_tasks(conn: sqlite3.Connection, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    posts: list[dict[str, Any]] = []
+    for task in tasks:
+        row = conn.execute(
+            "SELECT * FROM posts WHERE canonical_post_url = ? OR post_url = ?",
+            (task.get("canonical_post_url"), task.get("post_url")),
+        ).fetchone()
+        if row:
+            posts.append(dict(row))
+    return posts
+
+
+def post_for_task(conn: sqlite3.Connection, task: dict[str, Any]) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM posts WHERE canonical_post_url = ? OR post_url = ?",
+        (task.get("canonical_post_url"), task.get("post_url")),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def update_post_fields(conn: sqlite3.Connection, post: dict[str, Any], fields: dict[str, Any]) -> None:
+    if not fields:
+        return
+    assignments = ", ".join(f"{key} = ?" for key in fields)
+    values = list(fields.values())
+    values.extend([post.get("canonical_post_url"), post.get("post_url")])
+    conn.execute(
+        f"UPDATE posts SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE canonical_post_url = ? OR post_url = ?",
+        values,
+    )
+    conn.commit()
+
+
+def cached_article_material(conn: sqlite3.Connection, url: str) -> dict[str, Any] | None:
+    if not url:
+        return None
+    row = conn.execute("SELECT material_json FROM article_material_cache WHERE url = ?", (url,)).fetchone()
+    if not row:
+        return None
+    return json.loads(row["material_json"])
+
+
+def upsert_article_material(conn: sqlite3.Connection, url: str, material: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        INSERT INTO article_material_cache (url, ok, material_json, error)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(url) DO UPDATE SET
+            ok = excluded.ok,
+            material_json = excluded.material_json,
+            error = excluded.error,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (url, int(bool(material.get("ok"))), json.dumps(material, ensure_ascii=False), material.get("error")),
+    )
+    conn.commit()
 
 
 def mark_output_synced(conn: sqlite3.Connection, posts: list[dict[str, Any]]) -> None:
