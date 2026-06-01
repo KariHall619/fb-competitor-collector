@@ -53,7 +53,7 @@ function summarizeExactTimeChecks({ scan, checks, tab, claimedFrom, allowRealMou
     status: confirmed.length > 0 ? "exact_time_confirmed" : "exact_time_not_found",
     route: "opencli_browser_bridge",
     allow_real_mouse_hover: allowRealMouseHover,
-    capture_profile: captureProfile,
+    capture_profile: "",
     tab,
     target_count: scan.target_count,
     exact_dom_count: scan.exact_dom_count,

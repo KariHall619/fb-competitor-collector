@@ -45,6 +45,7 @@ try {
       : [];
     result.ok = true;
     result.open_tab_count = Array.isArray(tabs) ? tabs.length : 0;
+    result.tab_access_mode = tabResult.tab_access_mode || "";
   }
 } catch (error) {
   result.backend_error = String(error.stack || error);

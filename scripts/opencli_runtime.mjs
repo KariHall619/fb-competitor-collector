@@ -232,28 +232,58 @@ async function ensureFacebookTab({ opencliCommand, session, accountUrl }) {
     };
   }
 
-  if (selected.page && !selected.current) {
-    const select = await runOpencli(["browser", session, "tab", "select", selected.page], { command: opencliCommand });
-    if (!select.ok) {
-      return {
-        ok: false,
-        status: "opencli_tab_select_failed",
-        exit_code: 69,
-        message: "OpenCLI 找到了 Facebook 标签页，但无法选中该 tab。",
-        tab: selected,
-        stdout: select.stdout.trim(),
-        stderr: select.stderr.trim(),
-      };
-    }
-  }
-  return { ok: true, tab: selected, open_tab_count: tabs.length, facebook_tab_count: facebookTabs.length };
+  return {
+    ok: true,
+    tab: selected,
+    open_tab_count: tabs.length,
+    facebook_tab_count: facebookTabs.length,
+    tab_access_mode: selected.current ? "current_tab" : "direct_tab",
+  };
 }
 
-async function evaluateInSession({ opencliCommand, session, js, tab }) {
+async function selectTab({ opencliCommand, session, tab }) {
+  return await runOpencli(["browser", session, "tab", "select", tab], { command: opencliCommand });
+}
+
+async function evaluateInSession({ opencliCommand, session, js, tab, allowSelectFallback = true }) {
   const args = ["browser", session, "eval", js];
   if (tab) args.push("--tab", tab);
-  const result = await runOpencli(args, { command: opencliCommand });
-  return { ...result, payload: parseJsonOutput(result) };
+  const direct = await runOpencli(args, { command: opencliCommand });
+  if (direct.ok || !tab || !allowSelectFallback) {
+    return {
+      ...direct,
+      payload: parseJsonOutput(direct),
+      tab_access_mode: tab ? "direct_tab" : "current_session",
+      direct_tab: tab ? 1 : 0,
+      select_fallback: 0,
+    };
+  }
+
+  const select = await selectTab({ opencliCommand, session, tab });
+  if (!select.ok) {
+    return {
+      ...direct,
+      payload: parseJsonOutput(direct),
+      tab_access_mode: "direct_tab_failed",
+      direct_tab: 1,
+      select_fallback: 1,
+      select_stdout: select.stdout.trim(),
+      select_stderr: select.stderr.trim(),
+    };
+  }
+
+  const retry = await runOpencli(args, { command: opencliCommand });
+  return {
+    ...retry,
+    payload: parseJsonOutput(retry),
+    tab_access_mode: "select_fallback",
+    direct_tab: 0,
+    select_fallback: 1,
+    direct_stdout: direct.stdout.trim(),
+    direct_stderr: direct.stderr.trim(),
+    select_stdout: select.stdout.trim(),
+    select_stderr: select.stderr.trim(),
+  };
 }
 
 function extractArgs(argv = process.argv.slice(2)) {
@@ -293,4 +323,5 @@ export {
   parseJsonOutput,
   readConfig,
   runOpencli,
+  selectTab,
 };

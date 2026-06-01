@@ -447,8 +447,28 @@ def assert_opencli_extract_script_requires_human_intervention() -> None:
 
 def assert_opencli_runtime_keeps_current_bound_tab() -> None:
     script_text = (ROOT / "scripts" / "opencli_runtime.mjs").read_text(encoding="utf-8")
-    assert "selected.page && !selected.current" in script_text
-    assert '"tab", "select", selected.page' in script_text
+    ensure_start = script_text.index("async function ensureFacebookTab")
+    evaluate_start = script_text.index("async function evaluateInSession")
+    ensure_body = script_text[ensure_start:evaluate_start]
+    assert '"tab", "select", selected.page' not in ensure_body
+    assert 'tab_access_mode: selected.current ? "current_tab" : "direct_tab"' in ensure_body
+    assert "allowSelectFallback = true" in script_text
+    assert '"tab", "select", tab' in script_text
+    assert 'tab_access_mode: "select_fallback"' in script_text
+    assert "select_fallback" in (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
+
+
+def assert_opencli_detail_enrichment_reuses_tab_with_fallback() -> None:
+    script_text = (ROOT / "scripts" / "opencli_enrich_post_details.mjs").read_text(encoding="utf-8")
+    assert "async function openReusablePostTab" in script_text
+    assert "async function navigatePostTab" in script_text
+    assert '"open",' in script_text
+    assert '"--tab",' in script_text
+    assert "async function enrichPostWithFreshTab" in script_text
+    assert "shouldFallbackAfterReusable" in script_text
+    assert "restorePost(post, before)" in script_text
+    assert "fresh_tab_fallback" in script_text
+    assert "low_disturbance" in script_text
 
 
 def assert_feishu_writes_require_user_identity() -> None:
@@ -1696,6 +1716,7 @@ def main() -> int:
     assert_opencli_extract_helpers_dedupe_homepage_candidates()
     assert_opencli_extract_script_requires_human_intervention()
     assert_opencli_runtime_keeps_current_bound_tab()
+    assert_opencli_detail_enrichment_reuses_tab_with_fallback()
     assert_feishu_writes_require_user_identity()
     assert_check_env_prefers_opencli_route()
     assert_config_resolves_platform_defaults()

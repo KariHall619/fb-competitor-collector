@@ -27,7 +27,7 @@
 ## 2. 关键技术决策
 
 1. 业务人员只使用一个 skill：`fb-competitor-collector`。
-2. Facebook 实时采集只读取正常 Chrome 当前页面，不启动其他浏览器会话。
+2. Facebook 实时采集优先低打扰读取已绑定的正常 Chrome Facebook 标签页；如果低打扰读取失败，为保证采集完整性回退到已验证的前台标签页操作。
 3. 采集阶段只做全量发现，不做热门筛选。
 4. 本地 SQLite 保存全量内容，用 `canonical_post_url` 去重。
 5. 飞书账号来源表只读，输出表只写。
@@ -162,20 +162,20 @@ filters:
 
 实时采集由 OpenCLI Browser Bridge 执行：
 
-1. 使用 Chrome 插件选中的同一 Chrome profile 新开一个采集窗口；
-2. 只认领这次新窗口里新出现的 `about:blank` 标签页；
-3. 在该受控标签页打开目标 Facebook 页面；
+1. 绑定业务人员同一 Chrome profile 中已打开的 Facebook 标签页；
+2. 优先用 OpenCLI `--tab` 直接读取目标标签页，减少主动切换；
+3. 如果直接读取失败，回退到原来的 tab select 路径，确保采集效果不下降；
 4. 在页面内执行 `scripts/fb_dom_extractors.js` 的 DOM 提取逻辑；
 5. 过滤掉登录页、空白动态壳、评论片段和无正文候选；
 6. 得到帖子链接、候选文章链接、正文、相对时间文本、互动文本；
 7. `prepare_capture_result.py` 标准化候选并保留 `needs_enrichment`；
-8. `opencli_enrich_post_details.mjs` 打开候选详情页，确认精确时间、评论/回复引流链接和目标日期；
+8. `opencli_enrich_post_details.mjs` 优先复用一个详情标签页确认精确时间、评论/回复引流链接和目标日期；单帖低打扰失败时回退到原来的新开详情页流程；
 9. `enrich_article_summaries.py` 抓取落地页材料，`apply_article_summaries.py` 写入 Codex 中文摘要；
 10. 只有 `output_quality.py` 判定为 `ready_for_output` 的记录才允许同步飞书。
 
 采集阶段不得因为链接形态过早丢弃内容。`/posts/`、`story.php`、`permalink.php`、`reel`、`photo.php`、`watch`、`videos` 都先作为 FB 内容候选保存。父帖链接只作为优先去重依据；抓不到父帖时保留原始内容链接，后续再做相似度/人工复核去重。
 
-详情补全阶段会打开每条候选内容，先从时间 tooltip 或 DOM 属性确认精确发帖时间，再展开评论和评论回复，寻找账号主发的引流链接。只有当该链接最终解析到外部网站，并且精确发帖时间、落地页摘要等字段齐全时，记录才进入 `ready_for_output` 并允许写入飞书最终表。字段不完整的候选保留为 `needs_enrichment`。
+详情补全阶段会进入每条候选内容，先从时间 tooltip 或 DOM 属性确认精确发帖时间，再展开评论和评论回复，寻找账号主发的引流链接。为了减少打扰，脚本优先复用一个详情标签页处理多条候选；如果复用标签页失败或采集结果变少，则对该帖子回退到原来的单帖新开详情页流程。只有当该链接最终解析到外部网站，并且精确时间、落地页摘要等字段齐全时，记录才进入 `ready_for_output` 并允许写入飞书最终表。字段不完整的有效候选仍先入库并保留为 `needs_enrichment`，后续继续补采。
 
 已验证的时间流程：
 
@@ -196,7 +196,7 @@ filters:
 
 1. 检测到 `登录 / 忘记账户了？`、登录表单、游客预览等信号时，立即停止；
 2. 返回 `human_intervention_required`；
-3. 提示业务人员在新打开的同 profile 采集窗口手动登录 Facebook；
+3. 提示业务人员在同 profile 的 Facebook 标签页手动登录或确认页面；
 4. 在人工确认能连续看到多条帖子前，不入库、不同步飞书。
 
 `scripts/opencli_extract_current_tab.mjs` 是该路线的可检查参考脚本。实际运行时应由 OpenCLI Browser Bridge runtime 控制当前标签页。
@@ -377,6 +377,6 @@ Windows 交付前补齐：
 
 ## 13. 当前结论
 
-OpenCLI Browser Bridge 是当前正式实时采集入口。它负责浏览器绑定、tab 选择、页面执行和 hover/network 等浏览器操作；Facebook 业务字段仍由本项目的 `fb_dom_extractors.js`、详情补全和质量门禁决定，不直接采用 OpenCLI 内置 `facebook feed` 的通用输出列。
+OpenCLI Browser Bridge 是当前正式实时采集入口。它负责浏览器绑定、优先低打扰的 direct tab 读取、必要时的 tab 选择、页面执行和 hover/network 等浏览器操作；Facebook 业务字段仍由本项目的 `fb_dom_extractors.js`、详情补全和质量门禁决定，不直接采用 OpenCLI 内置 `facebook feed` 的通用输出列。
 
 因此本项目不保留其他实时采集入口。后续所有优化都围绕 OpenCLI Browser Bridge 当前页读取、字段提取、去重、飞书同步和筛选展开。
