@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlencode, unquote, urlparse, urlunparse
 from typing import Any
 
+from field_schema import DEFAULT_OUTPUT_HEADERS, output_row_for_headers
+
 
 POST_URL_KEYS = ("post_url", "fb_post_url", "Facebook帖子链接", "帖子链接")
 ARTICLE_URL_KEYS = ("article_url", "landing_url", "comment_article_url", "文章链接")
@@ -26,6 +28,7 @@ FACEBOOK_INTERNAL_HOSTS = {
     "www.messenger.com",
 }
 ESTIMATED_TIME_SOURCES = {"relative_hour", "relative_estimated", "relative_label"}
+COMMENT_LEAD_SOURCES = {"comment", "comment_reply"}
 RELATIVE_TIME_RE = re.compile(
     r"^(?:just now|yesterday|\d+\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)(?:\s+ago)?|刚刚|\d+\s*分钟|\d+\s*小时|昨天|\d+\s*天|\d+\s*周)$",
     re.I,
@@ -263,6 +266,29 @@ def clean_article_url(value: Any) -> str:
     return urlunparse((parsed.scheme or "https", netloc, parsed.path, "", cleaned_query, ""))
 
 
+def comment_lead_landing_url(lead_url_raw: Any, lead_link_source: Any) -> str:
+    """Return the comment/reply lead URL when it is a real external landing page.
+
+    Facebook detail pages can contain unrelated right-column or feed ads. A link
+    found in the account's own comment/reply is more authoritative than generic
+    external links discovered elsewhere on the page.
+    """
+
+    source = str(lead_link_source or "").strip()
+    if source not in COMMENT_LEAD_SOURCES:
+        return ""
+    cleaned = clean_article_url(lead_url_raw)
+    return cleaned if is_external_landing_url(cleaned) else ""
+
+
+def has_qualified_comment_lead_link(post: dict[str, Any]) -> bool:
+    return (
+        post.get("lead_link_status") == "qualified"
+        and post.get("lead_link_source") in COMMENT_LEAD_SOURCES
+        and bool(post.get("landing_url") or post.get("article_url"))
+    )
+
+
 def normalize_date(value: Any) -> str:
     if value in (None, ""):
         return ""
@@ -429,12 +455,15 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
     canonical_post_url = raw.get("canonical_post_url") or canonicalize_post_url(parent_post_url or raw_fb_url or post_url)
     if canonical_post_url == "https://facebook.com/photo":
         canonical_post_url = canonicalize_post_url(parent_post_url or raw_fb_url or post_url)
-    article_url = clean_article_url(first_value(raw, ARTICLE_URL_KEYS))
-    landing_url = clean_article_url(raw.get("landing_url") or article_url)
     lead_url_raw = clean_article_url(raw.get("lead_url_raw") or raw.get("comment_article_url") or "")
     lead_link_source = raw.get("lead_link_source") or ""
     lead_link_status = raw.get("lead_link_status") or ""
-    if lead_link_status != "qualified" and lead_url_raw and lead_link_source in {"comment", "comment_reply"} and is_external_landing_url(landing_url):
+    article_url = clean_article_url(first_value(raw, ARTICLE_URL_KEYS))
+    lead_landing_url = comment_lead_landing_url(lead_url_raw, lead_link_source)
+    landing_url = lead_landing_url or clean_article_url(raw.get("landing_url") or article_url)
+    if lead_landing_url:
+        article_url = lead_landing_url
+    if lead_link_status != "qualified" and lead_landing_url:
         lead_link_status = "qualified"
     story_summary = first_value(raw, SUMMARY_KEYS)
     relative_time_text = raw.get("relative_time_text") or raw.get("post_time_text") or ""
@@ -510,8 +539,7 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
                 has_output_post_time(post),
                 post.get("story_summary"),
                 post.get("summary_source") == "article",
-                post.get("lead_link_status") == "qualified",
-                post.get("landing_url") or post.get("article_url"),
+                has_qualified_comment_lead_link(post),
             ]
         )
         post["output_status"] = "ready_for_output" if required_ok else "needs_enrichment"
@@ -542,40 +570,8 @@ def feishu_row(post: dict[str, Any], extra: dict[str, Any] | None = None) -> lis
     return row
 
 
-POST_HEADERS = [
-    "账号",
-    "帖子链接",
-    "发帖时间",
-    "文章链接",
-    "故事概要",
-    "互动数据（浏览量、点赞量）",
-    "是否采用",
-    "对应站内链接",
-]
+POST_HEADERS = DEFAULT_OUTPUT_HEADERS
 
 
 def output_row(post: dict[str, Any]) -> list[Any]:
-    parts = []
-    if post.get("views") is not None:
-        parts.append(f"浏览量：{post.get('views')}")
-    if post.get("likes") is not None:
-        parts.append(f"点赞量：{post.get('likes')}")
-    if post.get("comments") is not None:
-        parts.append(f"评论数：{post.get('comments')}")
-    if post.get("shares") is not None:
-        parts.append(f"分享数：{post.get('shares')}")
-    engagement = "；".join(parts) or post.get("engagement_raw") or ""
-    account = post.get("account_name") or post.get("account_url") or ""
-    posted_at = post.get("posted_at") or post.get("posted_date", "")
-    if posted_at and is_estimated_time_source(post.get("time_source")):
-        posted_at = f"约{posted_at}"
-    return [
-        account,
-        post.get("post_url") or post.get("raw_fb_url", ""),
-        posted_at,
-        post.get("landing_url") or post.get("article_url", ""),
-        post.get("story_summary", ""),
-        engagement,
-        "",
-        "",
-    ]
+    return output_row_for_headers(post, POST_HEADERS)

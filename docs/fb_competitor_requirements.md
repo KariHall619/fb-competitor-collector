@@ -8,7 +8,9 @@
 
 ```text
 业务人员打开已登录 Facebook 页面
--> Codex Chrome Extension 读取当前 Chrome 标签页可见帖子
+-> OpenCLI Browser Bridge 读取当前 Chrome 标签页可见帖子
+-> 用主页相对时间确定候选窗口
+-> 打开帖子详情页确认精确时间与评论引流链接
 -> 标准化字段
 -> SQLite 本地去重入库
 -> 飞书表格同步
@@ -40,7 +42,7 @@
 第一阶段必须完成：
 
 1. 从飞书账号来源表读取竞品账号和内部主页账号；
-2. 通过 Codex Chrome Extension 读取业务人员当前正常 Chrome 标签页中可见的 Facebook 帖子；
+2. 通过 OpenCLI Browser Bridge 读取业务人员当前正常 Chrome 标签页中可见的 Facebook 帖子；
 3. 标准化帖子链接、文章链接、故事概要、账号类型、发帖时间、互动数据等字段；
 4. 本地 SQLite 保存全量内容并按 canonical post URL 去重；
 5. 同步结果到飞书输出表 `FB竞品帖子链接`；
@@ -107,6 +109,8 @@ Sheet id: 44013b
 | fb_link_kind | 是 | FB 内容链接类型 |
 | post_type | 尽量 | 视频 / 文本 / 图片 / 其他 |
 | posted_date | 尽量 | 发帖日期，格式 `YYMMDD` |
+| posted_at | 最终入表必填 | 详情页确认后的小时级或分钟级时间，格式 `2026年5月29日 12:32` |
+| relative_time_text | 是 | 主页可见相对时间，如 `3h`、`12h`、`1d`，仅用于候选窗口和滚动边界 |
 | article_url | 尽量 | 外部文章链接 |
 | lead_url_raw | 最终入表必填 | 评论区或评论回复中的原始引流链接 |
 | landing_url | 最终入表必填 | 引流链接最终落地 URL |
@@ -132,6 +136,19 @@ Sheet id: 44013b
 
 如果互动数据不可见，字段留空，不编造。
 
+时间确认要求：
+
+1. 主页相对时间只用于决定候选范围，不能直接换算为正式 `posted_at`；
+2. 对“今天”这类请求，先采集 `3h`、`12h` 等候选，看到稳定 `1d` 可作为滚动边界；
+3. 每条候选必须进入帖子详情页，通过 tooltip 或 DOM 精确时间属性确认 `posted_at`；
+4. 只有详情页精确时间属于目标日期时，才能写入该日期的正式结果。
+
+引流链接要求：
+
+1. 最终入表的文章链接必须来自账号在评论区或评论回复中发布的引流链接；
+2. 如果详情页同时出现广告位外链、推荐流外链或其他非评论链接，不能覆盖已经确认的评论引流链接；
+3. 故事概要必须基于最终 `landing_url` 对应的文章内容，不允许用广告页标题或 Facebook 帖子正文代替。
+
 ## 7. 日期与采集频率
 
 业务初始期望：
@@ -144,7 +161,7 @@ Sheet id: 44013b
 1. Facebook 页面不提供稳定的日期范围接口；
 2. 实时采集依赖业务人员打开并加载目标页面；
 3. 第一版优先保证当前可见页面采集、入库、去重、同步和筛选稳定；
-4. 每日自动化需要在 Chrome Extension 当前页采集稳定后再单独配置固定运行机和执行方式。
+4. 每日自动化需要在 OpenCLI Browser Bridge 当前页采集稳定后再单独配置固定运行机和执行方式。
 
 ## 8. 筛选需求
 
@@ -168,11 +185,11 @@ Sheet id: 44013b
 ```
 
 ```text
-使用 FB 竞品采集 skill，试一下当前 Chrome 页面能不能抓到帖子正文，不要写飞书。
+使用 FB 竞品采集 skill，试一下目标 Facebook 页面能不能抓到帖子正文，不要写飞书。
 ```
 
 ```text
-使用 FB 竞品采集 skill，采集当前 Chrome 页面里可见的帖子，并同步到飞书。
+使用 FB 竞品采集 skill，采集目标 Facebook 页面里可见的帖子，并同步到飞书。
 ```
 
 ```text
@@ -185,7 +202,7 @@ Sheet id: 44013b
 
 1. 能读取飞书账号来源表；
 2. 能确认飞书 CLI 为用户身份；
-3. 能确认 Codex Chrome Extension 可用；
+3. 能确认 OpenCLI Browser Bridge 可用；
 4. 能从正常 Chrome 已登录页面读取真实帖子正文；
 5. 能提取帖子链接、文章链接、故事概要；
 6. 能写入 SQLite；
@@ -195,3 +212,20 @@ Sheet id: 44013b
 10. 能按日期和账号类型筛选；
 11. 浏览量/点赞量缺失时不阻塞流程；
 12. 插件不可用或页面不可见真实帖子时停止，不写假结果。
+
+## 11. 当前实现事实
+
+当前正式实时采集入口是 OpenCLI Browser Bridge，不保留 Codex Chrome Extension 或其他浏览器实时采集入口。OpenCLI 只负责浏览器连接、tab 绑定、页面 eval、滚动、hover 和详情页打开；Facebook 业务字段仍由项目内脚本决定。
+
+项目内主要脚本职责：
+
+1. `scripts/check_env.py`：检查平台、`lark-cli`、OpenCLI CLI/daemon/Browser Bridge、飞书读写配置和推荐采集路线；
+2. `scripts/read_accounts.py`：从飞书账号来源表读取竞品/内部账号，支持竞品列、内部列和通用账号列；
+3. `scripts/opencli_extract_current_tab.mjs`：当前 Chrome Facebook tab 首页候选提取参考入口；
+4. `scripts/prepare_capture_result.py`：把首页候选标准化，保留短帖、媒体链接和缺字段候选为 `needs_enrichment`；
+5. `scripts/opencli_enrich_post_details.mjs`：打开候选详情页，确认精确时间，展开评论/回复，解析账号自发引流链接，并按目标日期过滤；
+6. `scripts/enrich_article_summaries.py` 与 `scripts/apply_article_summaries.py`：基于落地页材料生成或应用中文概要；
+7. `scripts/output_quality.py`：最终输出质量门禁；
+8. `scripts/field_schema.py`：飞书 A-K 输出列、表头别名和账号来源表表头识别。
+
+当前飞书输出表使用 A-K 列：`账号`, `账户类型`, `帖子链接`, `帖子类型`, `发帖时间`, `文章链接`, `故事概要`, `互动数据（点赞量）`, `浏览量`, `是否采用`, `对应站内链接`。这个顺序写在 `config/settings.yaml` 的 `feishu.field_schema.output_headers`，代码实现以 `scripts/field_schema.py` 为准。

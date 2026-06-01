@@ -1,10 +1,5 @@
 /**
  * Shared Facebook DOM extraction helpers.
- *
- * This is project-owned code distilled from reviewing public userscripts for
- * Facebook permalink/timestamp/post export workflows. The reviewed scripts are
- * stored under research/userscripts. Do not import third-party userscripts
- * directly into the business workflow.
  */
 
 const { browserExactTimeHelpersExpression } = require("./fb_time_extractors.js");

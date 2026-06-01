@@ -42,8 +42,15 @@ HEADER_ALIASES: dict[str, set[str]] = {
     "lead_link_source": {"引流链接位置", "引流来源", "引流链接来源"},
     "lead_link_status": {"引流确认状态", "引流状态"},
     "story_summary": {"故事概要", "摘要", "文章摘要", "内容摘要", "简述"},
-    "engagement": {"互动数据", "互动数据（浏览量、点赞量）", "互动数据(浏览量、点赞量)", "互动数据汇总"},
-    "likes": {"互动数据（点赞量）", "互动数据(点赞量)", "点赞量", "点赞数", "反应数"},
+    "engagement": {
+        "互动数据",
+        "互动数据（点赞量）",
+        "互动数据(点赞量)",
+        "互动数据（浏览量、点赞量）",
+        "互动数据(浏览量、点赞量)",
+        "互动数据汇总",
+    },
+    "likes": {"点赞量", "点赞数", "反应数"},
     "views": {"浏览量", "播放量"},
     "comments": {"评论数", "评论量"},
     "shares": {"分享数", "分享量"},
@@ -138,9 +145,9 @@ def current_or_configured_output_headers(config: dict[str, Any], current_headers
     return cleaned or configured_output_headers(config)
 
 
-def engagement_text(post: dict[str, Any]) -> str:
+def engagement_text(post: dict[str, Any], *, include_views: bool = True) -> str:
     parts = []
-    if post.get("views") is not None:
+    if include_views and post.get("views") is not None:
         parts.append(f"浏览量：{post.get('views')}")
     if post.get("likes") is not None:
         parts.append(f"点赞量：{post.get('likes')}")
@@ -151,9 +158,20 @@ def engagement_text(post: dict[str, Any]) -> str:
     return "；".join(parts) or post.get("engagement_raw") or post.get("engagement_data") or ""
 
 
+def output_account_type(value: Any) -> str:
+    text = str(value or "").strip()
+    if text == "competitor":
+        return "竞品"
+    if text == "internal":
+        return "内部"
+    return text
+
+
 def output_value(post: dict[str, Any], field: str) -> Any:
     if field == "account_name":
         return post.get("account_name") or post.get("account_url") or ""
+    if field == "account_type":
+        return output_account_type(post.get("account_type"))
     if field == "post_url":
         return post.get("post_url") or post.get("raw_fb_url") or ""
     if field == "posted_at":
@@ -164,7 +182,9 @@ def output_value(post: dict[str, Any], field: str) -> Any:
     if field == "landing_url":
         return post.get("landing_url") or post.get("article_url") or ""
     if field == "engagement":
-        return engagement_text(post)
+        current_header = cell_text(post.get("_current_output_header", ""))
+        include_views = not current_header or "浏览量" in current_header
+        return engagement_text(post, include_views=include_views)
     if field == "adoption_status":
         return post.get("adoption_status", "")
     if field == "internal_link":
@@ -179,7 +199,11 @@ def output_row_for_headers(post: dict[str, Any], headers: list[str]) -> list[Any
     row: list[Any] = []
     for header in headers:
         field = output_field_for_header(header)
-        row.append(output_value(post, field) if field else "")
+        if field == "engagement":
+            value_post = {**post, "_current_output_header": header}
+            row.append(output_value(value_post, field))
+        else:
+            row.append(output_value(post, field) if field else "")
     return row
 
 

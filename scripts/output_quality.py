@@ -5,11 +5,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from models import COMMENT_LEAD_SOURCES, ESTIMATED_TIME_SOURCES
 
 def has_qualified_comment_lead_link(post: dict[str, Any]) -> bool:
     return (
         post.get("lead_link_status") == "qualified"
         and post.get("lead_link_source") in {"comment", "comment_reply"}
+        and bool(post.get("landing_url") or post.get("article_url"))
+    )
+
+def has_qualified_comment_lead_link(post: dict[str, Any]) -> bool:
+    return (
+        post.get("lead_link_status") == "qualified"
+        and post.get("lead_link_source") in COMMENT_LEAD_SOURCES
         and bool(post.get("landing_url") or post.get("article_url"))
     )
 

@@ -436,11 +436,19 @@ if (candidate.selected_post_link_kind !== 'post' || candidate.media_link_count !
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def assert_chrome_extract_script_requires_human_intervention() -> None:
-    script_text = (ROOT / "scripts" / "chrome_extension_extract_current_tab.mjs").read_text(encoding="utf-8")
+def assert_opencli_extract_script_requires_human_intervention() -> None:
+    script_text = (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
     assert "human_intervention_required" in script_text
     assert "visitor_preview" in script_text
     assert "已停止采集" in script_text
+    assert "browser.user.openTabs()" not in script_text
+    assert "browser.user.claimTab" not in script_text
+
+
+def assert_opencli_runtime_keeps_current_bound_tab() -> None:
+    script_text = (ROOT / "scripts" / "opencli_runtime.mjs").read_text(encoding="utf-8")
+    assert "selected.page && !selected.current" in script_text
+    assert '"tab", "select", selected.page' in script_text
 
 
 def assert_feishu_writes_require_user_identity() -> None:
@@ -474,31 +482,23 @@ def assert_feishu_writes_require_user_identity() -> None:
         lark_io.run_lark = original
 
 
-def assert_check_env_prefers_chrome_extension_route() -> None:
+def assert_check_env_prefers_opencli_route() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from check_env import recommended_capture_route
 
-    assert recommended_capture_route({"codex_chrome_extension": {"ok": True}})["route"] == "codex_chrome_extension"
-    assert recommended_capture_route({"codex_chrome_extension": {"ok": False}})["route"] == "blocked_until_chrome_extension_ready"
+    assert recommended_capture_route({"opencli_browser_bridge": {"ok": True}})["route"] == "opencli_browser_bridge"
+    assert recommended_capture_route({"opencli_browser_bridge": {"ok": False}})["route"] == "blocked_until_opencli_ready"
 
 
-def assert_check_env_discovers_versioned_chrome_plugin(tmp_root: Path) -> None:
+def assert_check_env_reports_opencli_route_status() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
-    import check_env
+    from check_env import check_opencli, version_ok
 
-    original_base = check_env.CHROME_PLUGIN_BASE
-    try:
-        check_env.CHROME_PLUGIN_BASE = tmp_root
-        older = tmp_root / "1.0.0" / "scripts"
-        newer = tmp_root / "26.519.81530" / "scripts"
-        older.mkdir(parents=True)
-        newer.mkdir(parents=True)
-        for folder in (older, newer):
-            (folder / "browser-client.mjs").write_text("", encoding="utf-8")
-            (folder / "check-extension-installed.js").write_text("", encoding="utf-8")
-        assert check_env.find_chrome_plugin_root() == newer.parent
-    finally:
-        check_env.CHROME_PLUGIN_BASE = original_base
+    assert version_ok("1.8.0") is True
+    assert version_ok("1.7.9") is False
+    missing = check_opencli(["/definitely/missing/opencli"], daemon_port=9)
+    assert missing["status"] == "opencli_missing"
+    assert missing["ok"] is False
 
 
 def assert_config_resolves_platform_defaults() -> None:
@@ -507,8 +507,7 @@ def assert_config_resolves_platform_defaults() -> None:
 
     base = {
         "lark_cli_path": "auto",
-        "codex_home": "auto",
-        "codex_chrome_plugin_base": "auto",
+        "opencli_path": "auto",
         "platform_overrides": {
             "darwin": {"lark_cli_path": "/Users/a1/.npm-global/bin/lark-cli"},
             "windows": {"lark_cli_path": "lark-cli.cmd"},
@@ -517,7 +516,9 @@ def assert_config_resolves_platform_defaults() -> None:
     mac = resolve_runtime_config(base, platform_name="Darwin", environ={"HOME": "/Users/a1", "PATH": ""})
     assert mac["runtime"]["platform"] == "darwin"
     assert mac["lark_cli_path"] == "/Users/a1/.npm-global/bin/lark-cli"
-    assert mac["codex_chrome_plugin_base"] == "/Users/a1/.codex/plugins/cache/openai-bundled/chrome"
+    assert mac["opencli_path"] == "opencli"
+    assert mac["opencli_command"] == ["opencli"]
+    assert mac["opencli_session"] == "fb-competitor"
 
     windows = resolve_runtime_config(
         base,
@@ -526,15 +527,26 @@ def assert_config_resolves_platform_defaults() -> None:
     )
     assert windows["runtime"]["platform"] == "windows"
     assert windows["lark_cli_path"] == "lark-cli.cmd"
-    assert windows["codex_chrome_plugin_base"].endswith(".codex/plugins/cache/openai-bundled/chrome")
+    assert windows["opencli_path"] == "opencli.cmd"
+    assert windows["opencli_command"] == ["opencli.cmd"]
+
+    npx_fallback = resolve_runtime_config(
+        {"lark_cli_path": "auto", "opencli_path": "auto"},
+        platform_name="Darwin",
+        environ={"HOME": "/Users/a1", "PATH": "/usr/local/bin"},
+    )
+    assert npx_fallback["opencli_command"][-2:] == ["-y", "@jackwener/opencli"]
 
     explicit = resolve_runtime_config(
-        {"lark_cli_path": r"%USERPROFILE%\bin\lark-cli.cmd", "codex_home": r"%USERPROFILE%\.codex"},
+        {
+            "lark_cli_path": r"%USERPROFILE%\bin\lark-cli.cmd",
+            "opencli_path": r"%USERPROFILE%\bin\opencli.cmd",
+        },
         platform_name="Windows",
         environ={"USERPROFILE": r"C:\Users\ops", "PATH": ""},
     )
     assert explicit["lark_cli_path"] == r"C:\Users\ops\bin\lark-cli.cmd"
-    assert explicit["codex_home"] == r"C:\Users\ops\.codex"
+    assert explicit["opencli_path"] == r"C:\Users\ops\bin\opencli.cmd"
 
 
 def assert_exact_time_parsing_and_relative_time_estimation() -> None:
@@ -595,6 +607,17 @@ const scrambled = {
   h: 15,
 };
 if (!isLikelyHeaderTimeElement(scrambled, 739)) process.exit(5);
+const midPageRelative = {
+  text: '50m',
+  aria: '',
+  title: '',
+  href: 'https://www.facebook.com/LessonsTaughtByLifepage/posts/pfbid-real',
+  x: 530,
+  y: 522,
+  w: 28,
+  h: 16,
+};
+if (!isLikelyHeaderTimeElement(midPageRelative, 739)) process.exit(6);
 """
     result = run(["node", "-e", js])
     assert result.returncode == 0, result.stderr or result.stdout
@@ -602,12 +625,15 @@ if (!isLikelyHeaderTimeElement(scrambled, 739)) process.exit(5);
 
 def assert_comments_and_shares_are_output_as_engagement() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
-    from models import normalize_post, output_row
+    from models import POST_HEADERS, normalize_post, output_row
 
     post = normalize_post(
         {
             "post_url": "https://www.facebook.com/example/posts/engagement",
             "posted_at": "2026年5月27日 14:03",
+            "account_type": "competitor",
+            "post_type": "文本",
+            "views": "1.2K",
             "article_summary": "文章概要",
             "reactions": "81",
             "comments": "29",
@@ -615,9 +641,65 @@ def assert_comments_and_shares_are_output_as_engagement() -> None:
         }
     )
     row = output_row(post)
-    assert "点赞量：81" in row[5]
-    assert "评论数：29" in row[5]
-    assert "分享数：3" in row[5]
+    assert POST_HEADERS == [
+        "账号",
+        "账户类型",
+        "帖子链接",
+        "帖子类型",
+        "发帖时间",
+        "文章链接",
+        "故事概要",
+        "互动数据（点赞量）",
+        "浏览量",
+        "是否采用",
+        "对应站内链接",
+    ]
+    assert len(row) == len(POST_HEADERS)
+    assert row[1] == "竞品"
+    assert row[3] == "文本"
+    assert "点赞量：81" in row[7]
+    assert "评论数：29" in row[7]
+    assert "分享数：3" in row[7]
+    assert row[8] == 1200
+
+
+def assert_field_schema_controls_output_rows() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from field_schema import (
+        account_column_roles,
+        configured_output_headers,
+        normalize_account_type,
+        output_row_for_headers,
+    )
+
+    post = {
+        "account_name": "Story Hub",
+        "account_type": "competitor",
+        "post_url": "https://facebook.com/story/posts/1",
+        "post_type": "文本",
+        "posted_at": "2026年5月28日 13:00",
+        "time_source": "relative_estimated",
+        "landing_url": "https://story.example/article",
+        "story_summary": "文章概要",
+        "likes": 81,
+        "comments": 29,
+        "shares": 3,
+        "views": 120000,
+    }
+    headers = ["文章链接", "账号", "账户类型", "发帖时间", "互动数据（点赞量）", "浏览量"]
+    row = output_row_for_headers(post, headers)
+    assert row == [
+        "https://story.example/article",
+        "Story Hub",
+        "竞品",
+        "约2026年5月28日 13:00",
+        "点赞量：81；评论数：29；分享数：3",
+        120000,
+    ]
+    assert configured_output_headers({"feishu": {"field_schema": {"output_headers": ["账号", "帖子链接"]}}}) == ["账号", "帖子链接"]
+    assert account_column_roles(["竞品fb账户", "内部FB账户"]) == {0: "competitor", 1: "internal"}
+    assert normalize_account_type("内部主页") == "internal"
+    assert normalize_account_type("竞品账号") == "competitor"
 
 
 def assert_generic_photo_canonical_is_recomputed() -> None:
@@ -634,135 +716,73 @@ def assert_generic_photo_canonical_is_recomputed() -> None:
     assert post["canonical_post_url"] == "https://facebook.com/photo/790"
 
 
-def assert_legacy_output_row_marks_estimated_time() -> None:
+def assert_comment_lead_link_overrides_ad_links(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
-    from models import output_row
+    from models import normalize_post
 
-    row = output_row(
-        {
-            "account_name": "Story Hub",
-            "post_url": "https://facebook.com/story/posts/estimated",
-            "posted_at": "2026年5月28日 13:00",
-            "time_source": "relative_estimated",
-            "landing_url": "https://story.example/article",
-            "story_summary": "文章概要",
-        }
-    )
-    assert row[2] == "约2026年5月28日 13:00"
-
-
-def assert_output_rows_follow_feishu_headers() -> None:
-    sys.path.insert(0, str(ROOT / "scripts"))
-    from field_schema import output_row_for_headers
-
-    post = {
-        "account_name": "Story Hub",
-        "account_type": "competitor",
-        "post_url": "https://facebook.com/story/posts/1",
-        "post_type": "reel",
-        "posted_at": "2026年5月27日 14:03",
-        "landing_url": "https://story.example/article",
-        "story_summary": "文章概要",
-        "likes": 81,
-        "views": 120000,
-        "comments": 29,
-        "shares": 3,
-    }
-    current_headers = [
-        "账号",
-        "账户类型",
-        "帖子链接",
-        "帖子类型",
-        "发帖时间",
-        "文章链接",
-        "故事概要",
-        "互动数据（点赞量）",
-        "浏览量",
-        "是否采用",
-        "对应站内链接",
-    ]
-    row = output_row_for_headers(post, current_headers)
-    assert row == [
-        "Story Hub",
-        "competitor",
-        "https://facebook.com/story/posts/1",
-        "reel",
-        "2026年5月27日 14:03",
-        "https://story.example/article",
-        "文章概要",
-        81,
-        120000,
-        "",
-        "",
-    ]
-
-    shuffled_headers = ["文章链接", "账号", "浏览量", "帖子链接", "故事概要"]
-    assert output_row_for_headers(post, shuffled_headers) == [
-        "https://story.example/article",
-        "Story Hub",
-        120000,
-        "https://facebook.com/story/posts/1",
-        "文章概要",
-    ]
-    legacy_headers = ["互动数据（浏览量、点赞量）"]
-    assert output_row_for_headers(post, legacy_headers) == ["浏览量：120000；点赞量：81；评论数：29；分享数：3"]
-
-    estimated = {
-        **post,
-        "posted_at": "2026年5月28日 13:00",
-        "time_source": "relative_estimated",
-    }
-    assert output_row_for_headers(estimated, ["发帖时间"]) == ["约2026年5月28日 13:00"]
-
-
-def assert_read_accounts_uses_header_roles() -> None:
-    sys.path.insert(0, str(ROOT / "scripts"))
-    import read_accounts
-
-    payload = {
-        "data": {
-            "valueRange": {
-                "values": [
-                    ["主页名称", "内部FB账户", "备注", "竞品fb账户"],
-                    [
-                        "Story Hub",
-                        [{"link": "https://facebook.com/internal", "text": "internal"}],
-                        "",
-                        [{"link": "https://facebook.com/competitor", "text": "competitor"}],
-                    ],
+    raw = tmp_path / "ad_polluted_raw.json"
+    prepared = tmp_path / "ad_polluted_prepared.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "post_url": "https://www.facebook.com/Glasstory89/posts/pfbid-story",
+                        "posted_at": "2026年5月29日 12:32",
+                        "time_source": "synthetic_hover_tooltip",
+                        "article_url": "https://www.proxy-cheap.com/?utm_source=facebook",
+                        "landing_url": "https://www.proxy-cheap.com/?utm_source=facebook",
+                        "lead_url_raw": "https://l.facebook.com/l.php?u=https%3A%2F%2Fkaylestore.net%2Fdoctors-gave-the-millionaires-son%2F%3Ffbclid%3Dabc",
+                        "lead_link_source": "comment",
+                        "article_summary": "富豪儿子被医生判定只剩数日生命，女孩揭开蓝色果汁背后的真相。",
+                    }
                 ]
-            }
-        }
-    }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    result = run(
+        [
+            PYTHON,
+            "scripts/prepare_capture_result.py",
+            "--input",
+            str(raw),
+            "--output",
+            str(prepared),
+            "--target-date",
+            "260529",
+            "--account-name",
+            "GLAS Story",
+            "--account-url",
+            "https://www.facebook.com/Glasstory89",
+        ]
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(prepared.read_text(encoding="utf-8"))
+    post = data["posts"][0]
+    assert post["article_url"] == "https://kaylestore.net/doctors-gave-the-millionaires-son/"
+    assert post["landing_url"] == "https://kaylestore.net/doctors-gave-the-millionaires-son/"
+    assert post["lead_link_status"] == "qualified"
+    assert post["output_status"] == "ready_for_output"
 
-    class Result:
-        returncode = 0
-        stdout = json.dumps(payload, ensure_ascii=False)
-        stderr = ""
-
-    original = read_accounts.read_source_range
-    try:
-        read_accounts.read_source_range = lambda _config, range_expr: Result()
-        accounts = read_accounts.read_accounts({"feishu": {"sheets": {"accounts": "accounts"}}})
-    finally:
-        read_accounts.read_source_range = original
-
-    assert accounts == [
+    normalized = normalize_post(
         {
-            "account_name": "Story Hub",
-            "account_url": "https://facebook.com/internal",
-            "account_type": "internal",
-            "enabled": True,
-            "note": "飞书账号配置：internal",
+            "post_url": "https://www.facebook.com/Glasstory89/posts/pfbid-story",
+            "posted_at": "2026年5月29日 12:32",
+            "time_source": "synthetic_hover_tooltip",
+            "time_confirmed": True,
+            "article_url": "https://www.shopify.com/free-trial?fbadid=1",
+            "landing_url": "https://www.shopify.com/free-trial?fbadid=1",
+            "lead_url_raw": "https://l.facebook.com/l.php?u=https%3A%2F%2Fkaylestore.net%2Fright-after-giving-birth%2F%3Ffbclid%3Dabc",
+            "lead_link_source": "comment_reply",
+            "article_summary": "产后母亲被女儿提醒有人要带走新生儿，秘密录音揭开婆婆计划。",
         },
-        {
-            "account_name": "Story Hub",
-            "account_url": "https://facebook.com/competitor",
-            "account_type": "competitor",
-            "enabled": True,
-            "note": "飞书账号配置：competitor",
-        },
-    ]
+        {"account_type": "competitor"},
+    )
+    assert normalized["article_url"] == "https://kaylestore.net/right-after-giving-birth/"
+    assert normalized["landing_url"] == "https://kaylestore.net/right-after-giving-birth/"
+    assert normalized["lead_link_status"] == "qualified"
 
 
 def assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path: Path) -> None:
@@ -1222,7 +1242,7 @@ import {
   RUN_MAIN,
   summarizeExactTimeChecks,
   verifyExactTimeCapture,
-} from './scripts/chrome_extension_verify_exact_time.mjs';
+} from './scripts/opencli_verify_exact_time.mjs';
 
 if (RUN_MAIN) process.exit(6);
 if (typeof verifyExactTimeCapture !== 'function') process.exit(7);
@@ -1264,9 +1284,21 @@ if (missing.ok || missing.status !== 'exact_time_not_found' || missing.confirmed
     result = run(["node", "--input-type=module", "-e", js])
     assert result.returncode == 0, result.stderr or result.stdout
 
-    no_run = run(["node", "scripts/chrome_extension_verify_exact_time.mjs", "--self-test"])
+    no_run = run(["node", "scripts/opencli_verify_exact_time.mjs", "--self-test"])
     assert no_run.returncode == 0
     assert no_run.stdout == ""
+
+
+def assert_opencli_detail_enrichment_supports_target_date_filter() -> None:
+    js = """
+import { dateKeyFromPostedAt } from './scripts/opencli_enrich_post_details.mjs';
+
+if (dateKeyFromPostedAt('2026年5月29日 12:32') !== '260529') process.exit(1);
+if (dateKeyFromPostedAt('2026年11月3日 01:05') !== '261103') process.exit(2);
+if (dateKeyFromPostedAt('3h') !== '') process.exit(3);
+"""
+    result = run(["node", "--input-type=module", "-e", js])
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path: Path) -> None:
@@ -1442,19 +1474,19 @@ def main() -> int:
     assert_url_canonicalization()
     assert_exact_time_parsing_and_relative_time_estimation()
     assert_comments_and_shares_are_output_as_engagement()
+    assert_field_schema_controls_output_rows()
     assert_generic_photo_canonical_is_recomputed()
-    assert_legacy_output_row_marks_estimated_time()
     assert_mobile_dom_extractor_can_see_story_links()
     assert_dom_extractor_does_not_treat_story_clock_as_post_time()
     assert_dom_extractor_excludes_profile_shell_with_external_link()
     assert_dom_extractor_blocks_visitor_preview()
     assert_dom_extractor_prefers_parent_post_over_photo_link()
-    assert_chrome_extract_script_requires_human_intervention()
+    assert_opencli_extract_script_requires_human_intervention()
+    assert_opencli_runtime_keeps_current_bound_tab()
     assert_feishu_writes_require_user_identity()
-    assert_check_env_prefers_chrome_extension_route()
+    assert_check_env_prefers_opencli_route()
     assert_config_resolves_platform_defaults()
-    with tempfile.TemporaryDirectory() as plugin_tmp:
-        assert_check_env_discovers_versioned_chrome_plugin(Path(plugin_tmp))
+    assert_check_env_reports_opencli_route_status()
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         config = tmp_path / "settings.yaml"
@@ -1502,10 +1534,10 @@ def main() -> int:
         assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path)
         assert_article_url_alone_does_not_qualify_lead_link(tmp_path)
         assert_filter_sync_applies_output_quality_gate(tmp_path)
-        assert_quality_gate_requires_comment_lead_source(tmp_path)
-        assert_detail_enrichment_ignores_page_shell_ad_links()
+        assert_comment_lead_link_overrides_ad_links(tmp_path)
         assert_prepare_capture_has_no_base_time_argument()
         assert_exact_time_verifier_summary_contract()
+        assert_opencli_detail_enrichment_supports_target_date_filter()
         assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path)
         assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp_path)
         assert_article_material_extractor(tmp_path)

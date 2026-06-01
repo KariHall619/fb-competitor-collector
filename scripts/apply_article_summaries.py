@@ -7,6 +7,8 @@ import argparse
 import json
 from pathlib import Path
 
+from models import has_qualified_comment_lead_link
+
 
 def output_status_for(post: dict) -> str:
     required_ok = all(
@@ -15,8 +17,7 @@ def output_status_for(post: dict) -> str:
             post.get("posted_at"),
             post.get("story_summary"),
             post.get("summary_source") == "article",
-            post.get("lead_link_status") == "qualified",
-            post.get("landing_url") or post.get("article_url"),
+            has_qualified_comment_lead_link(post),
         ]
     )
     return "ready_for_output" if required_ok else "needs_enrichment"

@@ -184,17 +184,6 @@ def expand_config_value(value: Any, *, environ: dict[str, str] | None = None) ->
     return text
 
 
-def default_codex_home(key: str, *, environ: dict[str, str] | None = None) -> str:
-    env = _env(environ)
-    if env.get("CODEX_HOME"):
-        return expand_config_value(env["CODEX_HOME"], environ=env)
-    if key == "windows":
-        home = env.get("USERPROFILE") or env.get("HOME") or str(Path.home())
-        return str(Path(home) / ".codex")
-    home = env.get("HOME") or str(Path.home())
-    return str(Path(home) / ".codex")
-
-
 def resolve_executable(command: str, *, environ: dict[str, str] | None = None) -> str:
     expanded = expand_config_value(command, environ=environ)
     path_env = _env(environ).get("PATH")
@@ -232,6 +221,36 @@ def resolve_lark_cli_path(
     return resolve_executable(str(candidate), environ=environ), source, raw
 
 
+def resolve_opencli_invocation(
+    config: dict[str, Any],
+    *,
+    key: str,
+    environ: dict[str, str] | None = None,
+) -> tuple[str, list[str], str, Any]:
+    raw = config.get("opencli_path", "auto")
+    override = platform_override(config, key).get("opencli_path")
+    if is_auto(raw):
+        candidate = override
+        source = f"platform_overrides.{key}.opencli_path" if not is_auto(candidate) else "PATH"
+    else:
+        candidate = raw
+        source = "opencli_path"
+
+    if is_auto(candidate):
+        names = ["opencli.cmd", "opencli.exe", "opencli"] if key == "windows" else ["opencli"]
+        opencli = _first_existing_command(names, environ=environ)
+        if Path(opencli).exists():
+            return opencli, [opencli], source, raw
+        npx_names = ["npx.cmd", "npx.exe", "npx"] if key == "windows" else ["npx"]
+        npx = _first_existing_command(npx_names, environ=environ)
+        if Path(npx).exists():
+            package = str(config.get("opencli_package") or "@jackwener/opencli")
+            return opencli, [npx, "-y", package], "npx", raw
+        return opencli, [opencli], source, raw
+    opencli = resolve_executable(str(candidate), environ=environ)
+    return opencli, [opencli], source, raw
+
+
 def resolve_runtime_config(
     config: dict[str, Any],
     *,
@@ -240,50 +259,37 @@ def resolve_runtime_config(
 ) -> dict[str, Any]:
     resolved = copy.deepcopy(config)
     key = platform_key(platform_name)
-    override = platform_override(resolved, key)
 
-    codex_home_raw = resolved.get("codex_home", "auto")
-    if is_auto(codex_home_raw):
-        codex_home = override.get("codex_home")
-        if is_auto(codex_home):
-            codex_home = default_codex_home(key, environ=environ)
-        else:
-            codex_home = expand_config_value(codex_home, environ=environ)
-        codex_home_source = f"platform_overrides.{key}.codex_home" if override.get("codex_home") else "default"
-    else:
-        codex_home = expand_config_value(codex_home_raw, environ=environ)
-        codex_home_source = "codex_home"
-
-    chrome_base_raw = resolved.get("codex_chrome_plugin_base", "auto")
-    if is_auto(chrome_base_raw):
-        chrome_base = override.get("codex_chrome_plugin_base")
-        if is_auto(chrome_base):
-            chrome_base = str(Path(codex_home) / "plugins" / "cache" / "openai-bundled" / "chrome")
-        else:
-            chrome_base = expand_config_value(chrome_base, environ=environ)
-        chrome_base_source = (
-            f"platform_overrides.{key}.codex_chrome_plugin_base"
-            if override.get("codex_chrome_plugin_base")
-            else "codex_home"
-        )
-    else:
-        chrome_base = expand_config_value(chrome_base_raw, environ=environ)
-        chrome_base_source = "codex_chrome_plugin_base"
+    opencli_path, opencli_command, opencli_source, configured_opencli_path = resolve_opencli_invocation(
+        resolved, key=key, environ=environ
+    )
+    opencli_session_raw = resolved.get("opencli_session", "fb-competitor")
+    opencli_session = (
+        "fb-competitor"
+        if is_auto(opencli_session_raw)
+        else expand_config_value(opencli_session_raw, environ=environ)
+    )
+    opencli_daemon_port_raw = resolved.get("opencli_daemon_port", "19825")
+    opencli_daemon_port = int(opencli_daemon_port_raw or 19825)
 
     lark_cli_path, lark_cli_source, configured_lark_cli_path = resolve_lark_cli_path(
         resolved, key=key, environ=environ
     )
 
-    resolved["codex_home"] = codex_home
-    resolved["codex_chrome_plugin_base"] = chrome_base
+    resolved["opencli_path"] = opencli_path
+    resolved["opencli_command"] = opencli_command
+    resolved["opencli_session"] = opencli_session
+    resolved["opencli_daemon_port"] = opencli_daemon_port
     resolved["lark_cli_path"] = lark_cli_path
     resolved["runtime"] = {
         "platform": key,
         "platform_system": platform_name or platform.system(),
-        "codex_home": codex_home,
-        "codex_home_source": codex_home_source,
-        "codex_chrome_plugin_base": chrome_base,
-        "codex_chrome_plugin_base_source": chrome_base_source,
+        "opencli_path": opencli_path,
+        "opencli_command": opencli_command,
+        "opencli_source": opencli_source,
+        "configured_opencli_path": configured_opencli_path,
+        "opencli_session": opencli_session,
+        "opencli_daemon_port": opencli_daemon_port,
         "lark_cli_path": lark_cli_path,
         "lark_cli_source": lark_cli_source,
         "configured_lark_cli_path": configured_lark_cli_path,
