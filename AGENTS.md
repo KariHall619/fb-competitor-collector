@@ -8,9 +8,9 @@ This file is the first-stop project memory for future agents working in this rep
 - The live Facebook capture runtime is now **OpenCLI Browser Bridge**. Do not reintroduce Codex Chrome Extension, CDP-only collectors, old userscripts, or downloaded skill bundles as live capture routes.
 - The user-validated workflow is:
   1. Business user opens the target Facebook account homepage in their normal logged-in Chrome profile.
-  2. OpenCLI Browser Bridge binds/selects that tab and evaluates `scripts/fb_dom_extractors.js`.
+  2. OpenCLI Browser Bridge binds that tab, prefers direct `--tab` reads without selecting it, and falls back to tab select only when direct access fails.
   3. Homepage relative labels such as `3h`, `12h`, `1d` only define the candidate window and scroll boundary.
-  4. Each candidate post detail page is opened with OpenCLI to confirm exact `posted_at`, expand comments/replies, and capture the account-owned lead link.
+  4. Candidate detail enrichment reuses one detail tab when possible, with the original fresh-tab flow as fallback, to confirm exact `posted_at`, expand comments/replies, and capture the account-owned lead link.
   5. The lead link resolves to an external `landing_url`.
   6. Article material is fetched from the landing page, and the Chinese `story_summary` must be based on that material.
   7. Only `ready_for_output` rows sync to Feishu; incomplete candidates stay in SQLite as `needs_enrichment`.

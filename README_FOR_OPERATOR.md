@@ -48,15 +48,17 @@ Supported route:
 
 ```text
 business user opens the visible Facebook page in normal Chrome
--> OpenCLI Browser Bridge reads the current tab DOM
+-> OpenCLI Browser Bridge reads the bound Facebook tab with low-disturbance direct tab access when possible
 -> homepage relative labels such as 3h/12h/1d define the candidate window
--> each candidate post detail page confirms exact posted_at and comment lead link
+-> a reused detail tab confirms exact posted_at and comment lead link, with the original fresh-tab flow as fallback
 -> normalize -> SQLite dedupe -> Feishu sync
 ```
 
 If the environment check says OpenCLI or Browser Bridge is not ready, stop and fix the OpenCLI CLI/daemon/extension/profile setup first. Do not use another browser route for live Facebook capture.
 
-If the capture window shows a login prompt, visitor preview, or only one preview post, stop immediately with `human_intervention_required`. The operator must manually log in or confirm the Chrome profile in that new window before retrying. Do not keep scrolling, import, or sync from that state.
+If the capture tab shows a login prompt, visitor preview, or only one preview post, stop immediately with `human_intervention_required`. The operator must manually log in or confirm the Chrome profile before retrying. Do not keep scrolling, import, or sync from that state.
+
+Low-disturbance capture is an optimization, not a quality tradeoff. Runtime reads first try direct `--tab` access and detail enrichment first reuses one detail tab to reduce visible Chrome tab churn. If those paths fail or collect less usable detail, the scripts fall back to the original select/new-tab flow for that post. Valid Facebook candidates still enter SQLite as `needs_enrichment` when fields are missing; the final-output quality gate only controls Feishu sync.
 
 For "today's posts" on a Facebook page, always reload/open the account homepage from the top and collect posts in visible homepage time order until the current-day boundary is covered. Do not continue from a previously low scroll position: Facebook virtualizes the feed DOM, so continuing from the current low position can omit newer posts above it. When the business user provides visible labels such as `38m, 1h, 2h ... 17h`, treat that sequence as the coverage checklist and open each post detail/comment area to find the account's comment or reply lead link.
 
@@ -134,7 +136,7 @@ Before syncing live FB capture results, the quality gate requires:
 - a lead link posted by the account in the comment area or a comment reply. The link must resolve to an external non-Facebook site and be stored as `landing_url` with `lead_link_status=qualified`.
 - The homepage/comment lead link is authoritative. If the post detail page also exposes unrelated right-column/feed ads, those ad links must not overwrite a previously captured comment/reply lead link.
 - story summary generated from the landing page/article, with `summary_source=article`
-- short posts are kept if they have a valid FB content URL, but remain `needs_enrichment` until lead link, landing URL, summary, and at least exact-or-estimated time are available
+- short posts and other valid FB candidates are kept in SQLite if they have a valid FB content URL, but remain `needs_enrichment` until lead link, landing URL, summary, and at least exact-or-estimated time are available
 
 Capture should preserve all real FB content candidates. If the capture sees `photo.php`, `/photo/`, `/reel/`, `/watch/`, or `/videos/`, keep the original content link and mark `fb_link_kind`.
 

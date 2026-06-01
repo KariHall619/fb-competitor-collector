@@ -128,6 +128,29 @@ async function openPostTab(baseContext, url) {
   return context;
 }
 
+async function openReusablePostTab(baseContext, url) {
+  const context = await openPostTab(baseContext, url);
+  context.lowDisturbanceMode = "reused_detail_tab";
+  return context;
+}
+
+async function navigatePostTab(context, url) {
+  const result = await runOpencli([
+    "browser",
+    context.session,
+    "open",
+    url,
+    "--tab",
+    context.tab.page,
+  ], { command: context.opencliCommand });
+  if (!result.ok) {
+    throw new Error(result.stderr || result.stdout || `OpenCLI failed to navigate reusable tab for ${url}`);
+  }
+  context.tab.url = url;
+  await waitSeconds(context, 3.5);
+  return context;
+}
+
 async function closePostTab(context) {
   if (!context?.tab?.page) return;
   await runOpencli(["browser", context.session, "tab", "close", context.tab.page], {
@@ -398,8 +421,8 @@ async function extractLeadLink(context, accountName = "") {
       return lines.slice(0, 12).some((line) => {
         const lower = line.toLowerCase();
         return lower === ownerNameLower
-          || lower.startsWith(`${ownerNameLower} replied`)
-          || lower.includes(`${ownerNameLower} replied`);
+          || lower.startsWith(ownerNameLower + " replied")
+          || lower.includes(ownerNameLower + " replied");
       });
     };
     const looksCommentContext = (lines, links) => {
@@ -504,6 +527,93 @@ function outputStatusFor(post) {
   return requiredOk ? "ready_for_output" : "needs_enrichment";
 }
 
+function enrichmentScore(post) {
+  let score = 0;
+  if (post.posted_at) score += 1;
+  if (post.time_confirmed) score += 1;
+  if (post.engagement_data || post.reactions || post.comments || post.shares) score += 1;
+  if (hasQualifiedLeadLink(post)) score += 2;
+  if (post.landing_url || post.article_url) score += 1;
+  return score;
+}
+
+function shouldFallbackAfterReusable({ before, after, exactTime, leadLink }) {
+  if (!after.post_url) return false;
+  if ((before.posted_at || before.time_confirmed) && !after.posted_at) return true;
+  if (hasQualifiedLeadLink(before) && !hasQualifiedLeadLink(after)) return true;
+  if (!before.posted_at && !exactTime.posted_at) return true;
+  if (!hasQualifiedLeadLink(before) && leadLink.status !== "qualified") return true;
+  return enrichmentScore(after) < enrichmentScore(before);
+}
+
+function restorePost(post, snapshot) {
+  for (const key of Object.keys(post)) {
+    if (!Object.prototype.hasOwnProperty.call(snapshot, key)) delete post[key];
+  }
+  Object.assign(post, snapshot);
+}
+
+async function enrichPostInContext(post, context) {
+  const state = await pageState(context);
+  if (state.loggedOut || state.visitorPreview) {
+    return {
+      ok: false,
+      status: "human_intervention_required",
+      body_preview: state.bodyPreview,
+      exact_time: { posted_at_raw: "", posted_at: "", time_source: "" },
+      engagement: {},
+      lead_link: { status: "missing", candidates: [] },
+    };
+  }
+
+  const target = await findHeaderTime(context);
+  let exactTime = await readExactTimeFromDom(context, target);
+  if (!exactTime.posted_at) exactTime = await readTooltipTimeWithSyntheticHover(context, target);
+  if (!exactTime.posted_at && ALLOW_REAL_MOUSE_HOVER) exactTime = await readTooltipTimeWithRealMouse(context, target);
+  const engagement = await extractEngagement(context);
+  if (exactTime.posted_at) {
+    post.posted_at_raw = exactTime.posted_at_raw;
+    post.posted_at = exactTime.posted_at;
+    post.posted_date = dateKeyFromPostedAt(exactTime.posted_at) || post.posted_date || "";
+    post.time_source = exactTime.time_source;
+    post.time_confirmed = true;
+  }
+  if (engagement.raw) {
+    post.engagement_data = engagement.raw;
+    if (engagement.reactions) post.reactions = engagement.reactions;
+    if (engagement.comments) post.comments = engagement.comments;
+    if (engagement.shares) post.shares = engagement.shares;
+  }
+  let leadLink = await extractLeadLink(context, post.account_name || "");
+  if (!shouldReplaceLeadLink(post, leadLink)) {
+    const preserved = await resolvedExistingLeadLink(post);
+    if (preserved) leadLink = preserved;
+  }
+  if (leadLink.status === "qualified" && shouldReplaceLeadLink(post, leadLink)) {
+    post.lead_url_raw = leadLink.lead_url_raw;
+    post.landing_url = leadLink.landing_url;
+    post.article_url = leadLink.landing_url;
+    post.lead_link_status = "qualified";
+    post.lead_link_source = leadLink.lead_link_source;
+    post.comment_lead_excerpt = leadLink.comment_excerpt;
+  } else if (!post.lead_link_status) {
+    post.lead_link_status = "missing";
+  }
+  post.output_status = outputStatusFor(post);
+  post.crawl_status = post.output_status === "ready_for_output" ? "ready_for_output" : "needs_enrichment";
+  return { ok: true, exact_time: exactTime, engagement, lead_link: leadLink };
+}
+
+async function enrichPostWithFreshTab(baseContext, post) {
+  let context = null;
+  try {
+    context = await openPostTab(baseContext, post.post_url);
+    return await enrichPostInContext(post, context);
+  } finally {
+    if (context) await closePostTab(context);
+  }
+}
+
 async function main() {
   const payload = JSON.parse(fs.readFileSync(INPUT, "utf8"));
   const posts = payload.posts || [];
@@ -511,59 +621,64 @@ async function main() {
 
   const enriched = [];
   const errors = [];
+  let reusableContext = null;
+  const lowDisturbance = { reused_detail_tab: 0, fresh_tab_fallback: 0, reusable_errors: 0 };
   for (const [index, post] of posts.entries()) {
     if (LIMIT && index >= LIMIT) break;
     if (!post.post_url) continue;
-    let context = null;
     try {
-      context = await openPostTab(baseContext, post.post_url);
-      const state = await pageState(context);
-      if (state.loggedOut || state.visitorPreview) {
-        errors.push({ post_url: post.post_url, error: "human_intervention_required", body_preview: state.bodyPreview });
-        continue;
+      const before = { ...post };
+      let mode = "reused_detail_tab";
+      let result = null;
+      try {
+        if (!reusableContext) reusableContext = await openReusablePostTab(baseContext, post.post_url);
+        else await navigatePostTab(reusableContext, post.post_url);
+        result = await enrichPostInContext(post, reusableContext);
+        if (!result.ok) {
+          restorePost(post, before);
+          mode = "fresh_tab_fallback";
+          lowDisturbance.fresh_tab_fallback += 1;
+          result = await enrichPostWithFreshTab(baseContext, post);
+          if (!result.ok) {
+            errors.push({ post_url: post.post_url, error: result.status, body_preview: result.body_preview });
+            continue;
+          }
+        }
+        if (shouldFallbackAfterReusable({ before, after: post, exactTime: result.exact_time, leadLink: result.lead_link })) {
+          restorePost(post, before);
+          mode = "fresh_tab_fallback";
+          lowDisturbance.fresh_tab_fallback += 1;
+          result = await enrichPostWithFreshTab(baseContext, post);
+          if (!result.ok) {
+            errors.push({ post_url: post.post_url, error: result.status, body_preview: result.body_preview });
+            continue;
+          }
+        } else {
+          lowDisturbance.reused_detail_tab += 1;
+        }
+      } catch (error) {
+        restorePost(post, before);
+        mode = "fresh_tab_fallback";
+        lowDisturbance.reusable_errors += 1;
+        lowDisturbance.fresh_tab_fallback += 1;
+        result = await enrichPostWithFreshTab(baseContext, post);
+        if (!result.ok) {
+          errors.push({ post_url: post.post_url, error: result.status, body_preview: result.body_preview });
+          continue;
+        }
       }
-      const target = await findHeaderTime(context);
-      let exactTime = await readExactTimeFromDom(context, target);
-      if (!exactTime.posted_at) exactTime = await readTooltipTimeWithSyntheticHover(context, target);
-      if (!exactTime.posted_at && ALLOW_REAL_MOUSE_HOVER) exactTime = await readTooltipTimeWithRealMouse(context, target);
-      const engagement = await extractEngagement(context);
-      if (exactTime.posted_at) {
-        post.posted_at_raw = exactTime.posted_at_raw;
-        post.posted_at = exactTime.posted_at;
-        post.posted_date = dateKeyFromPostedAt(exactTime.posted_at) || post.posted_date || "";
-        post.time_source = exactTime.time_source;
-        post.time_confirmed = true;
-      }
-      if (engagement.raw) {
-        post.engagement_data = engagement.raw;
-        if (engagement.reactions) post.reactions = engagement.reactions;
-        if (engagement.comments) post.comments = engagement.comments;
-        if (engagement.shares) post.shares = engagement.shares;
-      }
-      let leadLink = await extractLeadLink(context, post.account_name || "");
-      if (!shouldReplaceLeadLink(post, leadLink)) {
-        const preserved = await resolvedExistingLeadLink(post);
-        if (preserved) leadLink = preserved;
-      }
-      if (leadLink.status === "qualified" && shouldReplaceLeadLink(post, leadLink)) {
-        post.lead_url_raw = leadLink.lead_url_raw;
-        post.landing_url = leadLink.landing_url;
-        post.article_url = leadLink.landing_url;
-        post.lead_link_status = "qualified";
-        post.lead_link_source = leadLink.lead_link_source;
-        post.comment_lead_excerpt = leadLink.comment_excerpt;
-      } else if (!post.lead_link_status) {
-        post.lead_link_status = "missing";
-      }
-      post.output_status = outputStatusFor(post);
-      post.crawl_status = post.output_status === "ready_for_output" ? "ready_for_output" : "needs_enrichment";
-      enriched.push({ post_url: post.post_url, exact_time: exactTime, engagement, lead_link: leadLink });
+      enriched.push({
+        post_url: post.post_url,
+        mode,
+        exact_time: result.exact_time,
+        engagement: result.engagement,
+        lead_link: result.lead_link,
+      });
     } catch (error) {
       errors.push({ post_url: post.post_url, error: String(error.stack || error) });
-    } finally {
-      if (context) await closePostTab(context);
     }
   }
+  if (reusableContext) await closePostTab(reusableContext);
   if (TARGET_DATE) {
     const kept = [];
     const dateFilteredOut = [];
@@ -587,8 +702,16 @@ async function main() {
   }
   payload.detail_enriched = enriched.length;
   payload.detail_enrichment_errors = errors;
+  payload.low_disturbance = lowDisturbance;
   fs.writeFileSync(OUTPUT, JSON.stringify(payload, null, 2), "utf8");
-  outputJson({ ok: true, route: "opencli_browser_bridge", enriched: enriched.length, errors: errors.length, output: OUTPUT });
+  outputJson({
+    ok: true,
+    route: "opencli_browser_bridge",
+    enriched: enriched.length,
+    errors: errors.length,
+    low_disturbance: lowDisturbance,
+    output: OUTPUT,
+  });
 }
 
 if (RUN_MAIN) {
