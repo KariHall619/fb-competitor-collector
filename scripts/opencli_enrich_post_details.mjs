@@ -31,6 +31,8 @@ const CONFIG = value("--config", "config/settings.yaml");
 const LIMIT = Number(value("--limit", "0"));
 const TARGET_DATE = value("--target-date", "");
 const ALLOW_REAL_MOUSE_HOVER = has("--allow-real-mouse-hover");
+const SKIP_TIME = has("--skip-time");
+const SKIP_LEAD_LINK = has("--skip-lead-link");
 const configuredLeadLink = readLeadLinkConfig(CONFIG);
 const COMMENT_EXPAND_ROUNDS = Number(value("--comment-expand-rounds", configuredLeadLink.commentExpandRounds));
 const REPLY_EXPAND_ROUNDS = Number(value("--reply-expand-rounds", configuredLeadLink.replyExpandRounds));
@@ -124,7 +126,8 @@ async function openPostTab(baseContext, url) {
   }
   const tab = { page: payload.page, url, title: "" };
   const context = { ...baseContext, tab };
-  await waitSeconds(context, 3.5);
+  const waitSecondsValue = Number(value("--open-tab-wait-seconds", String(baseContext.config?.performance?.open_tab_wait_seconds || 1.5)));
+  await waitSeconds(context, waitSecondsValue);
   return context;
 }
 
@@ -398,8 +401,8 @@ async function extractLeadLink(context, accountName = "") {
       return lines.slice(0, 12).some((line) => {
         const lower = line.toLowerCase();
         return lower === ownerNameLower
-          || lower.startsWith(`${ownerNameLower} replied`)
-          || lower.includes(`${ownerNameLower} replied`);
+          || lower.startsWith(ownerNameLower + " replied")
+          || lower.includes(ownerNameLower + " replied");
       });
     };
     const looksCommentContext = (lines, links) => {
@@ -495,6 +498,8 @@ function outputStatusFor(post) {
   const requiredOk = Boolean(
     post.post_url
     && post.posted_at
+    && post.time_confirmed
+    && !["relative_estimated", "relative_hour", "relative_label"].includes(post.time_source || "")
     && post.story_summary
     && post.summary_source === "article"
     && post.lead_link_status === "qualified"
@@ -519,41 +524,53 @@ async function main() {
       context = await openPostTab(baseContext, post.post_url);
       const state = await pageState(context);
       if (state.loggedOut || state.visitorPreview) {
+        post.output_status = "blocked";
+        post.crawl_status = "blocked";
         errors.push({ post_url: post.post_url, error: "human_intervention_required", body_preview: state.bodyPreview });
         continue;
       }
-      const target = await findHeaderTime(context);
-      let exactTime = await readExactTimeFromDom(context, target);
-      if (!exactTime.posted_at) exactTime = await readTooltipTimeWithSyntheticHover(context, target);
-      if (!exactTime.posted_at && ALLOW_REAL_MOUSE_HOVER) exactTime = await readTooltipTimeWithRealMouse(context, target);
-      const engagement = await extractEngagement(context);
-      if (exactTime.posted_at) {
-        post.posted_at_raw = exactTime.posted_at_raw;
-        post.posted_at = exactTime.posted_at;
-        post.posted_date = dateKeyFromPostedAt(exactTime.posted_at) || post.posted_date || "";
-        post.time_source = exactTime.time_source;
-        post.time_confirmed = true;
+      let exactTime = { posted_at_raw: post.posted_at_raw || "", posted_at: post.posted_at || "", time_source: post.time_source || "", skipped: SKIP_TIME };
+      if (!SKIP_TIME && !(post.posted_at && post.time_confirmed)) {
+        const target = await findHeaderTime(context);
+        exactTime = await readExactTimeFromDom(context, target);
+        if (!exactTime.posted_at) exactTime = await readTooltipTimeWithSyntheticHover(context, target);
+        if (!exactTime.posted_at && ALLOW_REAL_MOUSE_HOVER) exactTime = await readTooltipTimeWithRealMouse(context, target);
+        if (exactTime.posted_at) {
+          post.posted_at_raw = exactTime.posted_at_raw;
+          post.posted_at = exactTime.posted_at;
+          post.posted_date = dateKeyFromPostedAt(exactTime.posted_at) || post.posted_date || "";
+          post.time_source = exactTime.time_source;
+          post.time_confirmed = true;
+        }
       }
+      const engagement = await extractEngagement(context);
       if (engagement.raw) {
         post.engagement_data = engagement.raw;
         if (engagement.reactions) post.reactions = engagement.reactions;
         if (engagement.comments) post.comments = engagement.comments;
         if (engagement.shares) post.shares = engagement.shares;
       }
-      let leadLink = await extractLeadLink(context, post.account_name || "");
-      if (!shouldReplaceLeadLink(post, leadLink)) {
-        const preserved = await resolvedExistingLeadLink(post);
-        if (preserved) leadLink = preserved;
-      }
-      if (leadLink.status === "qualified" && shouldReplaceLeadLink(post, leadLink)) {
-        post.lead_url_raw = leadLink.lead_url_raw;
-        post.landing_url = leadLink.landing_url;
-        post.article_url = leadLink.landing_url;
-        post.lead_link_status = "qualified";
-        post.lead_link_source = leadLink.lead_link_source;
-        post.comment_lead_excerpt = leadLink.comment_excerpt;
-      } else if (!post.lead_link_status) {
-        post.lead_link_status = "missing";
+      let leadLink = { status: post.lead_link_status || "skipped", skipped: SKIP_LEAD_LINK };
+      if (!SKIP_LEAD_LINK) {
+        if (hasQualifiedLeadLink(post)) {
+          leadLink = await resolvedExistingLeadLink(post) || { status: "qualified", preserved_existing: true };
+        } else {
+          leadLink = await extractLeadLink(context, post.account_name || "");
+        }
+        if (!shouldReplaceLeadLink(post, leadLink)) {
+          const preserved = await resolvedExistingLeadLink(post);
+          if (preserved) leadLink = preserved;
+        }
+        if (leadLink.status === "qualified" && shouldReplaceLeadLink(post, leadLink)) {
+          post.lead_url_raw = leadLink.lead_url_raw;
+          post.landing_url = leadLink.landing_url;
+          post.article_url = leadLink.landing_url;
+          post.lead_link_status = "qualified";
+          post.lead_link_source = leadLink.lead_link_source;
+          post.comment_lead_excerpt = leadLink.comment_excerpt;
+        } else if (!post.lead_link_status) {
+          post.lead_link_status = "missing";
+        }
       }
       post.output_status = outputStatusFor(post);
       post.crawl_status = post.output_status === "ready_for_output" ? "ready_for_output" : "needs_enrichment";

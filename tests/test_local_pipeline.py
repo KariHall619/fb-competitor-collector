@@ -865,7 +865,7 @@ def assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path: Path) -> 
     assert '"needs_enrichment_skipped": 1' in sync.stdout
 
 
-def assert_sync_allows_estimated_relative_time_with_marker(tmp_path: Path) -> None:
+def assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_path: Path) -> None:
     sample = tmp_path / "estimated_time.json"
     config = tmp_path / "settings_estimated_time.yaml"
     sample.write_text(
@@ -906,9 +906,25 @@ def assert_sync_allows_estimated_relative_time_with_marker(tmp_path: Path) -> No
             "--dry-run",
         ]
     )
-    assert sync.returncode == 0, sync.stdout
-    assert '"ready_for_output": 1' in sync.stdout
-    assert '"rows": 1' in sync.stdout
+    assert sync.returncode == 1, sync.stdout
+    assert '"ready_for_output": 0' in sync.stdout
+    assert '"needs_enrichment_skipped": 1' in sync.stdout
+
+    partial = run(
+        [
+            PYTHON,
+            "scripts/import_existing_result.py",
+            "--config",
+            str(config),
+            "--input",
+            str(sample),
+            "--sync-partial",
+            "--dry-run",
+        ]
+    )
+    assert partial.returncode == 0, partial.stdout
+    assert '"partial_review": 1' in partial.stdout
+    assert '"formal_output_unchanged": true' in partial.stdout
 
 
 def assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path: Path) -> None:
@@ -1375,13 +1391,13 @@ def assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path: Path)
             str(config),
             "--input",
             str(prepared),
-            "--sync",
+            "--sync-partial",
             "--dry-run",
         ]
     )
     assert sync.returncode == 0, sync.stdout
-    assert '"ready_for_output": 1' in sync.stdout
-    assert '"needs_enrichment_skipped": 1' in sync.stdout
+    assert '"partial_review": 2' in sync.stdout
+    assert '"formal_output_unchanged": true' in sync.stdout
 
 
 def assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp_path: Path) -> None:
@@ -1470,6 +1486,171 @@ def assert_article_material_extractor(tmp_path: Path) -> None:
     assert "legal counterattack" in result["text_excerpt"]
 
 
+def assert_partial_review_status_and_task_queue(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, pending_enrichment_tasks
+
+    conn = connect(tmp_path / "partial.sqlite")
+    post = normalize_post(
+        {
+            "account_name": "Story Hub",
+            "account_url": "https://www.facebook.com/storyhub",
+            "post_url": "https://www.facebook.com/storyhub/posts/pfbid-partial",
+            "post_time_text": "2h",
+            "story_summary": "A visible homepage candidate.",
+            "article_url": "https://story.example/a",
+            "crawled_at": "2026-05-28T10:00:00",
+        },
+        {"source_skill": "test"},
+    )
+    assert post["output_status"] == "partial_review"
+    enqueue_enrichment_tasks_for_posts(conn, [post])
+    enqueue_enrichment_tasks_for_posts(conn, [post])
+    tasks = pending_enrichment_tasks(conn, limit=20)
+    assert sorted(task["stage"] for task in tasks) == ["article_material", "detail_time", "lead_link", "summary"]
+
+
+def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
+    config = tmp_path / "settings.yaml"
+    db_path = tmp_path / "worker.sqlite"
+    article = tmp_path / "article.html"
+    raw = tmp_path / "partial.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {db_path}"),
+        encoding="utf-8",
+    )
+    article.write_text(
+        """
+        <html><head><title>Worker cache story</title></head>
+        <body><p>The worker fetched this page once and reused the cached article material.</p></body></html>
+        """,
+        encoding="utf-8",
+    )
+    raw.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Story Hub",
+                        "account_url": "https://www.facebook.com/storyhub",
+                        "post_url": "https://www.facebook.com/storyhub/posts/pfbid-cache-1",
+                        "posted_at": "2026年5月28日 10:00",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                        "article_url": article.as_uri(),
+                        "landing_url": article.as_uri(),
+                        "lead_url_raw": article.as_uri(),
+                        "lead_link_status": "qualified",
+                        "lead_link_source": "comment",
+                    },
+                    {
+                        "account_name": "Story Hub",
+                        "account_url": "https://www.facebook.com/storyhub",
+                        "post_url": "https://www.facebook.com/storyhub/posts/pfbid-cache-2",
+                        "posted_at": "2026年5月28日 11:00",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                        "article_url": article.as_uri(),
+                        "landing_url": article.as_uri(),
+                        "lead_url_raw": article.as_uri(),
+                        "lead_link_status": "qualified",
+                        "lead_link_source": "comment",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--no-sync"])
+    assert imported.returncode == 0, imported.stderr or imported.stdout
+    import_data = json.loads(imported.stdout)
+    assert import_data["enrichment_tasks"]["queued_or_refreshed"] >= 2
+
+    article_worker = run(
+        [
+            PYTHON,
+            "scripts/enrichment_worker.py",
+            "--config",
+            str(config),
+            "--stages",
+            "article_material",
+            "--limit",
+            "10",
+            "--article-concurrency",
+            "2",
+        ]
+    )
+    assert article_worker.returncode == 0, article_worker.stdout + article_worker.stderr
+    article_data = json.loads(article_worker.stdout)
+    assert article_data["completed"] == 2
+    assert article_data["task_counts"].get("article_material:done") == 2
+
+    summary_worker = run(
+        [
+            PYTHON,
+            "scripts/enrichment_worker.py",
+            "--config",
+            str(config),
+            "--stages",
+            "summary",
+            "--limit",
+            "10",
+        ]
+    )
+    assert summary_worker.returncode == 0, summary_worker.stdout + summary_worker.stderr
+    assert '"summary:done": 2' in summary_worker.stdout
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from store import all_posts, cached_article_material, connect
+
+    conn = connect(db_path)
+    posts = all_posts(conn)
+    assert all(post["output_status"] == "ready_for_output" for post in posts)
+    assert cached_article_material(conn, article.as_uri())["ok"] is True
+
+
+def assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path: Path) -> None:
+    config = tmp_path / "settings.yaml"
+    raw = tmp_path / "partial.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'partial-sync.sqlite'}"),
+        encoding="utf-8",
+    )
+    raw.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Story Hub",
+                        "account_url": "https://www.facebook.com/storyhub",
+                        "post_url": "https://www.facebook.com/storyhub/posts/pfbid-preview",
+                        "post_time_text": "1h",
+                        "story_summary": "Visible preview candidate.",
+                        "article_url": "https://story.example/preview",
+                        "crawled_at": "2026-05-28T10:00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    formal = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--sync", "--dry-run"])
+    assert formal.returncode == 1, formal.stdout
+    assert "ready_for_output" in formal.stdout
+
+    partial = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--sync-partial", "--dry-run"])
+    assert partial.returncode == 0, partial.stdout
+    data = json.loads(partial.stdout)
+    assert data["feishu_sync"]["dry_run"] is True
+    assert data["feishu_sync"]["partial_review"] == 1
+    assert data["feishu_sync"]["formal_output_unchanged"] is True
+
+
 def main() -> int:
     assert_url_canonicalization()
     assert_exact_time_parsing_and_relative_time_estimation()
@@ -1530,7 +1711,7 @@ def main() -> int:
         hot_after_many_data = json.loads(hot_after_many.stdout)
         assert hot_after_many_data["count"] == 1, hot_after_many.stdout
         assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path)
-        assert_sync_allows_estimated_relative_time_with_marker(tmp_path)
+        assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_path)
         assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path)
         assert_article_url_alone_does_not_qualify_lead_link(tmp_path)
         assert_filter_sync_applies_output_quality_gate(tmp_path)
@@ -1541,6 +1722,9 @@ def main() -> int:
         assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path)
         assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp_path)
         assert_article_material_extractor(tmp_path)
+        assert_partial_review_status_and_task_queue(tmp_path)
+        assert_enrichment_worker_article_cache_and_summary(tmp_path)
+        assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path)
 
     print("local pipeline acceptance passed")
     return 0

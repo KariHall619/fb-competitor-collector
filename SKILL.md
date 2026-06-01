@@ -80,6 +80,8 @@ Run all commands from the skill root.
 | Verify FB exact timestamp capture | `scripts/opencli_verify_exact_time.mjs --run` from the OpenCLI Browser Bridge runtime |
 | Import existing JSON/CSV | `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --no-sync` |
 | Import and sync new rows | `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --sync` |
+| Fast partial capture/import | `python3 scripts/run_capture_pipeline.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --partial` |
+| Resume enrichment queue | `python3 scripts/enrichment_worker.py --config config/settings.yaml --stages detail_time,lead_link,article_material --limit 50` |
 | Filter local library | `python3 scripts/filter_posts.py --config config/settings.yaml ...` |
 | Filter and sync | `python3 scripts/filter_posts.py --config config/settings.yaml ... --sync` |
 | Prepare raw OpenCLI capture | `python3 scripts/prepare_capture_result.py --input <raw.json> --output <prepared.json> --target-date YYMMDD` |
@@ -145,6 +147,7 @@ Rules:
 - Human intervention is only for blocking states such as login expiry, visitor preview, CAPTCHA/risk control, the wrong Chrome profile, or a page where posts are not visibly loaded.
 - Before deleting any remaining relative-time fallback code, run the exact-time verifier against a real logged-in Facebook tab through the trusted OpenCLI Browser Bridge runtime and require `status=exact_time_confirmed`.
 - Short posts must be kept if they have a valid FB content URL. If comment/reply lead link, landing URL, article summary, engagement, or exact time is missing, keep them as `needs_enrichment` instead of dropping them.
+- For scale-out runs, first import visible candidates as `partial_review`, then resume queued enrichment stages in SQLite. Formal `--sync` still writes only `ready_for_output`; use `--sync-partial --dry-run` only for business preview.
 
 ## Feishu Workflow
 

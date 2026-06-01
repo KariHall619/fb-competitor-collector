@@ -46,7 +46,7 @@ if (DEBUG_ENTRY) {
   if (globalThis.process) globalThis.process.exitCode = 0;
 }
 
-function summarizeExactTimeChecks({ scan, checks, tab, claimedFrom, allowRealMouseHover = false }) {
+function summarizeExactTimeChecks({ scan, checks, tab, claimedFrom, allowRealMouseHover = false, captureProfile = "opencli_browser_bridge", openedFrom = "" }) {
   const confirmed = checks.filter((item) => item.confirmed);
   return {
     ok: confirmed.length > 0,
