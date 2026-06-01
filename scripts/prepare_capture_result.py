@@ -15,6 +15,7 @@ from models import (
     clean_post_url,
     canonicalize_post_url,
     comment_lead_landing_url,
+    estimate_posted_at_from_relative,
     facebook_link_kind,
     has_qualified_comment_lead_link,
     is_external_landing_url,

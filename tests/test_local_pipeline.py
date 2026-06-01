@@ -1110,28 +1110,7 @@ def assert_quality_gate_requires_comment_lead_source(tmp_path: Path) -> None:
 
 def assert_detail_enrichment_ignores_page_shell_ad_links() -> None:
     script = """
-import fs from 'node:fs';
-const source = fs.readFileSync('./scripts/chrome_extension_enrich_post_details.mjs', 'utf8');
-const start = source.indexOf('async function extractLeadLink');
-const end = source.indexOf('\\nfunction outputStatusFor', start);
-const fnSource = source.slice(start, end);
-const captured = {};
-const tab = {
-  playwright: {
-    async evaluate(fn, arg) {
-      captured.fn = fn;
-      captured.arg = arg;
-      return [];
-    }
-  }
-};
-global.COMMENT_EXPAND_ROUNDS = 0;
-global.REPLY_EXPAND_ROUNDS = 0;
-global.sleep = async () => {};
-global.expandCommentsAndReplies = async () => {};
-global.resolveLandingUrl = async (href) => href;
-const extractLeadLink = eval(`${fnSource}; extractLeadLink`);
-await extractLeadLink(tab, 'Lessons Taught By Life');
+import { leadLinkScanBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
 
 class Node {
   constructor(tagName, attrs = {}, children = [], ownText = '') {
@@ -1201,13 +1180,187 @@ global.document = {
   querySelectorAll: (selector) => body.querySelectorAll(selector),
 };
 global.location = new URL('https://www.facebook.com/LessonsTaughtByLifepage/posts/pfbid');
-const results = captured.fn(captured.arg);
+const results = eval(leadLinkScanBrowserExpression('Lessons Taught By Life', 'default'));
 if (results.length !== 1 || !results[0].href.includes('example.test') || results[0].href.includes('shopify')) {
   console.error(JSON.stringify(results, null, 2));
   process.exit(1);
 }
 """
     result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def assert_detail_engagement_is_anchored_to_main_post() -> None:
+    script = """
+import { detailEngagementBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
+
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() {
+    return this.innerText;
+  }
+  get href() {
+    return this.attrs.href ? new URL(this.attrs.href, global.location.href).href : '';
+  }
+  getAttribute(name) {
+    return this.attrs[name] || '';
+  }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (selector.includes('[role="article"]') && node.attrs.role === 'article') return node;
+      if (selector.includes('[role="complementary"]') && node.attrs.role === 'complementary') return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a') return node.tagName === 'A';
+      if (current === 'span') return node.tagName === 'SPAN';
+      if (current === 'div') return node.tagName === 'DIV';
+      if (current === '[aria-label]') return !!node.attrs['aria-label'];
+      if (current === '[title]') return !!node.attrs.title;
+      if (current === 'abbr') return node.tagName === 'ABBR';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+
+const timeLink = new Node('a', { href: '/example/posts/1' }, [], '3h');
+const mainPost = new Node('div', { role: 'article' }, [
+  new Node('span', {}, [], 'Example Page'),
+  timeLink,
+  new Node('p', {}, [], 'Full story in 1st comment'),
+  new Node('span', {}, [], '811 / 350 / 31'),
+  new Node('span', {}, [], 'Like'),
+  new Node('span', {}, [], 'Comment'),
+  new Node('span', {}, [], 'Share'),
+]);
+const comment = new Node('div', { role: 'article' }, [
+  new Node('span', {}, [], 'Reader'),
+  new Node('span', {}, [], '58 29 赞'),
+  new Node('span', {}, [], 'Reply'),
+]);
+const body = new Node('body', {}, [mainPost, comment]);
+global.document = {
+  querySelectorAll: (selector) => body.querySelectorAll(selector),
+};
+global.location = new URL('https://www.facebook.com/example/posts/1');
+const elements = global.document.querySelectorAll('a, abbr, span');
+const target = { index: elements.indexOf(timeLink) };
+const result = eval(detailEngagementBrowserExpression(target));
+if (result.confidence !== 'anchored' || result.likes !== 811 || result.comments !== 350 || result.shares !== 31) {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(1);
+}
+if (result.raw.includes('58') || result.raw.includes('29 赞')) {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(2);
+}
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def assert_comment_mode_expression_can_select_all_comments() -> None:
+    script = """
+import { commentModeBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
+
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.clicked = false;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() {
+    return this.innerText;
+  }
+  getAttribute(name) {
+    return this.attrs[name] || '';
+  }
+  click() {
+    this.clicked = true;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'div[role="button"]') return node.tagName === 'DIV' && node.attrs.role === 'button';
+      if (current === 'span') return node.tagName === 'SPAN';
+      if (current === 'a') return node.tagName === 'A';
+      if (current === '[aria-label]') return !!node.attrs['aria-label'];
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+
+const sort = new Node('div', { role: 'button' }, [], 'Most relevant');
+const all = new Node('div', { role: 'button' }, [], 'All comments');
+const body = new Node('body', {}, [sort, all]);
+global.document = { querySelectorAll: (selector) => body.querySelectorAll(selector) };
+const result = await eval(commentModeBrowserExpression('all_comments'));
+if (!result.clicked || !sort.clicked || !all.clicked) {
+  console.error(JSON.stringify({ result, sort: sort.clicked, all: all.clicked }, null, 2));
+  process.exit(1);
+}
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def assert_opencli_extract_helpers_dedupe_homepage_candidates() -> None:
+    js = """
+import { postKey, validCandidate, RUN_MAIN } from './scripts/opencli_extract_current_tab.mjs';
+
+if (RUN_MAIN) process.exit(1);
+const first = {
+  post_url: 'https://www.facebook.com/example/posts/1001?fbclid=abc',
+  story_summary: 'A long enough story summary that should pass filtering.',
+};
+const duplicate = {
+  post_url: 'https://m.facebook.com/example/posts/1001?ref=share',
+  raw_text: 'A long enough story summary that should pass filtering.',
+};
+if (postKey(first) !== postKey(duplicate)) {
+  console.error(JSON.stringify({ first: postKey(first), duplicate: postKey(duplicate) }, null, 2));
+  process.exit(2);
+}
+if (!validCandidate(first)) process.exit(3);
+if (validCandidate({ post_url: first.post_url, story_summary: 'short' })) process.exit(4);
+"""
+    result = run(["node", "--input-type=module", "-e", js])
     assert result.returncode == 0, result.stderr or result.stdout
 
 
@@ -1291,11 +1444,27 @@ if (missing.ok || missing.status !== 'exact_time_not_found' || missing.confirmed
 
 def assert_opencli_detail_enrichment_supports_target_date_filter() -> None:
     js = """
-import { dateKeyFromPostedAt } from './scripts/opencli_enrich_post_details.mjs';
+import { buildCoverageSummary, dateKeyFromPostedAt } from './scripts/opencli_enrich_post_details.mjs';
 
 if (dateKeyFromPostedAt('2026年5月29日 12:32') !== '260529') process.exit(1);
 if (dateKeyFromPostedAt('2026年11月3日 01:05') !== '261103') process.exit(2);
 if (dateKeyFromPostedAt('3h') !== '') process.exit(3);
+const payload = {
+  posts: [
+    { post_url: 'https://facebook.com/example/posts/1', output_status: 'ready_for_output', posted_at: '2026年6月1日 12:00', time_confirmed: true, summary_source: 'article', story_summary: 'ok', lead_link_status: 'qualified', lead_link_source: 'comment', lead_url_raw: 'https://site.test/a', landing_url: 'https://site.test/a' },
+    { post_url: 'https://facebook.com/example/posts/2', output_status: 'needs_enrichment', posted_at: '2026年6月1日 13:00', time_confirmed: true, summary_source: 'pending_article_summary', lead_link_status: 'missing', engagement_confidence: 'anchored_missing_metrics' },
+  ],
+  date_filtered_out: [{ post_url: 'https://facebook.com/example/posts/old' }],
+};
+const summary = buildCoverageSummary(payload, 3);
+if (summary.input_posts !== 3 || summary.after_target_date_filter !== 2 || summary.ready_for_output !== 1 || summary.needs_enrichment !== 1) {
+  console.error(JSON.stringify(summary, null, 2));
+  process.exit(4);
+}
+if (summary.reason_counts.missing_qualified_comment_lead_link !== 1 || summary.reason_counts.engagement_unconfirmed !== 1) {
+  console.error(JSON.stringify(summary, null, 2));
+  process.exit(5);
+}
 """
     result = run(["node", "--input-type=module", "-e", js])
     assert result.returncode == 0, result.stderr or result.stdout
@@ -1382,6 +1551,46 @@ def assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path: Path)
     assert sync.returncode == 0, sync.stdout
     assert '"ready_for_output": 1' in sync.stdout
     assert '"needs_enrichment_skipped": 1' in sync.stdout
+
+
+def assert_thirteen_incomplete_candidates_are_imported_for_enrichment(tmp_path: Path) -> None:
+    config = tmp_path / "settings_13_needs_enrichment.yaml"
+    sample = tmp_path / "thirteen_needs_enrichment.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'thirteen.sqlite'}"
+        ),
+        encoding="utf-8",
+    )
+    sample.write_text(
+        json.dumps(
+            [
+                {
+                    "post_url": f"https://www.facebook.com/example/posts/incomplete-{index}",
+                    "posted_at": "2026年6月1日 12:00",
+                    "time_confirmed": True,
+                    "summary_source": "pending_article_summary",
+                    "story_summary": f"候选 {index}",
+                    "lead_link_status": "missing",
+                    "crawl_status": "needs_enrichment",
+                    "output_status": "needs_enrichment",
+                }
+                for index in range(1, 14)
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
+    assert imported.returncode == 0, imported.stderr
+    data = json.loads(imported.stdout)
+    assert data["inserted"] == 13, imported.stdout
+
+    sync = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--sync", "--dry-run"])
+    assert sync.returncode == 1, sync.stdout
+    assert '"ready_for_output": 0' in sync.stdout
+    assert '"needs_enrichment_skipped": 13' in sync.stdout
 
 
 def assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp_path: Path) -> None:
@@ -1481,6 +1690,10 @@ def main() -> int:
     assert_dom_extractor_excludes_profile_shell_with_external_link()
     assert_dom_extractor_blocks_visitor_preview()
     assert_dom_extractor_prefers_parent_post_over_photo_link()
+    assert_detail_engagement_is_anchored_to_main_post()
+    assert_detail_enrichment_ignores_page_shell_ad_links()
+    assert_comment_mode_expression_can_select_all_comments()
+    assert_opencli_extract_helpers_dedupe_homepage_candidates()
     assert_opencli_extract_script_requires_human_intervention()
     assert_opencli_runtime_keeps_current_bound_tab()
     assert_feishu_writes_require_user_identity()
@@ -1539,6 +1752,7 @@ def main() -> int:
         assert_exact_time_verifier_summary_contract()
         assert_opencli_detail_enrichment_supports_target_date_filter()
         assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path)
+        assert_thirteen_incomplete_candidates_are_imported_for_enrichment(tmp_path)
         assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp_path)
         assert_article_material_extractor(tmp_path)
 

@@ -39,6 +39,7 @@ const ALLOWED_DOMAINS = value("--allowed-domains", configuredLeadLink.allowedDom
   .split(",")
   .map((item) => item.trim().replace(/^www\./i, "").toLowerCase())
   .filter(Boolean);
+const COMMENT_MODE_SEQUENCE = ["default", "all_comments", "newest"];
 const CURRENT_FILE = fileURLToPath(import.meta.url);
 const INVOKED_FILE = PROCESS.argv?.[1] ? path.resolve(PROCESS.argv[1]) : "";
 const RUN_MAIN = CURRENT_FILE === INVOKED_FILE || has("--run");
@@ -87,6 +88,12 @@ function dateKeyFromPostedAt(postedAt) {
   if (!match) return "";
   const [, year, month, day] = match;
   return `${year.slice(2)}${month.padStart(2, "0")}${day.padStart(2, "0")}`;
+}
+
+function appendSemicolonNote(existing, item) {
+  const parts = String(existing || "").split("；").filter(Boolean);
+  if (item && !parts.includes(item)) parts.push(item);
+  return parts.join("；");
 }
 
 async function evalPayload(context, js) {
@@ -247,24 +254,155 @@ async function readTooltipTimeWithRealMouse(context, target) {
   })()`);
 }
 
-async function extractEngagement(context) {
-  return await evalPayload(context, `(() => {
+function detailEngagementBrowserExpression(target) {
+  return `(() => {
+    const target = ${JSON.stringify(target || null)};
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-    const body = clean(document.body?.innerText || "");
-    const text = body.slice(0, 15000);
-    const reactionCluster = text.match(/Full story in 1st comment\\s+(\\d+(?:[.,]\\d+)?[KkMm万]?)\\s+(\\d+(?:[.,]\\d+)?[KkMm万]?)\\s+(\\d+(?:[.,]\\d+)?[KkMm万]?)/)
-      || text.match(/Full Story\\s+(\\d+(?:[.,]\\d+)?[KkMm万]?)\\s+(\\d+(?:[.,]\\d+)?[KkMm万]?)\\s+(\\d+(?:[.,]\\d+)?[KkMm万]?)/i);
-    if (reactionCluster) {
+    const linesFrom = (value) => String(value || "").split(/\\n+/).map(clean).filter(Boolean);
+    const countToken = "(\\\\d+(?:[.,]\\\\d+)?\\\\s*(?:K|k|M|m|万)?)";
+    const parseCount = (value) => {
+      const text = clean(value).replace(/,/g, "");
+      const match = text.match(/(\\d+(?:\\.\\d+)?)\\s*(K|k|M|m|万)?/);
+      if (!match) return null;
+      let number = Number(match[1]);
+      const unit = match[2] || "";
+      if (/^k$/i.test(unit)) number *= 1000;
+      if (/^m$/i.test(unit)) number *= 1000000;
+      if (unit === "万") number *= 10000;
+      return Number.isFinite(number) ? Math.round(number) : null;
+    };
+    const forbiddenChrome = (node) => Boolean(node?.closest?.('[role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"], nav, aside, footer, header'));
+    const looksLikeAdOrShell = (text) => /Sponsored|Suggested for you|Create a post|What's on your mind|Privacy\\s*·\\s*Terms|Ads Manager|Harness the Power of AI|Feed posts/i.test(text);
+    const hasActionOrMetric = (text) => /\\bLike\\b|\\bComment\\b|\\bShare\\b|赞|评论|分享|All reactions|reactions?|likes?|comments?|shares?|views?|plays?|次播放/i.test(text);
+    const scoreRoot = (node) => {
+      const text = clean(node?.innerText || node?.textContent || "");
+      if (!text || forbiddenChrome(node) || looksLikeAdOrShell(text)) return -1000;
+      let score = 0;
+      if (node.getAttribute?.("role") === "article" || /^(ARTICLE)$/i.test(node.tagName || "")) score += 30;
+      if (hasActionOrMetric(text)) score += 20;
+      if (/All reactions|comments?|shares?|评论|分享|赞/i.test(text)) score += 15;
+      if (text.length >= 80) score += 5;
+      if (text.length > 6500) score -= 40;
+      return score;
+    };
+    const targetElement = target && Number.isInteger(target.index)
+      ? [...document.querySelectorAll("a, abbr, span")][target.index]
+      : null;
+    const roots = [];
+    const pushRoot = (node) => {
+      if (node && !roots.includes(node)) roots.push(node);
+    };
+    pushRoot(targetElement?.closest?.('[role="article"], article'));
+    let cursor = targetElement;
+    for (let depth = 0; cursor && depth < 10; depth += 1) {
+      pushRoot(cursor);
+      cursor = cursor.parentElement;
+    }
+    const scored = roots
+      .map((node) => ({ node, score: scoreRoot(node), text: clean(node?.innerText || node?.textContent || "") }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score || a.text.length - b.text.length);
+    const root = scored[0]?.node || null;
+    if (!root) {
       return {
-        raw: reactionCluster.slice(1, 4).join("；"),
-        reactions: reactionCluster[1],
-        comments: reactionCluster[2],
-        shares: reactionCluster[3],
+        raw: "",
+        source: "detail_main_post_dom",
+        confidence: "unanchored",
+        warnings: ["main_post_root_not_found"],
       };
     }
-    const line = (text.match(/(?:\\d+(?:[.,]\\d+)?[KkMm万]?\\s*){2,3}(?:comments?|shares?|评论|分享|赞)/i) || [""])[0];
-    return { raw: line };
-  })()`);
+
+    const result = {
+      raw: "",
+      detail_engagement_data: "",
+      source: "detail_main_post_dom",
+      confidence: "anchored",
+      reactions: null,
+      likes: null,
+      comments: null,
+      shares: null,
+      views: null,
+      root_text_preview: clean(root.innerText || root.textContent || "").slice(0, 600),
+      warnings: [],
+    };
+    const setMetric = (key, value, rawText) => {
+      const parsed = parseCount(value);
+      if (parsed === null || parsed === undefined) return;
+      if (result[key] === null || result[key] === undefined) result[key] = parsed;
+      if (key === "reactions" && (result.likes === null || result.likes === undefined)) result.likes = parsed;
+      if (rawText) result.raw = result.raw || clean(rawText);
+    };
+    const readMetricText = (text) => {
+      const item = clean(text);
+      if (!item || item.length > 180) return;
+      const patterns = [
+        ["views", new RegExp(countToken + "\\\\s*(?:views?|plays?|次播放|播放|浏览)", "i")],
+        ["comments", new RegExp(countToken + "\\\\s*(?:comments?|评论)", "i")],
+        ["shares", new RegExp(countToken + "\\\\s*(?:shares?|分享)", "i")],
+        ["reactions", new RegExp("(?:All reactions|reactions?|likes?|赞)[^0-9]{0,20}" + countToken, "i")],
+        ["reactions", new RegExp(countToken + "\\\\s*(?:reactions?|likes?|赞)", "i")],
+      ];
+      for (const [key, pattern] of patterns) {
+        const match = item.match(pattern);
+        if (match) setMetric(key, match[1], item);
+      }
+    };
+    const metricNodes = [...root.querySelectorAll('a, span, div, [aria-label], [title]')];
+    for (const node of metricNodes) {
+      if (node === root) continue;
+      if (node !== root) {
+        const ownerArticle = node.closest?.('[role="article"], article');
+        if (ownerArticle && ownerArticle !== root) continue;
+      }
+      for (const text of [
+        node.getAttribute?.("aria-label") || "",
+        node.getAttribute?.("title") || "",
+        node.innerText || node.textContent || "",
+      ]) {
+        readMetricText(text);
+      }
+    }
+
+    const lines = linesFrom(root.innerText || root.textContent || "");
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      readMetricText(line);
+      const slashCluster = line.match(new RegExp("^" + countToken + "\\\\s*[/|]\\\\s*" + countToken + "\\\\s*[/|]\\\\s*" + countToken + "$", "i"));
+      if (slashCluster) {
+        setMetric("reactions", slashCluster[1], line);
+        setMetric("comments", slashCluster[2], line);
+        setMetric("shares", slashCluster[3], line);
+      }
+      const triple = lines.slice(index, index + 3);
+      const nextText = lines.slice(index + 3, index + 8).join(" ");
+      if (
+        triple.length === 3
+        && triple.every((item) => new RegExp("^" + countToken + "$", "i").test(item))
+        && /\\bLike\\b|\\bComment\\b|\\bShare\\b|赞|评论|分享/i.test(nextText)
+      ) {
+        setMetric("reactions", triple[0], triple.join("；"));
+        setMetric("comments", triple[1], triple.join("；"));
+        setMetric("shares", triple[2], triple.join("；"));
+      }
+    }
+
+    const parts = [];
+    if (result.views !== null && result.views !== undefined) parts.push("浏览量：" + result.views);
+    if (result.likes !== null && result.likes !== undefined) parts.push("点赞量：" + result.likes);
+    if (result.comments !== null && result.comments !== undefined) parts.push("评论数：" + result.comments);
+    if (result.shares !== null && result.shares !== undefined) parts.push("分享数：" + result.shares);
+    result.detail_engagement_data = parts.join("；");
+    result.raw = result.detail_engagement_data || result.raw;
+    if (!result.raw) {
+      result.confidence = "anchored_missing_metrics";
+      result.warnings.push("main_post_metrics_not_found");
+    }
+    return result;
+  })()`;
+}
+
+async function extractEngagement(context, target) {
+  return await evalPayload(context, detailEngagementBrowserExpression(target));
 }
 
 async function expandCommentsAndReplies(context) {
@@ -277,7 +415,9 @@ async function expandCommentsAndReplies(context) {
         /more comments/i,
         /view replies/i,
         /see replies/i,
-        /reply/i,
+        /\\d+\\s+repl(?:y|ies)/i,
+        /view\\s+\\d+\\s+repl(?:y|ies)/i,
+        /see\\s+\\d+\\s+repl(?:y|ies)/i,
         /查看更多评论/,
         /查看更多回复/,
         /查看回复/,
@@ -296,6 +436,141 @@ async function expandCommentsAndReplies(context) {
     })()`).catch(() => {});
     await waitSeconds(context, 0.9);
   }
+}
+
+function commentModeBrowserExpression(mode) {
+  return `(async () => {
+    const mode = ${JSON.stringify(mode)};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const modeLabels = {
+      all_comments: [/all comments/i, /所有评论/, /全部评论/],
+      newest: [/newest/i, /most recent/i, /最新评论/, /最新/],
+      most_relevant: [/most relevant/i, /top comments/i, /最相关/, /热门评论/],
+    };
+    const sortControlLabels = [
+      /most relevant/i,
+      /top comments/i,
+      /all comments/i,
+      /newest/i,
+      /comment ranking/i,
+      /最相关/,
+      /热门评论/,
+      /所有评论/,
+      /全部评论/,
+      /最新评论/,
+      /评论排序/,
+    ];
+    const clickable = () => [...document.querySelectorAll('div[role="button"], span, a, [aria-label]')];
+    const labelFor = (el) => clean(el.innerText || el.textContent || el.getAttribute("aria-label") || "");
+    const clickMatching = (patterns) => {
+      const el = clickable().find((item) => {
+        const text = labelFor(item);
+        return text && patterns.some((pattern) => pattern.test(text));
+      });
+      if (!el) return "";
+      try {
+        el.click();
+        return labelFor(el);
+      } catch {
+        return "";
+      }
+    };
+    if (mode === "default") return { mode, clicked: false };
+    const opened = clickMatching(sortControlLabels);
+    if (opened) await sleep(500);
+    const selected = clickMatching(modeLabels[mode] || []);
+    if (selected) await sleep(700);
+    return { mode, clicked: Boolean(selected), opened };
+  })()`;
+}
+
+async function selectCommentMode(context, mode) {
+  return await evalPayload(context, commentModeBrowserExpression(mode)).catch((error) => ({
+    mode,
+    clicked: false,
+    error: String(error),
+  }));
+}
+
+function leadLinkScanBrowserExpression(accountName = "", mode = "default") {
+  return `((expectedAccountName, commentMode) => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const linesFrom = (value) => String(value || "").split(/\\n+/).map(clean).filter(Boolean);
+    const isExternalHref = (href) => {
+      try {
+        const parsed = new URL(href, location.href);
+        const host = parsed.hostname.replace(/^www\\./i, "").toLowerCase();
+        if (!/^https?:$/i.test(parsed.protocol)) return false;
+        if (/l\\.facebook\\.com$/i.test(parsed.hostname) && parsed.searchParams.get("u")) return true;
+        return host !== "facebook.com"
+          && !host.endsWith(".facebook.com")
+          && host !== "fb.watch"
+          && host !== "meta.com"
+          && !host.endsWith(".meta.com");
+      } catch {
+        return false;
+      }
+    };
+    const ownerName = clean(expectedAccountName);
+    const ownerNameLower = ownerName.toLowerCase();
+    const commentTimeLine = (line) => /^(just now|\\d+\\s*(m|min|h|hr|d|day|w|wk)|刚刚|\\d+\\s*分钟|\\d+\\s*小时|\\d+\\s*天)$/i.test(line);
+    const forbiddenChrome = (node) => {
+      const shell = node.closest?.('[role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"], nav, aside, footer, header');
+      return Boolean(shell);
+    };
+    const looksLikePageShellOrAd = (text) => /Sponsored|Suggested for you|Create a post|What's on your mind|Privacy\\s*·\\s*Terms|Ads Manager|Harness the Power of AI|Feed posts/i.test(text);
+    const ownerMatchedNearTop = (lines) => {
+      if (!ownerName) return true;
+      return lines.slice(0, 18).some((line) => {
+        const lower = line.toLowerCase();
+        return lower === ownerNameLower
+          || lower.startsWith(ownerNameLower + " replied")
+          || lower.includes(ownerNameLower + " replied")
+          || lower.startsWith(ownerNameLower + " responded")
+          || lower.includes(ownerNameLower + " responded");
+      });
+    };
+    const looksCommentContext = (lines, links) => {
+      const shortText = lines.slice(0, 30).join(" ");
+      const hasCommentPermalink = links.some((link) => /[?&]comment_id=|comment_id%3D/i.test(link.href));
+      return hasCommentPermalink
+        || /\\bReply\\b|replied|responded|回复/.test(shortText)
+        || lines.some(commentTimeLine);
+    };
+    const blocks = [...document.querySelectorAll('[role="article"], div[aria-label], li, div')];
+    const results = [];
+    for (const block of blocks) {
+      if (forbiddenChrome(block)) continue;
+      const rawText = block.innerText || block.textContent || "";
+      const text = clean(rawText);
+      if (!text || text.length > 3000 || looksLikePageShellOrAd(text)) continue;
+      const lines = linesFrom(rawText);
+      const links = [...block.querySelectorAll("a[href]")]
+        .map((a) => ({
+          href: new URL(a.getAttribute("href"), location.href).href,
+          text: clean(a.innerText || a.textContent || a.getAttribute("aria-label") || ""),
+        }))
+        .filter((link) => isExternalHref(link.href));
+      if (!links.length) continue;
+      const commentContext = looksCommentContext(lines, links);
+      if (!commentContext) continue;
+      const ownerMatched = ownerMatchedNearTop(lines);
+      if (!ownerMatched) continue;
+      const looksReply = /reply|replied|responded|回复/i.test(lines.slice(0, 30).join(" "));
+      results.push({
+        href: links[0].href,
+        text: links[0].text,
+        block_text: text.slice(0, 800),
+        source: looksReply ? "comment_reply" : "comment",
+        owner_matched: ownerMatched,
+        comment_context: commentContext,
+        comment_mode: commentMode,
+      });
+    }
+    results.sort((a, b) => Number(b.owner_matched) - Number(a.owner_matched));
+    return results.slice(0, 20);
+  })(${JSON.stringify(accountName)}, ${JSON.stringify(mode)})`;
 }
 
 function cleanExternalUrl(href) {
@@ -367,93 +642,54 @@ async function resolveLandingUrl(href) {
 }
 
 async function extractLeadLink(context, accountName = "") {
-  await expandCommentsAndReplies(context);
-  const candidates = await evalPayload(context, `((expectedAccountName) => {
-    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-    const isExternalHref = (href) => {
-      try {
-        const parsed = new URL(href, location.href);
-        const host = parsed.hostname.replace(/^www\\./i, "").toLowerCase();
-        if (!/^https?:$/i.test(parsed.protocol)) return false;
-        if (/l\\.facebook\\.com$/i.test(parsed.hostname) && parsed.searchParams.get("u")) return true;
-        return host !== "facebook.com"
-          && !host.endsWith(".facebook.com")
-          && host !== "fb.watch"
-          && host !== "meta.com"
-          && !host.endsWith(".meta.com");
-      } catch {
-        return false;
-      }
-    };
-    const ownerName = clean(expectedAccountName);
-    const ownerNameLower = ownerName.toLowerCase();
-    const commentTimeLine = (line) => /^(just now|\d+\s*(m|min|h|hr|d|day|w|wk)|刚刚|\d+\s*分钟|\d+\s*小时|\d+\s*天)$/i.test(line);
-    const forbiddenChrome = (node) => {
-      const shell = node.closest?.('[role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"], nav, aside, footer, header');
-      return Boolean(shell);
-    };
-    const looksLikePageShellOrAd = (text) => /Sponsored|Suggested for you|Create a post|What's on your mind|Privacy\s*·\s*Terms|Ads Manager|Harness the Power of AI|Feed posts/i.test(text);
-    const ownerMatchedNearTop = (lines) => {
-      if (!ownerName) return true;
-      return lines.slice(0, 12).some((line) => {
-        const lower = line.toLowerCase();
-        return lower === ownerNameLower
-          || lower.startsWith(`${ownerNameLower} replied`)
-          || lower.includes(`${ownerNameLower} replied`);
-      });
-    };
-    const looksCommentContext = (lines, links) => {
-      const shortText = lines.slice(0, 24).join(" ");
-      const hasCommentPermalink = links.some((link) => /[?&]comment_id=|comment_id%3D/i.test(link.href));
-      return hasCommentPermalink
-        || /\bReply\b|replied|回复/.test(shortText)
-        || lines.some(commentTimeLine);
-    };
-    const blocks = [...document.querySelectorAll('[role="article"], div[aria-label], li, div')];
-    const results = [];
-    for (const block of blocks) {
-      if (forbiddenChrome(block)) continue;
-      const rawText = block.innerText || block.textContent || "";
-      const text = clean(rawText);
-      if (!text || text.length > 3000 || looksLikePageShellOrAd(text)) continue;
-      const lines = linesFrom(rawText);
-      const links = [...block.querySelectorAll("a[href]")]
-        .map((a) => ({
-          href: new URL(a.getAttribute("href"), location.href).href,
-          text: clean(a.innerText || a.textContent || a.getAttribute("aria-label") || ""),
-        }))
-        .filter((link) => isExternalHref(link.href));
-      if (!links.length) continue;
-      const commentContext = looksCommentContext(lines, links);
-      if (!commentContext) continue;
-      const ownerMatched = ownerMatchedNearTop(lines);
-      if (!ownerMatched) continue;
-      const looksReply = /reply|replied|回复/i.test(lines.slice(0, 24).join(" "));
-      results.push({
-        href: links[0].href,
-        text: links[0].text,
-        block_text: text.slice(0, 800),
-        source: looksReply ? "comment_reply" : "comment",
-        owner_matched: ownerMatched,
-        comment_context: commentContext,
-      });
+  const attempts = [];
+  let fallbackSelected = null;
+  for (const mode of COMMENT_MODE_SEQUENCE) {
+    const modeResult = await selectCommentMode(context, mode);
+    await expandCommentsAndReplies(context);
+    const candidates = await evalPayload(context, leadLinkScanBrowserExpression(accountName, mode));
+    const selected = (candidates || []).find((item) => item.owner_matched) || (candidates || [])[0] || null;
+    attempts.push({
+      mode,
+      mode_result: modeResult,
+      candidate_count: (candidates || []).length,
+      selected: selected
+        ? {
+            href: selected.href,
+            source: selected.source,
+            owner_matched: selected.owner_matched,
+            block_text: selected.block_text,
+          }
+        : null,
+    });
+    if (!fallbackSelected && selected) fallbackSelected = selected;
+    if (!selected) continue;
+    const landingUrl = await resolveLandingUrl(selected.href);
+    if (landingUrl) {
+      return {
+        status: "qualified",
+        lead_url_raw: selected.href,
+        landing_url: landingUrl,
+        lead_link_source: selected.source,
+        owner_matched: selected.owner_matched,
+        comment_excerpt: selected.block_text,
+        candidates: candidates || [],
+        attempts,
+      };
     }
-    results.sort((a, b) => Number(b.owner_matched) - Number(a.owner_matched));
-    return results.slice(0, 20);
-  })(${JSON.stringify(accountName)})`);
-  const selected = (candidates || []).find((item) => item.owner_matched) || (candidates || [])[0] || null;
-  if (!selected) {
-    return { status: "missing", candidates: candidates || [] };
   }
-  const landingUrl = await resolveLandingUrl(selected.href);
+  if (!fallbackSelected) {
+    return { status: "missing", candidates: [], attempts };
+  }
   return {
-    status: landingUrl ? "qualified" : "missing",
-    lead_url_raw: selected.href,
-    landing_url: landingUrl,
-    lead_link_source: selected.source,
-    owner_matched: selected.owner_matched,
-    comment_excerpt: selected.block_text,
-    candidates: candidates || [],
+    status: "missing",
+    lead_url_raw: fallbackSelected.href,
+    landing_url: "",
+    lead_link_source: fallbackSelected.source,
+    owner_matched: fallbackSelected.owner_matched,
+    comment_excerpt: fallbackSelected.block_text,
+    candidates: [],
+    attempts,
   };
 }
 
@@ -504,9 +740,39 @@ function outputStatusFor(post) {
   return requiredOk ? "ready_for_output" : "needs_enrichment";
 }
 
+function enrichmentReasonCounts(posts) {
+  const counts = {};
+  const add = (key) => {
+    counts[key] = (counts[key] || 0) + 1;
+  };
+  for (const post of posts || []) {
+    if (post.output_status === "ready_for_output") continue;
+    if (!post.posted_at || !post.time_confirmed) add("missing_confirmed_posted_at");
+    if (post.summary_source !== "article" || !post.story_summary) add("missing_article_summary");
+    if (!hasQualifiedLeadLink(post)) add("missing_qualified_comment_lead_link");
+    if (post.engagement_confidence && post.engagement_confidence !== "anchored") add("engagement_unconfirmed");
+  }
+  return counts;
+}
+
+function buildCoverageSummary(payload, inputCount) {
+  const posts = payload.posts || [];
+  const readyForOutput = posts.filter((post) => post.output_status === "ready_for_output").length;
+  const needsEnrichment = posts.length - readyForOutput;
+  return {
+    input_posts: inputCount,
+    after_target_date_filter: posts.length,
+    date_filtered_out: (payload.date_filtered_out || []).length,
+    ready_for_output: readyForOutput,
+    needs_enrichment: needsEnrichment,
+    reason_counts: enrichmentReasonCounts(posts),
+  };
+}
+
 async function main() {
   const payload = JSON.parse(fs.readFileSync(INPUT, "utf8"));
   const posts = payload.posts || [];
+  const inputPostCount = posts.length;
   const baseContext = loadOpencliContext();
 
   const enriched = [];
@@ -526,7 +792,7 @@ async function main() {
       let exactTime = await readExactTimeFromDom(context, target);
       if (!exactTime.posted_at) exactTime = await readTooltipTimeWithSyntheticHover(context, target);
       if (!exactTime.posted_at && ALLOW_REAL_MOUSE_HOVER) exactTime = await readTooltipTimeWithRealMouse(context, target);
-      const engagement = await extractEngagement(context);
+      const engagement = await extractEngagement(context, target);
       if (exactTime.posted_at) {
         post.posted_at_raw = exactTime.posted_at_raw;
         post.posted_at = exactTime.posted_at;
@@ -534,11 +800,20 @@ async function main() {
         post.time_source = exactTime.time_source;
         post.time_confirmed = true;
       }
-      if (engagement.raw) {
-        post.engagement_data = engagement.raw;
-        if (engagement.reactions) post.reactions = engagement.reactions;
-        if (engagement.comments) post.comments = engagement.comments;
-        if (engagement.shares) post.shares = engagement.shares;
+      if (engagement.raw && engagement.confidence === "anchored") {
+        post.engagement_data = engagement.detail_engagement_data || engagement.raw;
+        post.detail_engagement_data = engagement.detail_engagement_data || engagement.raw;
+        post.engagement_source = engagement.source;
+        post.engagement_confidence = engagement.confidence;
+        if (engagement.likes !== null && engagement.likes !== undefined) post.likes = engagement.likes;
+        if (engagement.reactions !== null && engagement.reactions !== undefined) post.reactions = engagement.reactions;
+        if (engagement.comments !== null && engagement.comments !== undefined) post.comments = engagement.comments;
+        if (engagement.shares !== null && engagement.shares !== undefined) post.shares = engagement.shares;
+        if (engagement.views !== null && engagement.views !== undefined) post.views = engagement.views;
+      } else {
+        post.engagement_source = engagement.source || "detail_main_post_dom";
+        post.engagement_confidence = engagement.confidence || "unconfirmed";
+        post.note = appendSemicolonNote(post.note, "互动数据待补采：详情页未能锚定当前主帖互动区");
       }
       let leadLink = await extractLeadLink(context, post.account_name || "");
       if (!shouldReplaceLeadLink(post, leadLink)) {
@@ -554,6 +829,9 @@ async function main() {
         post.comment_lead_excerpt = leadLink.comment_excerpt;
       } else if (!post.lead_link_status) {
         post.lead_link_status = "missing";
+      }
+      if (leadLink.status !== "qualified") {
+        post.note = appendSemicolonNote(post.note, "评论区或评论回复引流链接待确认");
       }
       post.output_status = outputStatusFor(post);
       post.crawl_status = post.output_status === "ready_for_output" ? "ready_for_output" : "needs_enrichment";
@@ -587,6 +865,7 @@ async function main() {
   }
   payload.detail_enriched = enriched.length;
   payload.detail_enrichment_errors = errors;
+  payload.coverage_summary = buildCoverageSummary(payload, inputPostCount);
   fs.writeFileSync(OUTPUT, JSON.stringify(payload, null, 2), "utf8");
   outputJson({ ok: true, route: "opencli_browser_bridge", enriched: enriched.length, errors: errors.length, output: OUTPUT });
 }
@@ -598,4 +877,14 @@ if (RUN_MAIN) {
   });
 }
 
-export { CURRENT_FILE, INVOKED_FILE, RUN_MAIN, dateKeyFromPostedAt };
+export {
+  CURRENT_FILE,
+  INVOKED_FILE,
+  RUN_MAIN,
+  buildCoverageSummary,
+  commentModeBrowserExpression,
+  dateKeyFromPostedAt,
+  detailEngagementBrowserExpression,
+  enrichmentReasonCounts,
+  leadLinkScanBrowserExpression,
+};
