@@ -13,7 +13,7 @@ from typing import Any
 from config_loader import load_config
 from field_schema import configured_output_headers, output_row_for_headers
 from models import normalize_post
-from output_quality import output_quality_errors, partial_for_review
+from output_quality import audit_output_candidates, output_quality_errors, partial_for_review
 from store import connect, enqueue_enrichment_tasks_for_posts, mark_output_synced, upsert_posts
 from lark_io import write_rows
 
@@ -53,6 +53,7 @@ def main() -> int:
     parser.add_argument("--account-type", default="competitor")
     parser.add_argument("--source-skill", default="manual-import")
     parser.add_argument("--sync", action="store_true")
+    parser.add_argument("--sync-audit", action="store_true", help="Write auditable candidates with missing-field markers.")
     parser.add_argument("--sync-partial", action="store_true")
     parser.add_argument("--no-sync", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -96,6 +97,7 @@ def main() -> int:
     }
 
     should_sync = args.sync and not args.no_sync
+    should_sync_audit = args.sync_audit and not args.no_sync
     should_sync_partial = args.sync_partial and not args.no_sync
     if should_sync_partial:
         sync_candidates = result.get("sync_candidates") or result["inserted"]
@@ -130,6 +132,42 @@ def main() -> int:
         sync_result["partial_review"] = len(partial_posts)
         sync_result["skipped"] = len(skipped_posts)
         sync_result["formal_output_unchanged"] = True
+        print(json.dumps({**import_summary, "feishu_sync": sync_result}, ensure_ascii=False, indent=2))
+        return 0 if sync_result.get("ok") else 1
+
+    if should_sync_audit:
+        sync_candidates = result.get("sync_candidates") or result["inserted"]
+        headers = configured_output_headers(config)
+        output_posts, skipped_posts = audit_output_candidates(sync_candidates)
+        if not output_posts:
+            print(
+                json.dumps(
+                    {**import_summary,
+                        "feishu_sync": {
+                            "ok": False,
+                            "stage": "audit_output_gate",
+                            "message": "当前没有可写入正式表的候选记录。",
+                            "output_candidates": 0,
+                            "skipped": len(skipped_posts),
+                        }
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
+        rows = [output_row_for_headers(post, headers) for post in output_posts]
+        sync_result = write_rows(
+            config,
+            "all_posts",
+            rows,
+            headers=headers,
+            mode="upsert",
+            dry_run=args.dry_run,
+        )
+        sync_result["output_candidates"] = len(output_posts)
+        sync_result["skipped"] = len(skipped_posts)
+        sync_result["audit_output"] = True
         print(json.dumps({**import_summary, "feishu_sync": sync_result}, ensure_ascii=False, indent=2))
         return 0 if sync_result.get("ok") else 1
 

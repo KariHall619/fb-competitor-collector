@@ -790,6 +790,179 @@ def assert_field_schema_controls_output_rows() -> None:
     assert normalize_account_type("竞品账号") == "competitor"
 
 
+def assert_field_audit_marks_refetchable_missing_fields(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from field_audit import audit_post_fields
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, pending_enrichment_tasks, row_for_post, upsert_post
+
+    config = {
+        "quality_audit": {
+            "required_engagement_fields": ["likes", "comments", "shares"],
+            "low_like_threshold": 5,
+            "required_post_types": ["图文", "视频", "仅图片", "仅文字"],
+            "assume_lead_link_exists": True,
+        }
+    }
+    missing = normalize_post(
+        {
+            "post_url": "https://www.facebook.com/example/posts/audit-missing",
+            "posted_at": "2026年5月27日 10:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://site.test/story",
+            "story_summary": VALID_CN_SUMMARY,
+            "summary_source": "article",
+            "likes": 2,
+        }
+    )
+    audit = audit_post_fields(missing, config)
+    assert audit["field_audit_status"] == "needs_refetch"
+    assert audit["field_audit_reasons"] == ["lead_link", "comments", "shares", "likes_low", "post_type"]
+    assert audit["refetch_stages"] == ["lead_link", "engagement", "post_type"]
+    assert "待补抓：引流链接、评论数、分享数、点赞数异常低、帖子类型" == audit["field_audit_note"]
+
+    good = {
+        **missing,
+        "post_type": "图文",
+        "lead_url_raw": "https://site.test/story",
+        "landing_url": "https://site.test/story",
+        "lead_link_status": "qualified",
+        "lead_link_source": "comment",
+        "likes": 6,
+        "comments": 3,
+        "shares": 1,
+    }
+    assert audit_post_fields(good, config)["field_audit_status"] == "passed"
+
+    conn = connect(tmp_path / "field-audit.sqlite")
+    upsert_post(conn, missing)
+    stored = row_for_post(conn, missing)
+    assert stored is not None
+    assert stored["field_audit_status"] == "needs_refetch"
+    assert "likes_low" in stored["field_audit_reasons"]
+    enqueue_enrichment_tasks_for_posts(conn, [stored])
+    stages = sorted(task["stage"] for task in pending_enrichment_tasks(conn, limit=20))
+    assert stages == ["engagement", "lead_link", "post_type"]
+
+
+def assert_audit_marker_is_written_to_adoption_status() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from field_schema import output_row_for_headers
+
+    headers = ["帖子链接", "是否采用"]
+    post = {
+        "post_url": "https://facebook.com/example/posts/audit-marker",
+        "field_audit_reasons": '["lead_link", "comments", "shares", "post_type"]',
+    }
+    row = output_row_for_headers(post, headers)
+    assert row == [
+        "https://facebook.com/example/posts/audit-marker",
+        "待补抓：引流链接、评论数、分享数、帖子类型",
+    ]
+    manual = {**post, "adoption_status": "采用"}
+    assert output_row_for_headers(manual, headers)[1] == "采用"
+
+
+def assert_feishu_upsert_merges_rows_without_overwriting_manual_adoption() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from lark_io import merge_upsert_row
+
+    headers = ["帖子链接", "故事概要", "是否采用"]
+    existing = ["https://facebook.com/post/1", "旧概要", "采用"]
+    incoming = ["https://facebook.com/post/1", "新概要", "待补抓：引流链接"]
+    assert merge_upsert_row(existing, incoming, headers) == ["https://facebook.com/post/1", "新概要", "采用"]
+
+    existing_marker = ["https://facebook.com/post/2", "旧概要", "待补抓：评论数"]
+    incoming_ready = ["https://facebook.com/post/2", "新概要", ""]
+    assert merge_upsert_row(existing_marker, incoming_ready, headers) == ["https://facebook.com/post/2", "新概要", ""]
+
+
+def assert_sync_feishu_defaults_to_formal_ready_gate() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import sync_feishu
+
+    config = {
+        "feishu": {
+            "sheets": {"all_posts": "FB竞品帖子链接"},
+            "field_schema": {"output_headers": ["帖子链接", "是否采用"]},
+        }
+    }
+    incomplete = [
+        {
+            "post_url": "https://facebook.com/example/posts/incomplete",
+            "output_status": "needs_enrichment",
+            "field_audit_reasons": '["lead_link"]',
+        }
+    ]
+    formal = sync_feishu.sync_posts(config, incomplete, "all_posts", "append", True)
+    assert formal["ok"] is False
+    assert formal["stage"] == "quality_gate"
+    assert formal["ready_for_output"] == 0
+    assert formal["needs_enrichment_skipped"] == 1
+
+    audit = sync_feishu.sync_posts(config, incomplete, "all_posts", "append", True, audit=True)
+    assert audit["ok"] is True
+    assert audit["dry_run"] is True
+    assert audit["audit_output"] is True
+    assert audit["output_candidates"] == 1
+
+
+def assert_sqlite_upsert_preserves_enriched_fields(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, row_for_post, upsert_post
+
+    conn = connect(tmp_path / "idempotent-upsert.sqlite")
+    ready = normalize_post(
+        {
+            "account_name": "Story Hub",
+            "account_url": "https://www.facebook.com/storyhub",
+            "post_url": "https://www.facebook.com/storyhub/posts/pfbid-idempotent",
+            "posted_at": "2026年5月28日 10:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/ready",
+            "landing_url": "https://story.example/ready",
+            "lead_url_raw": "https://story.example/ready",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "story_summary": VALID_CN_SUMMARY,
+            "summary_source": "article",
+            "likes": 80,
+            "comments": 12,
+            "shares": 3,
+            "post_type": "图文",
+            "adoption_status": "采用",
+        }
+    )
+    upsert_post(conn, ready)
+    partial = normalize_post(
+        {
+            "account_name": "Story Hub",
+            "account_url": "https://www.facebook.com/storyhub",
+            "post_url": "https://www.facebook.com/storyhub/posts/pfbid-idempotent",
+            "post_time_text": "2h",
+            "story_summary": "Visible homepage candidate.",
+            "crawled_at": "2026-05-28T12:00:00",
+        }
+    )
+    upsert_post(conn, partial)
+    stored = row_for_post(conn, ready)
+    assert stored is not None
+    assert stored["output_status"] == "ready_for_output"
+    assert stored["posted_at"] == "2026年5月28日 10:00"
+    assert stored["time_source"] == "dom_aria_label"
+    assert stored["lead_link_status"] == "qualified"
+    assert stored["landing_url"] == "https://story.example/ready"
+    assert stored["story_summary"] == VALID_CN_SUMMARY
+    assert stored["likes"] == 80
+    assert stored["comments"] == 12
+    assert stored["shares"] == 3
+    assert stored["post_type"] == "图文"
+    assert stored["adoption_status"] == "采用"
+
+
 def assert_generic_photo_canonical_is_recomputed() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
@@ -949,8 +1122,26 @@ def assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path: Path) -> 
         ]
     )
     assert sync.returncode == 0, sync.stdout
-    assert '"rows": 1' in sync.stdout
-    assert '"needs_enrichment_skipped": 1' in sync.stdout
+    assert '"ready_for_output": 1' in sync.stdout, sync.stdout
+    assert '"needs_enrichment_skipped": 1' in sync.stdout, sync.stdout
+    assert '"rows": 1' in sync.stdout, sync.stdout
+
+    audit = run(
+        [
+            PYTHON,
+            "scripts/import_existing_result.py",
+            "--config",
+            str(config),
+            "--input",
+            str(prepared),
+            "--sync-audit",
+            "--dry-run",
+        ]
+    )
+    assert audit.returncode == 0, audit.stdout
+    assert '"audit_output": true' in audit.stdout
+    assert '"output_candidates": 2' in audit.stdout
+    assert '"rows": 2' in audit.stdout
 
 
 def assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_path: Path) -> None:
@@ -997,6 +1188,22 @@ def assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_p
     assert sync.returncode == 1, sync.stdout
     assert '"ready_for_output": 0' in sync.stdout
     assert '"needs_enrichment_skipped": 1' in sync.stdout
+
+    audit = run(
+        [
+            PYTHON,
+            "scripts/import_existing_result.py",
+            "--config",
+            str(config),
+            "--input",
+            str(sample),
+            "--sync-audit",
+            "--dry-run",
+        ]
+    )
+    assert audit.returncode == 0, audit.stdout
+    assert '"audit_output": true' in audit.stdout
+    assert '"output_candidates": 1' in audit.stdout
 
     partial = run(
         [
@@ -1294,6 +1501,78 @@ if (results.length !== 1 || !results[0].href.includes('example.test') || results
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_detail_enrichment_detects_plain_text_comment_links() -> None:
+    script = """
+import { leadLinkScanBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
+
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() {
+    return this.innerText;
+  }
+  get href() {
+    return this.attrs.href ? new URL(this.attrs.href, global.location.href).href : '';
+  }
+  getAttribute(name) {
+    return this.attrs[name] || '';
+  }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (selector.includes('[role="article"]') && node.attrs.role === 'article') return node;
+      if (selector.includes('[role="complementary"]') && node.attrs.role === 'complementary') return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a[href]') return node.tagName === 'A' && !!node.attrs.href;
+      if (current === '[role="article"]') return node.attrs.role === 'article';
+      if (current === 'div[aria-label]') return node.tagName === 'DIV' && !!node.attrs['aria-label'];
+      if (current === 'li') return node.tagName === 'LI';
+      if (current === 'div') return node.tagName === 'DIV';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+const realComment = new Node('div', { role: 'article' }, [
+  new Node('span', {}, [], 'The meaning of life'),
+  new Node('span', {}, [], 'Full story: https://kaylestore.net/i-took-care-of-my-85-year-old-neighbor/'),
+  new Node('a', { href: '/themeaningoflife/posts/pfbid?comment_id=123' }, [], '48m'),
+  new Node('span', {}, [], 'Reply')
+]);
+const body = new Node('body', {}, [realComment]);
+global.document = { querySelectorAll: (selector) => body.querySelectorAll(selector) };
+global.location = new URL('https://www.facebook.com/themeaningoflife/posts/pfbid');
+const results = eval(leadLinkScanBrowserExpression('The meaning of life', 'default'));
+if (results.length !== 1 || !results[0].href.includes('kaylestore.net/i-took-care')) {
+  console.error(JSON.stringify(results, null, 2));
+  process.exit(1);
+}
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_detail_engagement_is_anchored_to_main_post() -> None:
     script = """
 import { detailEngagementBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
@@ -1385,6 +1664,81 @@ if (result.raw.includes('58') || result.raw.includes('29 赞')) {
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_detail_post_type_expression_classifies_business_types() -> None:
+    script = """
+import { detailPostTypeBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
+
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() {
+    return this.innerText;
+  }
+  getAttribute(name) {
+    return this.attrs[name] || '';
+  }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (selector.includes('[role="article"]') && node.attrs.role === 'article') return node;
+      if (selector.includes('[role="complementary"]') && node.attrs.role === 'complementary') return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] || null;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === '[role="article"]') return node.attrs.role === 'article';
+      if (current === 'article') return node.tagName === 'ARTICLE';
+      if (current === 'a[href]') return node.tagName === 'A' && !!node.attrs.href;
+      if (current === 'img[src]') return node.tagName === 'IMG' && !!node.attrs.src;
+      if (current === 'video') return node.tagName === 'VIDEO';
+      if (current.startsWith('[aria-label')) return !!node.attrs['aria-label'];
+      if (current.startsWith('[style')) return !!node.attrs.style;
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+const body = new Node('body', {}, [
+  new Node('div', { role: 'article' }, [
+    new Node('span', {}, [], 'Story page'),
+    new Node('p', {}, [], 'Full story in comment with enough article text to count as body.'),
+    new Node('img', { src: 'https://cdn.test/image.jpg' }),
+    new Node('a', { href: 'https://kaylestore.net/story' }, [], 'kaylestore.net')
+  ])
+]);
+global.document = { querySelectorAll: (selector) => body.querySelectorAll(selector), body };
+global.location = new URL('https://www.facebook.com/example/posts/1');
+const result = eval(detailPostTypeBrowserExpression());
+if (result.post_type !== '图文') {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(1);
+}
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_comment_mode_expression_can_select_all_comments() -> None:
     script = """
 import { commentModeBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
@@ -1466,6 +1820,16 @@ if (validCandidate({ post_url: first.post_url, story_summary: 'short' })) proces
 """
     result = run(["node", "--input-type=module", "-e", js])
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def assert_opencli_extract_has_under_capture_guards() -> None:
+    script_text = (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
+    assert 'value("--max-snapshots", "16")' in script_text
+    assert 'value("--min-snapshots", "4")' in script_text
+    assert "minSnapshotsReached" in script_text
+    assert "noMovementCount" in script_text
+    assert "coverage_incomplete" in script_text
+    assert "已达到最大滚动快照数但最后一屏仍有新增候选" in script_text
 
 
 def assert_prepare_capture_has_no_base_time_argument() -> None:
@@ -1696,6 +2060,11 @@ def assert_thirteen_incomplete_candidates_are_imported_for_enrichment(tmp_path: 
     assert '"ready_for_output": 0' in sync.stdout
     assert '"needs_enrichment_skipped": 13' in sync.stdout
 
+    audit = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--sync-audit", "--dry-run"])
+    assert audit.returncode == 0, audit.stdout
+    assert '"audit_output": true' in audit.stdout
+    assert '"output_candidates": 13' in audit.stdout
+
 
 def assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp_path: Path) -> None:
     raw = tmp_path / "photo_covered_raw.json"
@@ -1805,7 +2174,14 @@ def assert_partial_review_status_and_task_queue(tmp_path: Path) -> None:
     enqueue_enrichment_tasks_for_posts(conn, [post])
     enqueue_enrichment_tasks_for_posts(conn, [post])
     tasks = pending_enrichment_tasks(conn, limit=20)
-    assert sorted(task["stage"] for task in tasks) == ["article_material", "detail_time", "lead_link", "summary"]
+    assert sorted(task["stage"] for task in tasks) == [
+        "article_material",
+        "detail_time",
+        "engagement",
+        "lead_link",
+        "post_type",
+        "summary",
+    ]
 
 
 def assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path: Path) -> None:
@@ -1830,19 +2206,50 @@ def assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path: Path) -> None
 
     upsert_post(conn, post)
     enqueue_enrichment_tasks_for_posts(conn, [post])
-    detail_tasks = [task for task in pending_enrichment_tasks(conn, stages=["detail_time", "lead_link"], limit=20)]
-    assert sorted(task["stage"] for task in detail_tasks) == ["detail_time", "lead_link"]
+    detail_tasks = [task for task in pending_enrichment_tasks(conn, stages=["detail_time", "lead_link", "engagement", "post_type"], limit=20)]
+    assert sorted(task["stage"] for task in detail_tasks) == ["detail_time", "engagement", "lead_link", "post_type"]
 
     units, missing = enrichment_worker.detail_units_for_tasks(conn, detail_tasks)
     assert missing == 0
     assert len(units) == 1
     assert units[0]["key"] == post["canonical_post_url"]
-    assert sorted(units[0]["stages"]) == ["detail_time", "lead_link"]
-    assert sorted(task["stage"] for task in units[0]["tasks"]) == ["detail_time", "lead_link"]
+    assert sorted(units[0]["stages"]) == ["detail_time", "engagement", "lead_link", "post_type"]
+    assert sorted(task["stage"] for task in units[0]["tasks"]) == ["detail_time", "engagement", "lead_link", "post_type"]
 
     batches = enrichment_worker.batches_for_detail_units(units, batch_size=2)
     assert len(batches) == 1
     assert len(batches[0]) == 1
+
+
+def assert_stale_running_enrichment_tasks_are_recovered(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, pending_enrichment_tasks, upsert_post
+
+    conn = connect(tmp_path / "stale-running.sqlite")
+    post = normalize_post(
+        {
+            "post_url": "https://www.facebook.com/example/posts/stale-running",
+            "post_time_text": "1h",
+            "story_summary": "Visible homepage candidate.",
+            "crawled_at": "2026-05-28T10:00:00",
+        }
+    )
+    upsert_post(conn, post)
+    enqueue_enrichment_tasks_for_posts(conn, [post])
+    conn.execute(
+        """
+        UPDATE enrichment_tasks
+        SET status = 'running',
+            locked_at = '2000-01-01T00:00:00',
+            next_run_at = NULL
+        WHERE stage = 'detail_time'
+        """
+    )
+    conn.commit()
+    tasks = pending_enrichment_tasks(conn, stages=["detail_time"], limit=10, stale_running_seconds=60)
+    assert len(tasks) == 1
+    assert tasks[0]["status"] == "pending"
 
 
 def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
@@ -2099,7 +2506,12 @@ def assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path: Path) -> 
     )
     formal = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--sync", "--dry-run"])
     assert formal.returncode == 1, formal.stdout
-    assert "ready_for_output" in formal.stdout
+    assert '"ready_for_output": 0' in formal.stdout
+
+    audit = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--sync-audit", "--dry-run"])
+    assert audit.returncode == 0, audit.stdout
+    assert '"audit_output": true' in audit.stdout
+    assert '"output_candidates": 1' in audit.stdout
 
     partial = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--sync-partial", "--dry-run"])
     assert partial.returncode == 0, partial.stdout
@@ -2114,6 +2526,9 @@ def main() -> int:
     assert_exact_time_parsing_and_relative_time_estimation()
     assert_comments_and_shares_are_output_as_engagement()
     assert_field_schema_controls_output_rows()
+    assert_audit_marker_is_written_to_adoption_status()
+    assert_feishu_upsert_merges_rows_without_overwriting_manual_adoption()
+    assert_sync_feishu_defaults_to_formal_ready_gate()
     assert_generic_photo_canonical_is_recomputed()
     assert_mobile_dom_extractor_can_see_story_links()
     assert_dom_extractor_does_not_treat_story_clock_as_post_time()
@@ -2122,8 +2537,11 @@ def main() -> int:
     assert_dom_extractor_prefers_parent_post_over_photo_link()
     assert_detail_engagement_is_anchored_to_main_post()
     assert_detail_enrichment_ignores_page_shell_ad_links()
+    assert_detail_enrichment_detects_plain_text_comment_links()
+    assert_detail_post_type_expression_classifies_business_types()
     assert_comment_mode_expression_can_select_all_comments()
     assert_opencli_extract_helpers_dedupe_homepage_candidates()
+    assert_opencli_extract_has_under_capture_guards()
     assert_opencli_extract_script_requires_human_intervention()
     assert_opencli_runtime_keeps_current_bound_tab()
     assert_opencli_tab_tracker_closes_only_registered_tabs()
@@ -2175,6 +2593,8 @@ def main() -> int:
         assert hot_after_many.returncode == 0, hot_after_many.stderr
         hot_after_many_data = json.loads(hot_after_many.stdout)
         assert hot_after_many_data["count"] == 1, hot_after_many.stdout
+        assert_sqlite_upsert_preserves_enriched_fields(tmp_path)
+        assert_field_audit_marks_refetchable_missing_fields(tmp_path)
         assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path)
         assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_path)
         assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path)
@@ -2190,6 +2610,7 @@ def main() -> int:
         assert_article_material_extractor(tmp_path)
         assert_partial_review_status_and_task_queue(tmp_path)
         assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path)
+        assert_stale_running_enrichment_tasks_are_recovered(tmp_path)
         assert_enrichment_worker_article_cache_and_summary(tmp_path)
         assert_story_summary_audit_downgrades_invalid_rows(tmp_path)
         assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path)

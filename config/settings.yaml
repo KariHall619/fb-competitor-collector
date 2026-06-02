@@ -62,6 +62,21 @@ lead_link:
   resolve_timeout_seconds: 20
   allowed_domains: []
 
+quality_audit:
+  required_engagement_fields:
+    - likes
+    - comments
+    - shares
+  low_like_threshold: 5
+  required_post_types:
+    - "图文"
+    - "视频"
+    - "仅图片"
+    - "仅文字"
+  assume_lead_link_exists: true
+  missing_marker_column: "是否采用"
+  update_existing_rows_by: post_url
+
 performance:
   detail_concurrency: 2
   article_concurrency: 5

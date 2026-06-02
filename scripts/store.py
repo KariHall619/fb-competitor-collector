@@ -10,7 +10,9 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from field_audit import audit_fields_for_storage
-from pipeline_status import missing_enrichment_stages
+from field_audit import is_system_audit_marker
+from pipeline_status import crawl_status_for, missing_enrichment_stages, output_status_for
+from story_summary_policy import has_valid_story_summary
 
 
 POST_COLUMNS = [
@@ -209,6 +211,84 @@ def utc_now() -> str:
     return datetime.utcnow().isoformat(timespec="seconds")
 
 
+ESTIMATED_TIME_SOURCES = {"relative_hour", "relative_estimated", "relative_label"}
+COMMENT_LEAD_SOURCES = {"comment", "comment_reply"}
+PROTECTED_FINAL_STATUSES = {"ready_for_output", "output_synced"}
+
+
+def has_confirmed_time_value(post: dict[str, Any]) -> bool:
+    return bool(
+        post.get("posted_at")
+        and post.get("time_confirmed")
+        and str(post.get("time_source") or "") not in ESTIMATED_TIME_SOURCES
+    )
+
+
+def has_qualified_lead_value(post: dict[str, Any]) -> bool:
+    return bool(
+        post.get("lead_link_status") == "qualified"
+        and post.get("lead_link_source") in COMMENT_LEAD_SOURCES
+        and (post.get("landing_url") or post.get("article_url"))
+    )
+
+
+def has_engagement_value(post: dict[str, Any]) -> bool:
+    return any(post.get(field) is not None for field in ("likes", "comments", "shares", "views"))
+
+
+def non_empty(value: Any) -> bool:
+    return value not in (None, "")
+
+
+def choose_value(existing: dict[str, Any], incoming: dict[str, Any], column: str) -> Any:
+    current = existing.get(column)
+    new_value = incoming.get(column)
+    if column in {"first_seen_at", "created_at"}:
+        return current or new_value
+    if column in {"last_seen_at", "crawled_at", "raw_payload", "coverage_note"}:
+        return new_value if non_empty(new_value) else current
+    if column in {"field_audit_status", "field_audit_reasons", "field_audit_note"}:
+        return new_value if new_value is not None else current
+    if column == "adoption_status":
+        if current and not is_system_audit_marker(current):
+            return current
+        return new_value if non_empty(new_value) else current
+    if column in {"posted_at", "posted_date", "time_source", "time_confirmed"}:
+        if has_confirmed_time_value(existing) and not has_confirmed_time_value(incoming):
+            return current
+        return new_value if non_empty(new_value) else current
+    if column in {"lead_url_raw", "landing_url", "article_url", "lead_link_status", "lead_link_source"}:
+        if has_qualified_lead_value(existing) and not has_qualified_lead_value(incoming):
+            return current
+        return new_value if non_empty(new_value) else current
+    if column in {"story_summary", "summary_source"}:
+        if has_valid_story_summary(existing) and not has_valid_story_summary(incoming):
+            return current
+        return new_value if non_empty(new_value) else current
+    if column in {"views", "likes", "comments", "shares", "engagement_raw"}:
+        if has_engagement_value(existing) and not has_engagement_value(incoming):
+            return current
+        return new_value if new_value is not None else current
+    if column in {"output_status", "crawl_status"}:
+        if existing.get("output_status") in PROTECTED_FINAL_STATUSES and incoming.get("output_status") not in PROTECTED_FINAL_STATUSES:
+            return current
+        return new_value if non_empty(new_value) else current
+    return new_value if non_empty(new_value) else current
+
+
+def merged_post(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = {column: choose_value(existing, incoming, column) for column in POST_COLUMNS}
+    if not merged.get("canonical_post_url"):
+        merged["canonical_post_url"] = incoming.get("canonical_post_url") or existing.get("canonical_post_url") or incoming.get("post_url")
+    if existing.get("output_status") != "output_synced":
+        computed_output = output_status_for(merged)
+        if merged.get("output_status") != "ready_for_output" or computed_output == "ready_for_output":
+            merged["output_status"] = computed_output
+        merged["crawl_status"] = crawl_status_for(merged)
+    merged.update(audit_fields_for_storage(merged))
+    return merged
+
+
 def upsert_post(conn: sqlite3.Connection, post: dict[str, Any]) -> str:
     if not post.get("post_url"):
         raise ValueError("post_url is required")
@@ -216,11 +296,11 @@ def upsert_post(conn: sqlite3.Connection, post: dict[str, Any]) -> str:
         post["canonical_post_url"] = post["post_url"]
     post.update(audit_fields_for_storage(post))
     existing = conn.execute(
-        "SELECT id FROM posts WHERE canonical_post_url = ? OR post_url = ?",
+        "SELECT * FROM posts WHERE canonical_post_url = ? OR post_url = ?",
         (post["canonical_post_url"], post["post_url"]),
     ).fetchone()
-    values = [post.get(column) for column in POST_COLUMNS]
     if existing:
+        post = merged_post(dict(existing), post)
         assignments = ", ".join([f"{column} = ?" for column in POST_COLUMNS if column != "post_url"])
         update_values = [post.get(column) for column in POST_COLUMNS if column != "post_url"]
         update_values.extend([post["canonical_post_url"], post["post_url"]])
@@ -230,6 +310,7 @@ def upsert_post(conn: sqlite3.Connection, post: dict[str, Any]) -> str:
         )
         conn.commit()
         return "updated"
+    values = [post.get(column) for column in POST_COLUMNS]
     placeholders = ", ".join(["?"] * len(POST_COLUMNS))
     conn.execute(
         f"INSERT INTO posts ({', '.join(POST_COLUMNS)}) VALUES ({placeholders})",
@@ -291,7 +372,6 @@ def enqueue_enrichment_tasks(
                 post_url = excluded.post_url,
                 status = CASE
                     WHEN enrichment_tasks.status = 'done' THEN enrichment_tasks.status
-                    WHEN enrichment_tasks.status = 'running' THEN enrichment_tasks.status
                     ELSE 'pending'
                 END,
                 next_run_at = CASE
@@ -318,7 +398,23 @@ def pending_enrichment_tasks(
     *,
     stages: list[str] | tuple[str, ...] | None = None,
     limit: int = 50,
+    stale_running_seconds: int = 1800,
 ) -> list[dict[str, Any]]:
+    stale_cutoff = (datetime.utcnow() - timedelta(seconds=stale_running_seconds)).isoformat(timespec="seconds")
+    conn.execute(
+        """
+        UPDATE enrichment_tasks
+        SET status = 'pending',
+            locked_at = NULL,
+            next_run_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE status = 'running'
+          AND locked_at IS NOT NULL
+          AND locked_at <= ?
+        """,
+        (stale_cutoff,),
+    )
+    conn.commit()
     clauses = ["status IN ('pending', 'failed')", "(next_run_at IS NULL OR next_run_at <= CURRENT_TIMESTAMP)"]
     params: list[Any] = []
     if stages:

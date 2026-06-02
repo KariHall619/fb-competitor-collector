@@ -34,6 +34,8 @@ const TARGET_DATE = value("--target-date", "");
 const ALLOW_REAL_MOUSE_HOVER = has("--allow-real-mouse-hover");
 const SKIP_TIME = has("--skip-time");
 const SKIP_LEAD_LINK = has("--skip-lead-link");
+const SKIP_ENGAGEMENT = has("--skip-engagement");
+const SKIP_POST_TYPE = has("--skip-post-type");
 const KEEP_OPENED_TABS = has("--keep-opened-tabs");
 const configuredLeadLink = readLeadLinkConfig(CONFIG);
 const configuredPerformance = readPerformanceConfig(CONFIG);
@@ -518,9 +520,16 @@ function detailEngagementBrowserExpression(target) {
     if (result.shares !== null && result.shares !== undefined) parts.push("分享数：" + result.shares);
     result.detail_engagement_data = parts.join("；");
     result.raw = result.detail_engagement_data || result.raw;
+    const missing = [];
+    if (result.likes === null || result.likes === undefined) missing.push("likes");
+    if (result.comments === null || result.comments === undefined) missing.push("comments");
+    if (result.shares === null || result.shares === undefined) missing.push("shares");
     if (!result.raw) {
       result.confidence = "anchored_missing_metrics";
       result.warnings.push("main_post_metrics_not_found");
+    } else if (missing.length) {
+      result.confidence = "anchored_incomplete_metrics";
+      result.warnings.push("missing_" + missing.join("_"));
     }
     return result;
   })()`;
@@ -528,6 +537,50 @@ function detailEngagementBrowserExpression(target) {
 
 async function extractEngagement(context, target) {
   return await evalPayload(context, detailEngagementBrowserExpression(target));
+}
+
+function detailPostTypeBrowserExpression() {
+  return `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const forbiddenChrome = (node) => Boolean(node?.closest?.('[role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"], nav, aside, footer, header'));
+    const looksLikeAdOrShell = (text) => /Sponsored|Suggested for you|Create a post|What's on your mind|Privacy\\s*·\\s*Terms|Ads Manager|Harness the Power of AI|Feed posts/i.test(text);
+    const roots = [...document.querySelectorAll('[role="article"], article')]
+      .map((node) => ({ node, text: clean(node.innerText || node.textContent || "") }))
+      .filter((item) => item.text && !forbiddenChrome(item.node) && !looksLikeAdOrShell(item.text))
+      .sort((a, b) => b.text.length - a.text.length);
+    const root = roots[0]?.node || document.body;
+    const text = clean(root.innerText || root.textContent || "");
+    const hrefs = [...root.querySelectorAll("a[href]")].map((a) => {
+      try { return new URL(a.getAttribute("href"), location.href).href; } catch { return ""; }
+    }).filter(Boolean);
+    const hasVideo = hrefs.some((href) => /\\/reel\\/|\\/watch\\/|\\/videos?\\/|[?&]v=|fb\\.watch/i.test(href))
+      || Boolean(root.querySelector('video, [aria-label*="Reel" i], [aria-label*="Video" i], [aria-label*="Watch" i]'));
+    const hasImage = Boolean(root.querySelector('img[src], [style*="background-image"]'))
+      || hrefs.some((href) => /photo\\.php|\\/photo\\/|[?&]fbid=/i.test(href));
+    const textWithoutUi = text
+      .replace(/\\b(Like|Comment|Share|Reply|Follow|See more|All reactions)\\b/gi, " ")
+      .replace(/\\d+(?:[.,]\\d+)?\\s*(?:K|M|万)?\\s*(?:likes?|comments?|shares?|views?|plays?)/gi, " ")
+      .replace(/\\s+/g, " ")
+      .trim();
+    const hasBodyText = textWithoutUi.length >= 24 || hrefs.some((href) => !/facebook\\.com|fb\\.watch|meta\\.com/i.test(href));
+    let post_type = "";
+    if (hasVideo) post_type = "视频";
+    else if (hasImage && hasBodyText) post_type = "图文";
+    else if (hasImage) post_type = "仅图片";
+    else if (hasBodyText) post_type = "仅文字";
+    return {
+      post_type,
+      source: "detail_main_post_dom",
+      has_video: hasVideo,
+      has_image: hasImage,
+      has_body_text: hasBodyText,
+      root_text_preview: text.slice(0, 400),
+    };
+  })()`;
+}
+
+async function extractPostType(context) {
+  return await evalPayload(context, detailPostTypeBrowserExpression());
 }
 
 async function expandCommentsAndReplies(context) {
@@ -650,6 +703,30 @@ function leadLinkScanBrowserExpression(accountName = "", mode = "default") {
         return false;
       }
     };
+    const normalizeCandidateHref = (href) => {
+      try {
+        const parsed = new URL(href, location.href);
+        if (/l\\.facebook\\.com$/i.test(parsed.hostname) && parsed.searchParams.get("u")) {
+          return new URL(parsed.searchParams.get("u"), location.href).href;
+        }
+        return parsed.href;
+      } catch {
+        return "";
+      }
+    };
+    const plainTextLinks = (text) => {
+      const found = [];
+      const pattern = /(?:https?:\\/\\/|www\\.)[^\\s<>"'，。；、)）\\]]+/gi;
+      let match = null;
+      while ((match = pattern.exec(text))) {
+        const raw = match[0].replace(/[.,;!?]+$/g, "");
+        const href = raw.startsWith("http") ? raw : "https://" + raw;
+        if (isExternalHref(href)) {
+          found.push({ href: normalizeCandidateHref(href), text: raw, source_kind: "plain_text" });
+        }
+      }
+      return found;
+    };
     const ownerName = clean(expectedAccountName);
     const ownerNameLower = ownerName.toLowerCase();
     const commentTimeLine = (line) => /^(just now|\\d+\\s*(m|min|h|hr|d|day|w|wk)|刚刚|\\d+\\s*分钟|\\d+\\s*小时|\\d+\\s*天)$/i.test(line);
@@ -684,12 +761,15 @@ function leadLinkScanBrowserExpression(accountName = "", mode = "default") {
       const text = clean(rawText);
       if (!text || text.length > 3000 || looksLikePageShellOrAd(text)) continue;
       const lines = linesFrom(rawText);
-      const links = [...block.querySelectorAll("a[href]")]
+      const anchorLinks = [...block.querySelectorAll("a[href]")]
         .map((a) => ({
-          href: new URL(a.getAttribute("href"), location.href).href,
+          href: normalizeCandidateHref(a.getAttribute("href")),
           text: clean(a.innerText || a.textContent || a.getAttribute("aria-label") || ""),
+          source_kind: "anchor",
         }))
         .filter((link) => isExternalHref(link.href));
+      const links = [...anchorLinks, ...plainTextLinks(rawText)]
+        .filter((link, index, items) => link.href && items.findIndex((item) => item.href === link.href) === index);
       if (!links.length) continue;
       const commentContext = looksCommentContext(lines, links);
       if (!commentContext) continue;
@@ -1020,7 +1100,10 @@ async function enrichPostInContext(post, context) {
     exactTime.preserved_existing = true;
   }
 
-  const engagement = await extractEngagement(context, target);
+  const engagement = SKIP_ENGAGEMENT
+    ? { skipped: true, raw: "", confidence: "skipped" }
+    : await extractEngagement(context, target);
+  const postType = SKIP_POST_TYPE ? { skipped: true, post_type: post.post_type || "" } : await extractPostType(context);
   if (exactTime.posted_at) {
     post.posted_at_raw = exactTime.posted_at_raw;
     post.posted_at = exactTime.posted_at;
@@ -1028,7 +1111,13 @@ async function enrichPostInContext(post, context) {
     post.time_source = exactTime.time_source;
     post.time_confirmed = true;
   }
-  if (engagement.raw && engagement.confidence === "anchored") {
+  if (postType.post_type) {
+    post.post_type = postType.post_type;
+    post.post_type_source = postType.source || "detail_main_post_dom";
+  } else if (!SKIP_POST_TYPE) {
+    post.note = appendSemicolonNote(post.note, "帖子类型待补采：详情页未能判断图文/视频/仅图片/仅文字");
+  }
+  if (engagement.raw && ["anchored", "anchored_incomplete_metrics"].includes(engagement.confidence)) {
     post.engagement_data = engagement.detail_engagement_data || engagement.raw;
     post.detail_engagement_data = engagement.detail_engagement_data || engagement.raw;
     post.engagement_source = engagement.source;
@@ -1038,7 +1127,7 @@ async function enrichPostInContext(post, context) {
     if (engagement.comments !== null && engagement.comments !== undefined) post.comments = engagement.comments;
     if (engagement.shares !== null && engagement.shares !== undefined) post.shares = engagement.shares;
     if (engagement.views !== null && engagement.views !== undefined) post.views = engagement.views;
-  } else {
+  } else if (!SKIP_ENGAGEMENT) {
     post.engagement_source = engagement.source || "detail_main_post_dom";
     post.engagement_confidence = engagement.confidence || "unconfirmed";
     post.note = appendSemicolonNote(post.note, "互动数据待补采：详情页未能锚定当前主帖互动区");
@@ -1071,7 +1160,7 @@ async function enrichPostInContext(post, context) {
   }
   post.output_status = outputStatusFor(post);
   post.crawl_status = post.output_status === "ready_for_output" ? "ready_for_output" : "needs_enrichment";
-  return { ok: true, exact_time: exactTime, engagement, lead_link: leadLink };
+  return { ok: true, exact_time: exactTime, engagement, lead_link: leadLink, post_type: postType };
 }
 
 async function enrichPostWithFreshTab(baseContext, post) {
@@ -1099,31 +1188,76 @@ async function main() {
   let tabCleanup = null;
   try {
     for (const [index, post] of posts.entries()) {
-    if (LIMIT && index >= LIMIT) break;
-    if (!post.post_url) continue;
-    const postStarted = Date.now();
-    try {
-      const before = { ...post };
-      let mode = "reused_detail_tab";
-      let result = null;
+      if (LIMIT && index >= LIMIT) break;
+      if (!post.post_url) continue;
+      const postStarted = Date.now();
       try {
-        if (!reusableContext) reusableContext = await openReusablePostTab(baseContext, post.post_url);
-        else await navigatePostTab(reusableContext, post.post_url);
-        result = await enrichPostInContext(post, reusableContext);
-        if (!result.ok) {
-          if (isHumanInterventionResult(result)) {
-            blockedResult = result;
-            errors.push({
-              post_url: post.post_url,
-              error: result.status,
-              reason: result.reason,
-              action_required: result.action_required,
-              body_preview: result.body_preview,
-            });
-            break;
+        const before = { ...post };
+        let mode = "reused_detail_tab";
+        let result = null;
+        try {
+          if (!reusableContext) reusableContext = await openReusablePostTab(baseContext, post.post_url);
+          else await navigatePostTab(reusableContext, post.post_url);
+          result = await enrichPostInContext(post, reusableContext);
+          if (!result.ok) {
+            if (isHumanInterventionResult(result)) {
+              blockedResult = result;
+              errors.push({
+                post_url: post.post_url,
+                error: result.status,
+                reason: result.reason,
+                action_required: result.action_required,
+                body_preview: result.body_preview,
+              });
+              break;
+            }
+            restorePost(post, before);
+            mode = "fresh_tab_fallback";
+            lowDisturbance.fresh_tab_fallback += 1;
+            result = await enrichPostWithFreshTab(baseContext, post);
+            if (!result.ok) {
+              if (isHumanInterventionResult(result)) {
+                blockedResult = result;
+                errors.push({
+                  post_url: post.post_url,
+                  error: result.status,
+                  reason: result.reason,
+                  action_required: result.action_required,
+                  body_preview: result.body_preview,
+                });
+                break;
+              }
+              errors.push({ post_url: post.post_url, error: result.status, body_preview: result.body_preview });
+              continue;
+            }
           }
+          if (shouldFallbackAfterReusable({ before, after: post, exactTime: result.exact_time, leadLink: result.lead_link })) {
+            restorePost(post, before);
+            mode = "fresh_tab_fallback";
+            lowDisturbance.fresh_tab_fallback += 1;
+            result = await enrichPostWithFreshTab(baseContext, post);
+            if (!result.ok) {
+              if (isHumanInterventionResult(result)) {
+                blockedResult = result;
+                errors.push({
+                  post_url: post.post_url,
+                  error: result.status,
+                  reason: result.reason,
+                  action_required: result.action_required,
+                  body_preview: result.body_preview,
+                });
+                break;
+              }
+              errors.push({ post_url: post.post_url, error: result.status, body_preview: result.body_preview });
+              continue;
+            }
+          } else {
+            lowDisturbance.reused_detail_tab += 1;
+          }
+        } catch (error) {
           restorePost(post, before);
           mode = "fresh_tab_fallback";
+          lowDisturbance.reusable_errors += 1;
           lowDisturbance.fresh_tab_fallback += 1;
           result = await enrichPostWithFreshTab(baseContext, post);
           if (!result.ok) {
@@ -1142,64 +1276,20 @@ async function main() {
             continue;
           }
         }
-        if (shouldFallbackAfterReusable({ before, after: post, exactTime: result.exact_time, leadLink: result.lead_link })) {
-          restorePost(post, before);
-          mode = "fresh_tab_fallback";
-          lowDisturbance.fresh_tab_fallback += 1;
-          result = await enrichPostWithFreshTab(baseContext, post);
-          if (!result.ok) {
-            if (isHumanInterventionResult(result)) {
-              blockedResult = result;
-              errors.push({
-                post_url: post.post_url,
-                error: result.status,
-                reason: result.reason,
-                action_required: result.action_required,
-                body_preview: result.body_preview,
-              });
-              break;
-            }
-            errors.push({ post_url: post.post_url, error: result.status, body_preview: result.body_preview });
-            continue;
-          }
-        } else {
-          lowDisturbance.reused_detail_tab += 1;
-        }
-      } catch (error) {
-        restorePost(post, before);
-        mode = "fresh_tab_fallback";
-        lowDisturbance.reusable_errors += 1;
-        lowDisturbance.fresh_tab_fallback += 1;
-        result = await enrichPostWithFreshTab(baseContext, post);
-        if (!result.ok) {
-          if (isHumanInterventionResult(result)) {
-            blockedResult = result;
-            errors.push({
-              post_url: post.post_url,
-              error: result.status,
-              reason: result.reason,
-              action_required: result.action_required,
-              body_preview: result.body_preview,
-            });
-            break;
-          }
-          errors.push({ post_url: post.post_url, error: result.status, body_preview: result.body_preview });
-          continue;
-        }
-      }
-      enriched.push({
-        post_url: post.post_url,
-        mode,
-        duration_ms: Date.now() - postStarted,
+        enriched.push({
+          post_url: post.post_url,
+          mode,
+          duration_ms: Date.now() - postStarted,
         exact_time: result.exact_time,
         engagement: result.engagement,
         lead_link: result.lead_link,
+        post_type: result.post_type,
       });
-    } catch (error) {
-      errors.push({ post_url: post.post_url, error: String(error.stack || error) });
+      } catch (error) {
+        errors.push({ post_url: post.post_url, error: String(error.stack || error) });
+      }
+      if (blockedResult) break;
     }
-    if (blockedResult) break;
-  }
   } finally {
     tabCleanup = await openedTabTracker.closeAll();
   }
@@ -1274,6 +1364,7 @@ export {
   commentModeBrowserExpression,
   dateKeyFromPostedAt,
   detailEngagementBrowserExpression,
+  detailPostTypeBrowserExpression,
   enrichmentReasonCounts,
   leadLinkScanBrowserExpression,
 };

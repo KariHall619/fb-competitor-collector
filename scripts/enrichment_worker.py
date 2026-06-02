@@ -35,7 +35,7 @@ from store import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DETAIL_STAGES = {"detail_time", "lead_link"}
+DETAIL_STAGES = {"detail_time", "lead_link", "engagement", "post_type"}
 
 
 def split_stages(value: str) -> list[str]:
@@ -48,6 +48,10 @@ def detail_args_for_stages(stages: set[str]) -> list[str]:
         args.append("--skip-time")
     if "lead_link" not in stages:
         args.append("--skip-lead-link")
+    if "engagement" not in stages:
+        args.append("--skip-engagement")
+    if "post_type" not in stages:
+        args.append("--skip-post-type")
     return args
 
 
@@ -162,6 +166,10 @@ def detail_stage_satisfied(post: dict[str, Any], stage: str) -> bool:
         return bool(post.get("posted_at") and post.get("time_confirmed"))
     if stage == "lead_link":
         return bool(post.get("lead_link_status") == "qualified" and post.get("landing_url"))
+    if stage == "engagement":
+        return all(post.get(field) is not None for field in ("likes", "comments", "shares"))
+    if stage == "post_type":
+        return post.get("post_type") in {"图文", "视频", "仅图片", "仅文字"}
     return True
 
 

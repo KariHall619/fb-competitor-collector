@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from config_loader import deep_get
+from field_audit import adoption_status_for_output
 
 
 ESTIMATED_TIME_SOURCES = {"relative_hour", "relative_estimated", "relative_label"}
@@ -186,7 +187,7 @@ def output_value(post: dict[str, Any], field: str) -> Any:
         include_views = not current_header or "浏览量" in current_header
         return engagement_text(post, include_views=include_views)
     if field == "adoption_status":
-        return post.get("adoption_status", "")
+        return adoption_status_for_output(post)
     if field == "internal_link":
         return post.get("internal_link", "")
     if field in {"views", "likes", "comments", "shares"}:

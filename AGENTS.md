@@ -13,7 +13,8 @@ This file is the first-stop project memory for future agents working in this rep
   4. Candidate detail enrichment reuses one detail tab when possible, with the original fresh-tab flow as fallback, to confirm exact `posted_at`, expand comments/replies, and capture the account-owned lead link.
   5. The lead link resolves to an external `landing_url`.
   6. Article material is fetched from the landing page, and the Chinese `story_summary` must be based on that material.
-  7. Only `ready_for_output` rows sync to Feishu; incomplete candidates stay in SQLite as `needs_enrichment`.
+  7. Only `ready_for_output` rows sync to Feishu through normal `--sync`; incomplete candidates stay in SQLite as `needs_enrichment`.
+  8. Audit/debug writes for incomplete candidates require an explicit audit route such as `--sync-audit` or `sync_feishu.py --audit`.
 
 ## Important User Feedback Already Incorporated
 
@@ -27,6 +28,9 @@ This file is the first-stop project memory for future agents working in this rep
 - Quality gate is an output/sync gate, not an import gate. Valid candidates should enter SQLite first as `needs_enrichment`; later enrichment can promote them to `ready_for_output`.
 - Detail-page engagement must be anchored to the current main post DOM. Do not parse `document.body.innerText` or broad page text for likes/comments/shares, because comment blocks, recommendations, and ads can bind the wrong number to labels such as `Like`.
 - When a detail page exposes clustered metrics like `811 / 350 / 31`, treat them positionally as reactions/likes, comments, and shares after confirming the cluster belongs to the main post.
+- Homepage capture should avoid stopping on a few stable DOM snapshots while Facebook can still scroll. `opencli_extract_current_tab.mjs` uses a higher default snapshot budget, a minimum snapshot count, and scroll-movement guards; `coverage_incomplete=true` means the last allowed snapshot still found new candidates and the operator should raise `--max-snapshots` or retry from the page top.
+- SQLite upsert must be merge-oriented, not overwrite-oriented. Re-imported partial rows must not downgrade confirmed time, qualified comment/comment-reply lead links, external landing/article URLs, valid Chinese article summaries, engagement values, manual adoption decisions, or final statuses.
+- Missing or suspicious fields such as lead link, engagement, low likes, or post type can be marked with `待补抓：...` and queued for `lead_link`, `engagement`, or `post_type` refetch. These markers are operational audit hints, not permission to bypass the final quality gate.
 
 ## Do Not Reintroduce
 
@@ -94,20 +98,21 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 - `scripts/read_accounts.py`: reads source Feishu accounts. It supports competitor/internal columns and generic account columns through `field_schema.py`.
 - `scripts/opencli_runtime.mjs`: shared OpenCLI command/session/tab/eval helpers.
 - `scripts/check_opencli_runtime_backend.mjs`: OpenCLI backend readiness check.
-- `scripts/opencli_extract_current_tab.mjs`: current-tab extraction reference route.
+- `scripts/opencli_extract_current_tab.mjs`: current-tab extraction reference route. It defaults to `--max-snapshots 16` and `--min-snapshots 4` to reduce under-capture from early stable virtualized-feed snapshots.
 - `scripts/fb_dom_extractors.js`: page DOM candidate extraction.
 - `scripts/fb_time_extractors.js`: exact Facebook time parsing and timestamp-target helpers.
 - `scripts/prepare_capture_result.py`: normalize raw homepage capture and keep incomplete candidates as `needs_enrichment`.
 - `scripts/opencli_enrich_post_details.mjs`: open detail pages, confirm exact time, expand comments/replies, resolve lead links, apply target-date filtering.
 - `scripts/run_capture_pipeline.py`: fast account-level entrypoint that discovers visible candidates, prepares/imports them as partial records, and queues enrichment.
-- `scripts/enrichment_worker.py`: resumes queued `detail_time`, `lead_link`, and `article_material` tasks with local concurrency limits. Its `summary` stage no longer generates story summaries; it only verifies that a Codex-written Chinese summary has been applied, otherwise it leaves `requires_codex_chinese_summary`.
+- `scripts/enrichment_worker.py`: resumes queued `detail_time`, `lead_link`, `engagement`, `post_type`, and `article_material` tasks with local concurrency limits. Its `summary` stage no longer generates story summaries; it only verifies that a Codex-written Chinese summary has been applied, otherwise it leaves `requires_codex_chinese_summary`.
 - `scripts/enrich_article_summaries.py`: fetch article/landing material for summarization.
 - `scripts/export_summary_requests.py`: export SQLite rows and article material that need Codex-written Chinese summaries.
 - `scripts/apply_article_summaries.py`: apply Codex-written Chinese summaries and recompute `output_status`.
 - `scripts/audit_story_summaries.py`: audit invalid local summaries and optionally downgrade them to `needs_enrichment`.
-- `scripts/import_existing_result.py`: import JSON/CSV into SQLite and optionally sync ready rows.
-- `scripts/filter_posts.py`: filter local SQLite records and optionally sync ready rows.
-- `scripts/sync_feishu.py`: sync local ready rows to Feishu.
+- `scripts/audit_fields.py`: audit missing/refetchable output fields, write `field_audit_*` markers, and queue refetch tasks when run with `--fix`.
+- `scripts/import_existing_result.py`: import JSON/CSV into SQLite and optionally sync ready rows; use `--sync-audit` only for explicit audit/debug output.
+- `scripts/filter_posts.py`: filter local SQLite records and optionally sync ready rows; use `--sync-audit` only for explicit audit/debug output.
+- `scripts/sync_feishu.py`: sync local ready rows to Feishu; use `--audit` only for explicit audit/debug output.
 - `scripts/output_quality.py`: final output gate.
 - `scripts/store.py`: SQLite schema/upsert/query logic.
 
@@ -174,7 +179,7 @@ python3 scripts/run_capture_pipeline.py --config config/settings.yaml --account-
 Resume queued enrichment:
 
 ```bash
-python3 scripts/enrichment_worker.py --config config/settings.yaml --stages detail_time,lead_link,article_material --limit 50
+python3 scripts/enrichment_worker.py --config config/settings.yaml --stages detail_time,lead_link,engagement,post_type,article_material --limit 50
 ```
 
 Sync only ready rows:
@@ -183,16 +188,23 @@ Sync only ready rows:
 python3 scripts/import_existing_result.py --config config/settings.yaml --input exports/ready.json --sync --dry-run
 ```
 
+Audit/write incomplete candidates explicitly:
+
+```bash
+python3 scripts/import_existing_result.py --config config/settings.yaml --input exports/prepared.json --sync-audit --dry-run
+python3 scripts/sync_feishu.py --config config/settings.yaml --audit --dry-run
+```
+
 ## Current Runtime Notes From Last Check
 
-Last observed on 2026-05-29:
+Last observed on 2026-06-02:
 
 - Platform: `darwin`.
 - `lark-cli` resolved to `/Users/a1/.npm-global/bin/lark-cli`.
 - `lark-cli` identity was `user`, but token status was `needs_refresh`; real writes require refresh.
-- OpenCLI command resolved through `npx -y @jackwener/opencli`, version `1.8.0`.
-- OpenCLI daemon was running on port `19825`.
-- Browser Bridge extension was not connected to the current Chrome profile, so live capture was blocked until the OpenCLI extension/profile connection is fixed.
+- OpenCLI command resolved through `npx -y @jackwener/opencli`, version `1.8.1`.
+- OpenCLI daemon was not running on port `19825`.
+- Browser Bridge live capture was blocked until the OpenCLI daemon/extension/profile connection is fixed.
 - `recommended_capture_route.route` was `blocked_until_opencli_ready`.
 
 These are runtime observations, not permanent project facts. Re-run `check_env.py` before live capture or Feishu writes.
@@ -216,13 +228,14 @@ Current latest passing commit before this file: `365608ba38d090f9b5f8f88e530baec
 
 ## Performance Notes
 
-- The accuracy contract is unchanged: `ready_for_output` still requires detail-confirmed time, qualified account-owned comment/comment-reply lead link, external landing URL, and article-based Chinese summary.
+- The accuracy contract is unchanged: `ready_for_output` still requires detail-confirmed time, qualified account-owned comment/comment-reply lead link, external landing URL, and article-based Chinese summary. Audited candidate sync is traceable preview/update output, not proof that a row is complete.
 - Article material extraction is not summary generation. Do not treat article title, meta description, or source text excerpt as `story_summary`; export summary requests and apply Codex-written Chinese summaries instead.
 - Detail enrichment uses bounded readiness waits. `open_tab_wait_seconds`, `detail_navigation_wait_seconds`, `synthetic_tooltip_wait_ms`, and `real_mouse_tooltip_wait_ms` are maximum waits; the script should continue earlier once the detail DOM, tooltip, or comment expansion signal is available.
 - Do not replace these readiness waits with fixed sleeps unless OpenCLI/Facebook behavior changes and tests are updated. Fixed waits directly increase per-post latency.
 - `enrichment_worker.py` should keep grouping detail tasks by canonical post URL. Splitting `detail_time` and `lead_link` into separate page opens is a regression for the sub-two-minute-per-post target.
 - `opencli_enrich_post_details.mjs` writes `performance_summary`, including `average_ms`, `max_ms`, and `over_two_minute_posts`, so real capture runs can verify the per-post target without relaxing quality gates.
 - `opencli_enrich_post_details.mjs` tracks tabs opened by automation and closes those detail tabs once the batch finishes, including blocked/error exits. Do not close the user's original Facebook homepage tab; `--keep-opened-tabs` is for debugging only.
+- If `opencli_extract_current_tab.mjs` reports `coverage_incomplete=true`, do not treat the run as complete coverage. Increase `--max-snapshots` or restart from the account homepage top before concluding older in-window posts were absent.
 
 ## Git/Workspace Notes
 

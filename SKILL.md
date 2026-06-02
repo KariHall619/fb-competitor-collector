@@ -81,7 +81,8 @@ Run all commands from the skill root.
 | Import existing JSON/CSV | `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --no-sync` |
 | Import and sync new rows | `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --sync` |
 | Fast partial capture/import | `python3 scripts/run_capture_pipeline.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --partial` |
-| Resume enrichment queue | `python3 scripts/enrichment_worker.py --config config/settings.yaml --stages detail_time,lead_link,article_material --limit 50` |
+| Resume enrichment queue | `python3 scripts/enrichment_worker.py --config config/settings.yaml --stages detail_time,lead_link,engagement,post_type,article_material --limit 50` |
+| Audit missing fields and queue refetch | `python3 scripts/audit_fields.py --config config/settings.yaml --fix` |
 | Filter local library | `python3 scripts/filter_posts.py --config config/settings.yaml ...` |
 | Filter and sync | `python3 scripts/filter_posts.py --config config/settings.yaml ... --sync` |
 | Prepare raw OpenCLI capture | `python3 scripts/prepare_capture_result.py --input <raw.json> --output <prepared.json> --target-date YYMMDD` |
@@ -140,7 +141,7 @@ Rules:
 - Parent post links are best-effort dedupe helpers. If a parent link is available, store it in `parent_post_url`; if not, keep the original `raw_fb_url` / `post_url` and leave later similarity review to a separate pass.
 - Formal output requires a lead link posted by the account in the comment area or a comment reply. The link must resolve outside Facebook/Meta and be stored as `landing_url`; set `lead_link_status=qualified`.
 - A comment/reply lead link already captured from the homepage or post comments is authoritative. Detail-page enrichment must not overwrite it with unrelated external links from right-column ads, suggested posts, feed ads, or other non-comment page surfaces.
-- Missing share count, parent post URL, exact time, summary, or lead link must not drop the candidate at capture time. Keep the candidate as `needs_enrichment`; only `ready_for_output` rows may sync to Feishu.
+- Missing share count, parent post URL, exact time, summary, or lead link must not drop the candidate at capture time. Keep the candidate as `needs_enrichment`; only `ready_for_output` rows may sync through normal `--sync`.
 - Do not sync live capture rows unless `posted_at` is confirmed at least to the hour, formatted like `2026年5月19日 17:00`.
 - Reject estimated relative-time sources such as `relative_estimated`, `relative_hour`, or `relative_label` during Feishu sync, even if a `posted_at` value is present.
 - Do not sync live capture rows whose story summary is copied from Facebook text, article title, meta description, source excerpt, or English article material. The summary must be a Codex-written Chinese summary based on linked article material and marked `summary_source=article`.
@@ -150,6 +151,9 @@ Rules:
 - Before deleting any remaining relative-time fallback code, run the exact-time verifier against a real logged-in Facebook tab through the trusted OpenCLI Browser Bridge runtime and require `status=exact_time_confirmed`.
 - Short posts must be kept if they have a valid FB content URL. If comment/reply lead link, landing URL, article summary, engagement, or exact time is missing, keep them as `needs_enrichment` instead of dropping them.
 - For scale-out runs, first import visible candidates as `partial_review`, then resume queued enrichment stages in SQLite. Formal `--sync` still writes only `ready_for_output`; use `--sync-partial --dry-run` only for business preview.
+- Use `--sync-audit` or `sync_feishu.py --audit` only when the operator explicitly wants an audit/debug write of incomplete candidates with missing-field markers. Do not use audit sync for formal output.
+- If current-tab extraction returns `coverage_incomplete=true`, the run hit the snapshot cap while still finding new candidates. Raise `--max-snapshots` or restart from the account homepage top before declaring the visible date window fully covered.
+- Re-importing the same post must preserve higher-quality stored fields. Do not overwrite confirmed detail time, qualified comment/reply lead links, external landing URLs, valid Chinese article summaries, engagement values, manual `是否采用`, or final output status with weaker partial data.
 - `enrichment_worker.py --stages summary` does not generate summaries. It only verifies whether a valid Codex-written Chinese summary has already been applied; otherwise it leaves `requires_codex_chinese_summary`. Generate Chinese summaries from `export_summary_requests.py` output and apply them with `apply_article_summaries.py --config ... --summaries ...`.
 
 ## Feishu Workflow

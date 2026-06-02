@@ -22,8 +22,9 @@ const { browserExpression } = require("./fb_dom_extractors.js");
 const { value } = extractArgs();
 const ACCOUNT_URL = value("--account-url", "");
 const MAX_TEXT = Number(value("--max-text", "1500"));
-const MAX_SNAPSHOTS = Number(value("--max-snapshots", "10"));
+const MAX_SNAPSHOTS = Number(value("--max-snapshots", "16"));
 const STABLE_SNAPSHOTS = Number(value("--stable-snapshots", "3"));
+const MIN_SNAPSHOTS = Number(value("--min-snapshots", "4"));
 const SCROLL_PIXELS = Number(value("--scroll-pixels", "1400"));
 const CURRENT_FILE = fileURLToPath(import.meta.url);
 const INVOKED_FILE = process.argv?.[1] ? path.resolve(process.argv[1]) : "";
@@ -106,6 +107,7 @@ async function scrollDown(opencliCommand, session, tab, pixels) {
     return {
       before,
       after,
+      moved: Math.abs(after - before),
       body_length: document.body?.innerText?.length || 0,
       scroll_height: document.documentElement?.scrollHeight || document.body?.scrollHeight || 0,
     };
@@ -119,6 +121,8 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
   let stableCount = 0;
   let blockedExtraction = null;
   let previousSeenCount = 0;
+  let noMovementCount = 0;
+  let previousScrollHeight = 0;
   for (let index = 0; index < Math.max(1, MAX_SNAPSHOTS); index += 1) {
     const extraction = await evalPage(opencliCommand, session, tab, browserExpression(maxText));
     if (extraction.capture_blocked) {
@@ -156,9 +160,14 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
     });
     stableCount = seen.size === previousSeenCount ? stableCount + 1 : 0;
     previousSeenCount = seen.size;
-    if (stableCount >= Math.max(1, STABLE_SNAPSHOTS)) break;
+    const minSnapshotsReached = snapshots.length >= Math.max(1, MIN_SNAPSHOTS);
+    if (minSnapshotsReached && stableCount >= Math.max(1, STABLE_SNAPSHOTS) && noMovementCount >= 1) break;
     const scrollState = await scrollDown(opencliCommand, session, tab, SCROLL_PIXELS);
     snapshots[snapshots.length - 1].scroll = scrollState;
+    const scrollMoved = Number(scrollState?.moved || 0);
+    const scrollHeight = Number(scrollState?.scroll_height || 0);
+    noMovementCount = scrollMoved < 50 && scrollHeight <= previousScrollHeight ? noMovementCount + 1 : 0;
+    previousScrollHeight = Math.max(previousScrollHeight, scrollHeight);
     await waitSeconds(opencliCommand, session, tab, 1.4);
   }
   const status = blockedExtraction
@@ -172,7 +181,9 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
     snapshots,
     posts: [...seen.values()],
     stable_snapshot_count: stableCount,
+    no_movement_snapshot_count: noMovementCount,
     coverage_blocked: !blockedExtraction && seen.size > 0 && snapshots.length > 1 && snapshots.at(-1)?.new_posts === 0,
+    coverage_incomplete: !blockedExtraction && snapshots.length >= Math.max(1, MAX_SNAPSHOTS) && snapshots.at(-1)?.new_posts > 0,
   };
 }
 
@@ -235,8 +246,12 @@ async function main() {
     coverage: {
       snapshot_count: capture.snapshots.length,
       stable_snapshot_count: capture.stable_snapshot_count,
+      no_movement_snapshot_count: capture.no_movement_snapshot_count,
       coverage_blocked: capture.coverage_blocked,
-      message: capture.coverage_blocked
+      coverage_incomplete: capture.coverage_incomplete,
+      message: capture.coverage_incomplete
+        ? "已达到最大滚动快照数但最后一屏仍有新增候选；可能还有更早帖子未覆盖，请提高 --max-snapshots 或继续从页面顶部重试。"
+        : capture.coverage_blocked
         ? "连续滚动后未发现新增候选；如果人工仍能看到更多目标窗口帖子，请从页面顶部重试或检查 Facebook 虚拟列表是否未加载。"
         : "",
     },

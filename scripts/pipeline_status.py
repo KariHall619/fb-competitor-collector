@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from models import COMMENT_LEAD_SOURCES, ESTIMATED_TIME_SOURCES, has_qualified_comment_lead_link
+from field_audit import audit_refetch_stages
 from story_summary_policy import has_valid_story_summary
 
 
@@ -61,6 +62,9 @@ def missing_enrichment_stages(post: dict[str, Any]) -> list[str]:
             stages.append("article_material")
     if not has_article_summary(post):
         stages.append("summary")
+    for stage in audit_refetch_stages(post):
+        if stage not in stages:
+            stages.append(stage)
     return stages
 
 

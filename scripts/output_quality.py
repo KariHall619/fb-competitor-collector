@@ -52,3 +52,13 @@ def partial_for_review(posts: list[dict[str, Any]]) -> tuple[list[dict[str, Any]
     partial = [post for post in posts if post.get("output_status") in {"partial_review", "ready_for_output"}]
     skipped = [post for post in posts if post.get("output_status") not in {"partial_review", "ready_for_output"}]
     return partial, skipped
+
+
+def audit_output_candidates(posts: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    candidates = [
+        post
+        for post in posts
+        if post.get("post_url") and post.get("output_status") not in {"blocked", "output_synced"}
+    ]
+    skipped = [post for post in posts if post not in candidates]
+    return candidates, skipped
