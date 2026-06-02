@@ -2318,6 +2318,51 @@ def assert_comment_lead_link_overrides_ad_links(tmp_path: Path) -> None:
     assert normalized["lead_link_status"] == "qualified"
 
 
+def assert_prepare_capture_skips_bad_candidate_without_failing_batch(tmp_path: Path) -> None:
+    raw = tmp_path / "raw_bad_candidate.json"
+    prepared = tmp_path / "prepared_bad_candidate.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "post_url": "https://www.facebook.com/example/posts/bad-time",
+                        "posted_at": "2026年13月99日 25:99",
+                        "article_summary": "Bad candidate should not stop the whole batch.",
+                    },
+                    {
+                        "post_url": "https://www.facebook.com/example/posts/good",
+                        "post_time_text": "1h",
+                        "story_summary": "Good visible candidate.",
+                        "crawled_at": "2026-05-27T14:00:00",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    result = run(
+        [
+            PYTHON,
+            "scripts/prepare_capture_result.py",
+            "--input",
+            str(raw),
+            "--output",
+            str(prepared),
+            "--target-date",
+            "260527",
+            "--account-url",
+            "https://www.facebook.com/example",
+        ]
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    data = json.loads(prepared.read_text(encoding="utf-8"))
+    assert data["prepared"] == 1
+    assert data["posts"][0]["post_url"].endswith("/good")
+    assert any(item["reason"] == "prepare_record_error" for item in data["rejected"])
+
+
 def assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path: Path) -> None:
     raw = tmp_path / "raw.json"
     prepared = tmp_path / "prepared.json"
@@ -5915,6 +5960,7 @@ def main() -> int:
         assert_quality_gate_rejects_internal_landing_url(tmp_path)
         assert_quality_gate_requires_raw_comment_lead_url(tmp_path)
         assert_comment_lead_link_overrides_ad_links(tmp_path)
+        assert_prepare_capture_skips_bad_candidate_without_failing_batch(tmp_path)
         assert_prepare_capture_has_no_base_time_argument()
         assert_exact_time_verifier_summary_contract()
         assert_opencli_detail_enrichment_supports_target_date_filter()
