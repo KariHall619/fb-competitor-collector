@@ -23,6 +23,7 @@ This file is the first-stop project memory for future agents working in this rep
 - The OpenCLI built-in `facebook feed` adapter is not the business data contract. It is only a connectivity/reference layer. The project-owned extractor, enrichment, quality gate, SQLite dedupe, and Feishu sync remain authoritative.
 - For "today's posts", always start from the top of the account homepage. Facebook virtualizes the feed DOM, so continuing from a low scroll position can miss newer posts above it.
 - If the user reports visible labels like `38m, 1h, 2h ... 17h`, treat that list as a coverage checklist, then open each candidate detail/comment area.
+- When the operator knows the visible checklist, pass it into `scripts/run_account_job.py` with `--expected-post-count <n>` and/or `--expected-labels "38m,1h,2h,..."`. A mismatch is a hard coverage signal: the job must report `coverage_incomplete`, write a coverage note, and keep rows as `待补抓：覆盖不足` instead of calling the run complete.
 - Some homepage labels that look like "today" can resolve to the previous calendar date after detail-page exact-time confirmation. Formal output is gated on detail-page exact time, not homepage relative labels.
 - Short posts, photo/reel/watch/video links, missing parent post links, missing share counts, missing engagement, or missing summary must not cause capture-time deletion. Keep them as `needs_enrichment`.
 - Comment/reply lead links posted by the account are authoritative. Do not let detail-page right-column ads, suggested posts, feed ads, or unrelated external links overwrite a captured comment/reply lead link.
@@ -105,7 +106,7 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 - `scripts/fb_dom_extractors.js`: page DOM candidate extraction.
 - `scripts/fb_time_extractors.js`: exact Facebook time parsing and timestamp-target helpers.
 - `scripts/prepare_capture_result.py`: normalize raw homepage capture and keep incomplete candidates as `needs_enrichment`.
-- `scripts/run_account_job.py`: preferred resumable business entrypoint for account capture, scoped enrichment, and formal ledger sync. It supports `--resume-only`, `--status-only`, `--last-hours 24`, `--sync`, `--dry-run`, and emits `run_status` such as `complete`, `coverage_incomplete`, `incomplete_pending_tasks`, `needs_codex_summary`, `blocked_opencli`, or `blocked_auth`.
+- `scripts/run_account_job.py`: preferred resumable business entrypoint for account capture, scoped enrichment, and formal ledger sync. It supports `--resume-only`, `--status-only`, `--last-hours 24`, `--sync`, `--dry-run`, `--expected-post-count`, and `--expected-labels`; it emits `run_status` such as `complete`, `coverage_incomplete`, `incomplete_pending_tasks`, `needs_codex_summary`, `blocked_opencli`, or `blocked_auth`, plus `next_commands` for the first recovery action.
 - `scripts/opencli_enrich_post_details.mjs`: open detail pages, confirm exact time, expand comments/replies, resolve lead links, apply target-date filtering.
 - `scripts/run_capture_pipeline.py`: lower-level fast partial capture/import helper. It discovers visible candidates, prepares/imports them as partial records, and queues enrichment, but does not own full job completion. Do not use it as the final business “抓取并写入飞书” path.
 - `scripts/enrichment_worker.py`: resumes queued `detail_time`, `lead_link`, `engagement`, `post_type`, and `article_material` tasks with local concurrency limits. Its `summary` stage no longer generates story summaries; it only verifies that a Codex-written Chinese summary has been applied, otherwise it leaves `requires_codex_chinese_summary`.
@@ -138,6 +139,12 @@ Preferred resumable account capture and ledger sync:
 
 ```bash
 python3 scripts/run_account_job.py --config config/settings.yaml --account-url <facebook-account-url> --account-name "<account-name>" --last-hours 24 --sync
+```
+
+If the operator can see a known number of target-window posts or a visible label checklist, include the expected coverage signal:
+
+```bash
+python3 scripts/run_account_job.py --config config/settings.yaml --account-url <facebook-account-url> --account-name "<account-name>" --target-date YYMMDD --sync --expected-post-count 13 --expected-labels "38m,1h,2h,3h"
 ```
 
 Resume after Codex interruption, token refresh, or partial run:

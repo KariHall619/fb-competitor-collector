@@ -29,6 +29,7 @@ from sync_status import enrichment_completion_summary
 
 ROOT = Path(__file__).resolve().parents[1]
 ENRICHMENT_STAGES = "detail_time,lead_link,engagement,post_type,article_material"
+DEFAULT_EXPECTED_LABEL_LIMIT = 50
 
 
 def run_command(command: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
@@ -44,6 +45,99 @@ def parse_json_output(result: subprocess.CompletedProcess[str]) -> dict[str, Any
 
 def normalize_date_text(value: str) -> str:
     return normalize_date(value) if value.strip() else ""
+
+
+def split_expected_labels(value: str) -> list[str]:
+    labels: list[str] = []
+    for raw in value.replace("，", ",").replace("\n", ",").split(","):
+        label = raw.strip()
+        if label and label not in labels:
+            labels.append(label)
+    return labels
+
+
+def _captured_labels(discover_payload: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    snapshots = discover_payload.get("snapshots") if isinstance(discover_payload, dict) else []
+    if isinstance(snapshots, list):
+        for snapshot in snapshots:
+            if not isinstance(snapshot, dict):
+                continue
+            for label in snapshot.get("visible_time_texts") or []:
+                text = str(label or "").strip()
+                if text and text not in labels:
+                    labels.append(text)
+                    if len(labels) >= DEFAULT_EXPECTED_LABEL_LIMIT:
+                        return labels
+    posts = discover_payload.get("posts") if isinstance(discover_payload, dict) else []
+    if isinstance(posts, list):
+        for post in posts:
+            if not isinstance(post, dict):
+                continue
+            for label in [post.get("relative_time_text"), post.get("post_time_text")]:
+                text = str(label or "").strip()
+                if text and text not in labels:
+                    labels.append(text)
+                    if len(labels) >= DEFAULT_EXPECTED_LABEL_LIMIT:
+                        return labels
+    return labels
+
+
+def expected_coverage_check(
+    discover_payload: dict[str, Any],
+    *,
+    expected_post_count: int = 0,
+    expected_labels: list[str] | None = None,
+) -> dict[str, Any]:
+    expected_labels = expected_labels or []
+    captured_count = int(discover_payload.get("post_count") or 0)
+    captured_labels = _captured_labels(discover_payload)
+    missing_labels = [label for label in expected_labels if label not in captured_labels]
+    count_missing = max(0, int(expected_post_count or 0) - captured_count)
+    ok = count_missing == 0 and not missing_labels
+    messages: list[str] = []
+    if count_missing:
+        messages.append(f"期望至少 {expected_post_count} 条，当前只抓到 {captured_count} 条。")
+    if missing_labels:
+        messages.append("缺少人工可见时间标签：" + "、".join(missing_labels[:20]))
+    return {
+        "enabled": bool(expected_post_count or expected_labels),
+        "ok": ok,
+        "expected_post_count": int(expected_post_count or 0),
+        "captured_post_count": captured_count,
+        "missing_post_count": count_missing,
+        "expected_labels": expected_labels,
+        "captured_labels": captured_labels[:DEFAULT_EXPECTED_LABEL_LIMIT],
+        "missing_labels": missing_labels,
+        "message": "；".join(messages),
+    }
+
+
+def apply_expected_coverage(
+    discover_payload: dict[str, Any],
+    *,
+    expected_post_count: int = 0,
+    expected_labels: list[str] | None = None,
+) -> dict[str, Any]:
+    check = expected_coverage_check(
+        discover_payload,
+        expected_post_count=expected_post_count,
+        expected_labels=expected_labels,
+    )
+    if not check["enabled"]:
+        return discover_payload
+    next_payload = dict(discover_payload)
+    coverage = dict(next_payload.get("coverage") or {})
+    coverage["expected"] = check
+    if not check["ok"]:
+        coverage["coverage_incomplete"] = True
+        coverage["capture_complete"] = False
+        coverage["expected_coverage_failed"] = True
+        coverage["message"] = check["message"] or coverage.get("message") or "人工期望覆盖未满足。"
+        next_payload["coverage_incomplete"] = True
+        next_payload["capture_complete"] = False
+    next_payload["coverage"] = coverage
+    return next_payload
 
 
 def dates_for_last_hours(hours: int, *, timezone_name: str) -> list[str]:
@@ -151,6 +245,12 @@ def discover_and_import(
                 "elapsed_ms": int((time.monotonic() - discover_started) * 1000),
                 "discover": discover_payload,
             }
+        expected_labels = split_expected_labels(getattr(args, "expected_labels", ""))
+        discover_payload = apply_expected_coverage(
+            discover_payload,
+            expected_post_count=int(getattr(args, "expected_post_count", 0) or 0),
+            expected_labels=expected_labels,
+        )
         raw_path.write_text(json.dumps(discover_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
         imports: list[dict[str, Any]] = []
@@ -212,6 +312,7 @@ def discover_and_import(
                 "coverage": discover_payload.get("coverage", {}),
                 "coverage_blocked": discover_payload.get("coverage_blocked", False),
                 "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
+                "expected_coverage": (discover_payload.get("coverage") or {}).get("expected", {}),
             },
             "prepared_counts": prepared_counts,
             "imports": imports,
@@ -293,6 +394,154 @@ def run_sync(
     )
 
 
+def discover_has_incomplete_coverage(discover_import: dict[str, Any] | None) -> bool:
+    if not discover_import:
+        return False
+    discover = discover_import.get("discover") if isinstance(discover_import, dict) else {}
+    if not isinstance(discover, dict):
+        return False
+    coverage = discover.get("coverage") if isinstance(discover.get("coverage"), dict) else {}
+    if discover.get("coverage_blocked") or discover.get("coverage_incomplete"):
+        return True
+    if coverage.get("coverage_blocked") or coverage.get("coverage_incomplete"):
+        return True
+    return discover.get("capture_complete") is False or coverage.get("capture_complete") is False
+
+
+def discover_coverage_summary(discover_import: dict[str, Any] | None) -> dict[str, Any]:
+    if not discover_import:
+        return {"source": "not_run", "complete": True, "incomplete": False, "reasons": []}
+    discover = discover_import.get("discover") if isinstance(discover_import, dict) else {}
+    if not isinstance(discover, dict):
+        return {"source": "unknown", "complete": False, "incomplete": True, "reasons": ["missing_discover_report"]}
+    coverage = discover.get("coverage") if isinstance(discover.get("coverage"), dict) else {}
+    reasons: list[str] = []
+    if discover.get("coverage_blocked") or coverage.get("coverage_blocked"):
+        reasons.append("coverage_blocked")
+    if discover.get("coverage_incomplete") or coverage.get("coverage_incomplete"):
+        reasons.append("coverage_incomplete")
+    if discover.get("capture_complete") is False or coverage.get("capture_complete") is False:
+        reasons.append("capture_incomplete")
+    return {
+        "source": "discover",
+        "complete": not reasons,
+        "incomplete": bool(reasons),
+        "reasons": sorted(set(reasons)),
+        "message": coverage.get("message") or "",
+        "expected": coverage.get("expected") or {},
+        "raw_candidate_count": discover.get("raw_candidate_count", 0),
+        "post_count": discover.get("post_count", 0),
+    }
+
+
+def shell_quote(value: Any) -> str:
+    text = str(value)
+    if not text:
+        return "''"
+    safe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:=@%+-"
+    if all(char in safe for char in text):
+        return text
+    return "'" + text.replace("'", "'\"'\"'") + "'"
+
+
+def command_text(parts: list[Any]) -> str:
+    return " ".join(shell_quote(part) for part in parts)
+
+
+def next_commands_for_status(
+    *,
+    args: argparse.Namespace,
+    target_dates: list[str],
+    run_status: str,
+    completion: dict[str, Any],
+    discover_coverage: dict[str, Any],
+) -> list[dict[str, Any]]:
+    base = [
+        "python3",
+        "scripts/run_account_job.py",
+        "--config",
+        args.config,
+        "--account-url",
+        args.account_url,
+        "--account-type",
+        args.account_type,
+    ]
+    if args.account_name:
+        base.extend(["--account-name", args.account_name])
+    if args.sync:
+        base.append("--sync")
+    if args.dry_run:
+        base.append("--dry-run")
+    commands: list[dict[str, Any]] = []
+    primary_date = target_dates[-1] if target_dates else ""
+    if run_status == "coverage_incomplete":
+        command = list(base)
+        if primary_date:
+            command.extend(["--target-date", primary_date])
+        command.extend(["--max-snapshots", str(max(int(args.max_snapshots or 0) + 12, 32))])
+        if args.expected_post_count:
+            command.extend(["--expected-post-count", str(args.expected_post_count)])
+        if args.expected_labels:
+            command.extend(["--expected-labels", args.expected_labels])
+        expected = discover_coverage.get("expected") if isinstance(discover_coverage, dict) else {}
+        expected_message = expected.get("message") if isinstance(expected, dict) else ""
+        commands.append(
+            {
+                "reason": "coverage_incomplete",
+                "description": "从账号主页顶部重跑采集，提高快照预算，并保留人工期望覆盖检查。"
+                + (f" 当前缺口：{expected_message}" if expected_message else ""),
+                "command": command_text(command),
+            }
+        )
+    if run_status in {"coverage_incomplete", "incomplete_pending_tasks", "synced_ledger_incomplete"} or completion.get("open_task_count"):
+        command = list(base)
+        if primary_date:
+            command.extend(["--target-date", primary_date])
+        command.extend(["--resume-only", "--max-resume-passes", str(max(int(args.max_resume_passes or 0), 2))])
+        commands.append(
+            {
+                "reason": "pending_enrichment",
+                "description": "继续同账号同日期的 SQLite 补抓队列，不重新发现主页。",
+                "command": command_text(command),
+            }
+        )
+    if run_status == "needs_codex_summary" or completion.get("requires_codex_summary_count"):
+        output = f"exports/summary_requests_{primary_date or 'current'}.json"
+        commands.append(
+            {
+                "reason": "needs_codex_summary",
+                "description": "导出需要 Codex 中文概要的文章材料。",
+                "command": command_text(
+                    [
+                        "python3",
+                        "scripts/export_summary_requests.py",
+                        "--config",
+                        args.config,
+                        "--output",
+                        output,
+                    ]
+                ),
+            }
+        )
+    if run_status == "blocked_auth":
+        commands.append(
+            {
+                "reason": "blocked_auth",
+                "description": "完成飞书用户授权后，重新运行同一账号作业。",
+                "command": command_text(base + (["--target-date", primary_date] if primary_date else []) + ["--resume-only"]),
+            }
+        )
+    if run_status == "blocked_opencli":
+        commands.append(
+            {
+                "reason": "blocked_opencli",
+                "description": "先检查并尝试修复 OpenCLI Browser Bridge。",
+                "command": command_text(["python3", "scripts/check_env.py", "--config", args.config, "--fix-opencli"]),
+            }
+        )
+    return commands[:4]
+
+
 def summarize_job_status(
     *,
     preflight: dict[str, Any],
@@ -305,6 +554,8 @@ def summarize_job_status(
         return "blocked_opencli"
     if sync_result.get("run_status") == "blocked_auth":
         return "blocked_auth"
+    if discover_has_incomplete_coverage(discover_import):
+        return "coverage_incomplete"
     if completion.get("requires_codex_summary_count"):
         return "needs_codex_summary"
     if completion.get("coverage_incomplete_count"):
@@ -337,6 +588,8 @@ def main() -> int:
     parser.add_argument("--enrichment-limit", type=int, default=50)
     parser.add_argument("--max-text", type=int, default=1500)
     parser.add_argument("--max-snapshots", type=int, default=20)
+    parser.add_argument("--expected-post-count", type=int, default=0)
+    parser.add_argument("--expected-labels", default="", help="Comma-separated visible relative-time labels from the operator checklist.")
     args = parser.parse_args()
 
     started = time.monotonic()
@@ -366,25 +619,34 @@ def main() -> int:
             setattr(args, "feishu_preflight_done", True)
         except RuntimeError as exc:
             completion = enrichment_completion_summary(conn, current_posts)
+            run_status = "blocked_auth"
+            partial_result = {
+                "ok": False,
+                "run_status": run_status,
+                "complete": False,
+                "message": "飞书真实写入前置检查失败；已在 Facebook 采集和补抓前停止。修复登录后可用同一命令续跑。",
+                "target_dates": target_dates,
+                "account_url": args.account_url,
+                "account_name": args.account_name,
+                "account_type": args.account_type,
+                "feishu_auth_preflight": {
+                    "ok": False,
+                    "stage": "feishu_auth_preflight",
+                    "error": str(exc),
+                },
+                "enrichment_completion": completion,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+            partial_result["next_commands"] = next_commands_for_status(
+                args=args,
+                target_dates=target_dates,
+                run_status=run_status,
+                completion=completion,
+                discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+            )
             print(
                 json.dumps(
-                    {
-                        "ok": False,
-                        "run_status": "blocked_auth",
-                        "complete": False,
-                        "message": "飞书真实写入前置检查失败；已在 Facebook 采集和补抓前停止。修复登录后可用同一命令续跑。",
-                        "target_dates": target_dates,
-                        "account_url": args.account_url,
-                        "account_name": args.account_name,
-                        "account_type": args.account_type,
-                        "feishu_auth_preflight": {
-                            "ok": False,
-                            "stage": "feishu_auth_preflight",
-                            "error": str(exc),
-                        },
-                        "enrichment_completion": completion,
-                        "elapsed_ms": int((time.monotonic() - started) * 1000),
-                    },
+                    partial_result,
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -407,17 +669,26 @@ def main() -> int:
                 dates=target_dates,
             )
             completion = enrichment_completion_summary(conn, current_posts)
+            run_status = "blocked_opencli"
+            partial_result = {
+                "ok": False,
+                "run_status": run_status,
+                "message": "OpenCLI Browser Bridge 未就绪；已在 Facebook 实时采集前停止。可修复后用同一命令续跑。",
+                "target_dates": target_dates,
+                "opencli_browser_bridge": opencli_preflight,
+                "enrichment_completion": completion,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+            partial_result["next_commands"] = next_commands_for_status(
+                args=args,
+                target_dates=target_dates,
+                run_status=run_status,
+                completion=completion,
+                discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+            )
             print(
                 json.dumps(
-                    {
-                        "ok": False,
-                        "run_status": "blocked_opencli",
-                        "message": "OpenCLI Browser Bridge 未就绪；已在 Facebook 实时采集前停止。可修复后用同一命令续跑。",
-                        "target_dates": target_dates,
-                        "opencli_browser_bridge": opencli_preflight,
-                        "enrichment_completion": completion,
-                        "elapsed_ms": int((time.monotonic() - started) * 1000),
-                    },
+                    partial_result,
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -490,6 +761,7 @@ def main() -> int:
         "account_type": args.account_type,
         "post_count": len(posts),
         "task_counts": task_counts_for_posts(conn, posts),
+        "discover_coverage": discover_coverage_summary(discover_import),
         "feishu_auth_preflight": feishu_auth_preflight,
         "opencli_preflight": opencli_preflight,
         "discover_import": discover_import,
@@ -498,6 +770,13 @@ def main() -> int:
         "enrichment_completion": completion,
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }
+    result["next_commands"] = next_commands_for_status(
+        args=args,
+        target_dates=target_dates,
+        run_status=run_status,
+        completion=completion,
+        discover_coverage=result["discover_coverage"],
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if sync_result.get("ok", True) else 1
 

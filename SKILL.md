@@ -49,6 +49,7 @@ Map common requests as follows:
   - Use `scripts/read_accounts.py` if the first account URL is needed from Feishu.
   - Ask the user to keep the target Facebook account page open in normal Chrome if no matching tab is available.
   - Treat relative labels such as `3h`, `12h`, and `1d` as homepage candidate-window clues only.
+  - If the user says they can see a known checklist such as “13 条” or `38m,1h,2h...`, pass `--expected-post-count` and/or `--expected-labels` into `run_account_job.py`; do not call the run complete when the expected coverage is missing.
   - If extraction reports `capture_blocked`, `login_required`, or `visitor_preview`, stop immediately and ask for human intervention.
   - If the run is interrupted by token refresh, OpenCLI recovery, or Codex context changes, run the same `run_account_job.py` command again with `--resume-only` when appropriate. Do not manually write ledger rows and call the job finished while enrichment is still pending.
 
@@ -83,6 +84,7 @@ Run all commands from the skill root.
 | Import existing JSON/CSV | `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --no-sync` |
 | Import and sync new rows | `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --sync` |
 | Resumable account capture + sync | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --last-hours 24 --sync` |
+| Capture with visible checklist | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --sync --expected-post-count 13 --expected-labels "38m,1h,2h"` |
 | Resume interrupted account job | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --resume-only --sync` |
 | Status-only account check | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --resume-only --status-only --sync --dry-run` |
 | Fast partial capture/import | `python3 scripts/run_capture_pipeline.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --partial` as a lower-level helper only |
@@ -156,8 +158,10 @@ Rules:
 - Short posts must be kept if they have a valid FB content URL. If comment/reply lead link, landing URL, article summary, engagement, or exact time is missing, keep them as `needs_enrichment` instead of dropping them.
 - For scale-out runs, first import visible candidates as `partial_review`, then resume queued enrichment stages in SQLite. Normal formal `--sync` upserts auditable candidates by post URL and fills missing-field reasons in `是否采用`; use `--strict-ready-only` only when the operator explicitly wants the legacy ready-only gate.
 - For business capture-and-write requests, prefer `run_account_job.py` over manual stage stitching. The job result must be interpreted by `run_status`: `complete` means the scoped job finished; `synced_ledger_incomplete`, `incomplete_pending_tasks`, `coverage_incomplete`, or `needs_codex_summary` means Feishu may have ledger rows but the capture job is not done.
+- `run_account_job.py` includes `next_commands`; when a run is incomplete or blocked, use those commands as the first recovery path instead of manually stitching later stages.
 - Use `--sync-partial --dry-run` only for business preview output that must not affect the formal table.
 - If current-tab extraction returns `coverage_incomplete=true`, the run hit the snapshot cap while still finding new candidates. Raise `--max-snapshots` or restart from the account homepage top before declaring the visible date window fully covered.
+- If the user supplies a visible expected count or label checklist, missing expected posts/labels is also `coverage_incomplete` even when scrolling itself looked stable.
 - Re-importing the same post must preserve higher-quality stored fields. Do not overwrite confirmed detail time, qualified comment/reply lead links, external landing URLs, valid Chinese article summaries, engagement values, manual `是否采用`, or final output status with weaker partial data.
 - `enrichment_worker.py --stages summary` does not generate summaries. It only verifies whether a valid Codex-written Chinese summary has already been applied; otherwise it leaves `requires_codex_chinese_summary`. Generate Chinese summaries from `export_summary_requests.py` output and apply them with `apply_article_summaries.py --config ... --summaries ...`.
 

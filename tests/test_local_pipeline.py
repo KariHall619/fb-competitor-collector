@@ -2783,6 +2783,42 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
     assert data["complete"] is False
     assert data["feishu_sync"]["run_status"] == "synced_ledger_incomplete"
     assert data["enrichment_completion"]["open_task_count"] > 0
+    assert any(item["reason"] == "pending_enrichment" for item in data["next_commands"])
+    assert "--resume-only" in data["next_commands"][0]["command"]
+
+
+def assert_run_account_job_expected_coverage_marks_missing_posts() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    payload = {
+        "ok": True,
+        "post_count": 9,
+        "coverage": {"capture_complete": True},
+        "snapshots": [
+            {"visible_time_texts": ["38m", "1h", "2h", "3h"]},
+            {"visible_time_texts": ["4h", "5h", "6h", "7h", "8h"]},
+        ],
+        "posts": [{"post_time_text": "9h"}],
+    }
+    checked = run_account_job.apply_expected_coverage(
+        payload,
+        expected_post_count=13,
+        expected_labels=["38m", "1h", "2h", "10h", "11h"],
+    )
+    expected = checked["coverage"]["expected"]
+    assert checked["coverage_incomplete"] is True
+    assert checked["capture_complete"] is False
+    assert checked["coverage"]["expected_coverage_failed"] is True
+    assert expected["enabled"] is True
+    assert expected["ok"] is False
+    assert expected["missing_post_count"] == 4
+    assert expected["missing_labels"] == ["10h", "11h"]
+    assert "期望至少 13 条" in expected["message"]
+    assert "10h" in checked["coverage"]["message"]
+
+    clean = run_account_job.apply_expected_coverage(payload, expected_post_count=0, expected_labels=[])
+    assert clean == payload
 
 
 def assert_run_account_job_blocks_auth_before_capture(tmp_path: Path) -> None:
@@ -2842,8 +2878,74 @@ exit 0
     assert data["run_status"] == "blocked_auth"
     assert data["complete"] is False
     assert data["feishu_auth_preflight"]["ok"] is False
+    assert any(item["reason"] == "blocked_auth" for item in data["next_commands"])
+    assert "--resume-only" in data["next_commands"][0]["command"]
     assert "opencli_preflight" not in data
     assert not opencli_called.exists()
+
+
+def assert_run_account_job_promotes_discover_coverage_status() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    discover_import = {
+        "ok": True,
+        "discover": {
+            "capture_complete": False,
+            "coverage": {
+                "coverage_incomplete": True,
+                "capture_complete": False,
+                "message": "采集达到快照上限时仍有新增候选。",
+            },
+            "raw_candidate_count": 12,
+            "post_count": 12,
+        },
+    }
+    completion = {
+        "requires_codex_summary_count": 0,
+        "coverage_incomplete_count": 0,
+        "has_incomplete_enrichment": False,
+    }
+    status = run_account_job.summarize_job_status(
+        preflight={"ok": True},
+        discover_import=discover_import,
+        worker_passes=[],
+        sync_result={"ok": True},
+        completion=completion,
+    )
+    summary = run_account_job.discover_coverage_summary(discover_import)
+    next_commands = run_account_job.next_commands_for_status(
+        args=type(
+            "Args",
+            (),
+            {
+                "config": "config/settings.yaml",
+                "account_url": "https://www.facebook.com/example",
+                "account_name": "Example Page",
+                "account_type": "competitor",
+                "sync": True,
+                "dry_run": False,
+                "max_snapshots": 20,
+                "max_resume_passes": 2,
+                "expected_post_count": 13,
+                "expected_labels": "38m,1h,2h",
+            },
+        )(),
+        target_dates=["260602"],
+        run_status=status,
+        completion=completion,
+        discover_coverage=summary,
+    )
+    assert status == "coverage_incomplete"
+    assert summary["complete"] is False
+    assert summary["incomplete"] is True
+    assert summary["reasons"] == ["capture_incomplete", "coverage_incomplete"]
+    assert summary["raw_candidate_count"] == 12
+    assert next_commands[0]["reason"] == "coverage_incomplete"
+    assert "--max-snapshots 32" in next_commands[0]["command"]
+    assert "--expected-post-count 13" in next_commands[0]["command"]
+    assert "--expected-labels" in next_commands[0]["command"]
+    assert "38m,1h,2h" in next_commands[0]["command"]
 
 
 def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
@@ -3215,7 +3317,9 @@ def main() -> int:
         assert_story_summary_audit_downgrades_invalid_rows(tmp_path)
         assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path)
         assert_run_account_job_resume_status_reports_incomplete(tmp_path)
+        assert_run_account_job_expected_coverage_marks_missing_posts()
         assert_run_account_job_blocks_auth_before_capture(tmp_path)
+        assert_run_account_job_promotes_discover_coverage_status()
 
     print("local pipeline acceptance passed")
     return 0
