@@ -15,6 +15,7 @@ from typing import Any
 
 from config_loader import deep_get, load_config
 from fetch_article_material import extract_material
+from models import has_qualified_comment_lead_link
 from pipeline_status import crawl_status_for, output_status_for
 from story_summary_policy import has_valid_story_summary, story_summary_errors
 from store import (
@@ -188,7 +189,7 @@ def detail_stage_satisfied(post: dict[str, Any], stage: str) -> bool:
     if stage == "detail_time":
         return bool(post.get("posted_at") and post.get("time_confirmed"))
     if stage == "lead_link":
-        return bool(post.get("lead_link_status") == "qualified" and post.get("landing_url"))
+        return has_qualified_comment_lead_link(post)
     if stage == "engagement":
         return all(post.get(field) is not None for field in ("likes", "comments", "shares"))
     if stage == "post_type":

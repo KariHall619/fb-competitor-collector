@@ -1445,6 +1445,106 @@ def assert_export_summary_requests_can_scope_account_job(tmp_path: Path) -> None
     assert payload["requests"][0]["post_url"] == "https://facebook.com/target/posts/summary-scope"
 
 
+def assert_summary_request_prefers_article_material_source() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from export_summary_requests import summary_request_for
+
+    request = summary_request_for(
+        {
+            "post_url": "https://facebook.com/example/posts/source",
+            "article_url": "https://story.example/article-source",
+            "landing_url": "https://landing.example/redirect-shell",
+            "raw_payload": json.dumps(
+                {
+                    "article_material": {
+                        "ok": True,
+                        "article_url": "https://story.example/material-source",
+                        "title": "Article source",
+                        "text_excerpt": "Material source should be represented in the request.",
+                    }
+                },
+                ensure_ascii=False,
+            ),
+        }
+    )
+    assert request["article_url"] == "https://story.example/article-source"
+
+    fallback_request = summary_request_for(
+        {
+            "post_url": "https://facebook.com/example/posts/source-fallback",
+            "landing_url": "https://landing.example/redirect-shell",
+            "raw_payload": json.dumps(
+                {
+                    "article_material": {
+                        "ok": True,
+                        "article_url": "https://story.example/material-source",
+                        "title": "Material source",
+                    }
+                },
+                ensure_ascii=False,
+            ),
+        }
+    )
+    assert fallback_request["article_url"] == "https://story.example/material-source"
+
+
+def assert_enrich_article_summaries_prefers_article_url(tmp_path: Path) -> None:
+    config = tmp_path / "settings_article_source.yaml"
+    source = tmp_path / "article_source.json"
+    output = tmp_path / "with_material.json"
+    article = tmp_path / "article-source.html"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    article.write_text(
+        """
+        <html><head><title>Preferred article source</title></head>
+        <body><p>This article source should be fetched even when landing_url points elsewhere.</p></body></html>
+        """,
+        encoding="utf-8",
+    )
+    server, base_url = start_static_http_server(tmp_path)
+    article_url = f"{base_url}/{article.name}"
+    source.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "post_url": "https://facebook.com/example/posts/article-source",
+                        "article_url": article_url,
+                        "landing_url": "https://127.0.0.1:1/unreachable-landing",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    try:
+        enriched = run(
+            [
+                PYTHON,
+                "scripts/enrich_article_summaries.py",
+                "--config",
+                str(config),
+                "--input",
+                str(source),
+                "--output",
+                str(output),
+                "--concurrency",
+                "1",
+            ]
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert enriched.returncode == 0, enriched.stderr or enriched.stdout
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    material = payload["posts"][0]["article_material"]
+    assert material["ok"] is True
+    assert material["article_url"] == article_url
+    assert "Preferred article source" in material["title"]
+    assert payload["article_summary_errors"] == []
+
+
 def assert_sync_feishu_strict_marks_ready_rows_synced(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import sync_feishu
@@ -3158,6 +3258,27 @@ def assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path: Path) -> None
     assert len(batches[0]) == 1
 
 
+def assert_enrichment_worker_lead_stage_requires_external_landing_url() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import enrichment_worker
+
+    internal_lead = {
+        "lead_link_status": "qualified",
+        "lead_link_source": "comment",
+        "landing_url": "https://www.facebook.com/example/posts/not-a-story",
+        "article_url": "https://www.facebook.com/example/posts/not-a-story",
+    }
+    external_lead = {
+        "lead_link_status": "qualified",
+        "lead_link_source": "comment_reply",
+        "lead_url_raw": "https://story.example/usable",
+        "landing_url": "https://story.example/usable",
+        "article_url": "https://story.example/usable",
+    }
+    assert enrichment_worker.detail_stage_satisfied(internal_lead, "lead_link") is False
+    assert enrichment_worker.detail_stage_satisfied(external_lead, "lead_link") is True
+
+
 def assert_stale_running_enrichment_tasks_are_recovered(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
@@ -4445,6 +4566,8 @@ def main() -> int:
         assert_sync_status_promotes_summary_only_work(tmp_path)
         assert_sync_status_prioritizes_auto_work_over_summary(tmp_path)
         assert_export_summary_requests_can_scope_account_job(tmp_path)
+        assert_summary_request_prefers_article_material_source()
+        assert_enrich_article_summaries_prefers_article_url(tmp_path)
         assert_sync_feishu_strict_marks_ready_rows_synced(tmp_path)
         assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path)
         assert_strict_sync_completion_uses_full_candidate_scope(tmp_path)
@@ -4465,6 +4588,7 @@ def main() -> int:
         assert_article_material_extractor(tmp_path)
         assert_partial_review_status_and_task_queue(tmp_path)
         assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path)
+        assert_enrichment_worker_lead_stage_requires_external_landing_url()
         assert_stale_running_enrichment_tasks_are_recovered(tmp_path)
         assert_enqueue_does_not_steal_active_running_tasks(tmp_path)
         assert_enrichment_worker_scopes_tasks_to_account(tmp_path)

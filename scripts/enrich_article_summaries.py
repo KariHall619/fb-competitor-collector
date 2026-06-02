@@ -12,6 +12,10 @@ from fetch_article_material import extract_material
 from config_loader import deep_get, load_config
 
 
+def article_source_url(post: dict) -> str:
+    return post.get("article_url") or post.get("landing_url") or ""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/settings.yaml")
@@ -34,7 +38,7 @@ def main() -> int:
             break
         if post.get("article_material"):
             continue
-        article_url = post.get("landing_url") or post.get("article_url") or ""
+        article_url = article_source_url(post)
         if not article_url:
             continue
         if article_url in cache:
@@ -60,7 +64,7 @@ def main() -> int:
             material_attached += 1
 
     for index, post in enumerate(posts):
-        article_url = post.get("landing_url") or post.get("article_url") or ""
+        article_url = article_source_url(post)
         if post.get("article_material") or not article_url or article_url not in cache:
             continue
         material = cache[article_url]

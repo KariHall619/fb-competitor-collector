@@ -13,12 +13,16 @@ from story_summary_policy import article_material_for_post, has_valid_story_summ
 from store import all_posts, connect, query_posts
 
 
+def summary_article_url(post: dict[str, Any], material: dict[str, Any]) -> str:
+    return post.get("article_url") or material.get("article_url") or post.get("landing_url") or ""
+
+
 def summary_request_for(post: dict[str, Any]) -> dict[str, Any]:
     material = article_material_for_post(post)
     return {
         "post_url": post.get("post_url") or "",
         "canonical_post_url": post.get("canonical_post_url") or "",
-        "article_url": post.get("landing_url") or post.get("article_url") or material.get("article_url") or "",
+        "article_url": summary_article_url(post, material),
         "account_name": post.get("account_name") or "",
         "posted_at": post.get("posted_at") or "",
         "current_story_summary": post.get("story_summary") or "",
