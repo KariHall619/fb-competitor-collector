@@ -92,7 +92,7 @@ def main() -> int:
         ]
         if part
     ) or "all"
-    print(json.dumps({"count": len(posts), "hit_rule": hit_rule}, ensure_ascii=False, indent=2))
+    base_summary = {"count": len(posts), "hit_rule": hit_rule}
     if args.sync_partial:
         headers = configured_output_headers(config)
         partial_posts, skipped_posts = partial_for_review(posts)
@@ -110,7 +110,7 @@ def main() -> int:
             )
             print(
                 json.dumps(
-                    {"feishu_sync": result},
+                    {**base_summary, "feishu_sync": result},
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -133,7 +133,7 @@ def main() -> int:
             enrichment_completion_summary(conn, posts),
             ledger_mode=True,
         )
-        print(json.dumps({"feishu_sync": result}, ensure_ascii=False, indent=2))
+        print(json.dumps({**base_summary, "feishu_sync": result}, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 1
 
     if (args.sync or args.sync_audit) and not args.strict_ready_only:
@@ -153,7 +153,7 @@ def main() -> int:
             )
             print(
                 json.dumps(
-                    {"feishu_sync": result},
+                    {**base_summary, "feishu_sync": result},
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -176,7 +176,7 @@ def main() -> int:
             enrichment_completion_summary(conn, posts),
             ledger_mode=True,
         )
-        print(json.dumps({"feishu_sync": result}, ensure_ascii=False, indent=2))
+        print(json.dumps({**base_summary, "feishu_sync": result}, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 1
 
     if args.sync and args.strict_ready_only:
@@ -195,7 +195,7 @@ def main() -> int:
             )
             print(
                 json.dumps(
-                    {"feishu_sync": result},
+                    {**base_summary, "feishu_sync": result},
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -215,7 +215,7 @@ def main() -> int:
             )
             print(
                 json.dumps(
-                    {"feishu_sync": result},
+                    {**base_summary, "feishu_sync": result},
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -237,8 +237,9 @@ def main() -> int:
             enrichment_completion_summary(conn, posts),
             ledger_mode=False,
         )
-        print(json.dumps({"feishu_sync": result}, ensure_ascii=False, indent=2))
+        print(json.dumps({**base_summary, "feishu_sync": result}, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 1
+    print(json.dumps(base_summary, ensure_ascii=False, indent=2))
     return 0
 
 

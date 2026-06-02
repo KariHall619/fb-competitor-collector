@@ -2375,10 +2375,13 @@ def assert_filter_sync_applies_output_quality_gate(tmp_path: Path) -> None:
         ]
     )
     assert filtered.returncode == 1, filtered.stdout
-    assert "quality_gate" in filtered.stdout
-    assert '"run_status": "quality_gate"' in filtered.stdout
-    assert '"complete": false' in filtered.stdout
-    assert '"enrichment_completion"' in filtered.stdout
+    filtered_data = json.loads(filtered.stdout)
+    assert filtered_data["count"] == 1
+    assert filtered_data["hit_rule"] == "date=260527"
+    assert filtered_data["feishu_sync"]["stage"] == "quality_gate"
+    assert filtered_data["feishu_sync"]["run_status"] == "quality_gate"
+    assert filtered_data["feishu_sync"]["complete"] is False
+    assert filtered_data["feishu_sync"]["enrichment_completion"]["post_count"] == 1
 
 
 def assert_quality_gate_requires_comment_lead_source(tmp_path: Path) -> None:
