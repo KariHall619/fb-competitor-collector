@@ -892,6 +892,178 @@ def _stage_pressure_notes(stage_pressure: list[dict[str, Any]]) -> list[str]:
     return notes
 
 
+def _completion_blockers(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return ordered blockers that explain why this scoped job is not complete."""
+
+    blockers: list[dict[str, Any]] = []
+
+    def add(
+        code: str,
+        *,
+        label: str,
+        severity: str,
+        priority: int,
+        message: str,
+        next_action: str,
+        metrics: dict[str, Any] | None = None,
+        recoverable: bool = True,
+    ) -> None:
+        blockers.append(
+            {
+                "code": code,
+                "label": label,
+                "severity": severity,
+                "priority": priority,
+                "recoverable": recoverable,
+                "message": message,
+                "next_action": next_action,
+                "metrics": metrics or {},
+            }
+        )
+
+    run_status = str(summary.get("run_status") or "")
+    if run_status == "blocked_auth":
+        add(
+            "blocked_auth",
+            label="飞书授权阻塞",
+            severity="hard_blocker",
+            priority=0,
+            message="飞书用户授权未通过，真实写入已在采集前停止。",
+            next_action="先恢复 lark-cli 用户授权，再按 next_commands 续跑同一账号作业。",
+            metrics={"feishu_sync": summary.get("feishu_sync", {})},
+        )
+    if run_status == "blocked_opencli":
+        add(
+            "blocked_opencli",
+            label="OpenCLI 未就绪",
+            severity="hard_blocker",
+            priority=1,
+            message="OpenCLI Browser Bridge 未就绪，无法进行主页发现或详情补抓。",
+            next_action="先运行 check_env.py --fix-opencli 并确认业务 Chrome 的 Browser Bridge 已连接。",
+            metrics={"open_task_count": summary.get("open_task_count", 0)},
+        )
+    if run_status == "human_intervention_required":
+        add(
+            "human_intervention_required",
+            label="需要人工恢复登录/Profile",
+            severity="hard_blocker",
+            priority=2,
+            message="Facebook 登录态、访客预览、验证码或错误 Chrome Profile 阻塞了采集。",
+            next_action="在正常 Chrome 中恢复目标账号主页可见后，按 next_commands 从主页或本地队列续跑。",
+        )
+
+    if summary.get("coverage_health") == "incomplete":
+        add(
+            "coverage_incomplete",
+            label="覆盖不足",
+            severity="coverage",
+            priority=10,
+            message="主页采集覆盖未完整，已发现候选可以进台账，但本次不能声明抓全。",
+            next_action="从账号主页顶部重跑采集，保留 expected count/labels，必要时提高 --max-snapshots。",
+            metrics={
+                "coverage_reasons": summary.get("coverage_reasons", []),
+                "expected_post_coverage_rate": summary.get("expected_post_coverage_rate", 0.0),
+                "expected_label_coverage_rate": summary.get("expected_label_coverage_rate", 0.0),
+                "discovered_post_count": summary.get("discovered_post_count", 0),
+                "raw_candidate_count": summary.get("raw_candidate_count", 0),
+                "coverage_stop_reason": summary.get("coverage_stop_reason", ""),
+            },
+        )
+
+    if summary.get("worker_retry_later"):
+        add(
+            "worker_retry_later",
+            label="详情补抓锁竞争已重排",
+            severity="resumable",
+            priority=15,
+            message="详情补抓遇到同一 OpenCLI session 的临时锁竞争，相关任务已重排。",
+            next_action="继续使用 next_commands 续跑同账号补抓队列；不要把它当作完成或数据失败。",
+            metrics={
+                "retry_later_count": summary.get("worker_retry_later_count", 0),
+                "retry_later_reasons": summary.get("worker_retry_later_reasons", []),
+            },
+        )
+
+    for item in summary.get("stage_pressure") or []:
+        if not isinstance(item, dict):
+            continue
+        stage = str(item.get("stage") or "")
+        if stage in {"coverage", "summary"}:
+            continue
+        total = _int_metric(item.get("total_pressure"))
+        if total <= 0:
+            continue
+        label = str(item.get("label") or stage)
+        add(
+            f"stage_{stage}",
+            label=f"{label}待补抓",
+            severity="auto_enrichment",
+            priority=20 + STAGE_ORDER.get(stage, 20),
+            message=f"{label}仍有缺口，阻止最终完整可用。",
+            next_action="OpenCLI 可用后继续同账号 SQLite 补抓队列。",
+            metrics={
+                "stage": stage,
+                "open_task_count": _int_metric(item.get("open_task_count")),
+                "missing_post_count": _int_metric(item.get("missing_post_count")),
+                "total_pressure": total,
+                "requires_opencli": bool(item.get("requires_opencli")),
+            },
+        )
+
+    if summary.get("requires_codex_summary_count") or any(
+        isinstance(item, dict) and item.get("stage") == "summary" and _int_metric(item.get("total_pressure")) > 0
+        for item in summary.get("stage_pressure") or []
+    ):
+        add(
+            "codex_summary_required",
+            label="需要 Codex 中文概要",
+            severity="codex_required",
+            priority=40,
+            message="文章素材已具备或概要任务已排队，但仍缺基于文章材料的中文概要。",
+            next_action="先导出 scoped summary requests，写好中文概要后运行 apply_article_summaries。",
+            metrics={"requires_codex_summary_count": summary.get("requires_codex_summary_count", 0)},
+        )
+
+    top_field_gaps = summary.get("top_field_gaps") if isinstance(summary.get("top_field_gaps"), list) else []
+    if top_field_gaps and summary.get("final_usable_rate", 0.0) < 1.0:
+        add(
+            "field_gaps",
+            label="最终可用字段缺口",
+            severity="quality_gap",
+            priority=50,
+            message="存在最终输出字段缺口，台账行可见但不能算完整可用。",
+            next_action="按 top_field_gaps 优先补精确时间、引流链接、概要、互动数据或帖子类型。",
+            metrics={"top_field_gaps": top_field_gaps[:5]},
+        )
+
+    feishu_sync = summary.get("feishu_sync") if isinstance(summary.get("feishu_sync"), dict) else {}
+    if feishu_sync.get("enabled") and feishu_sync.get("ok") is False:
+        add(
+            "feishu_sync_failed",
+            label="飞书同步未完成",
+            severity="sync",
+            priority=60,
+            message="本地 SQLite 结果仍在，但飞书写入或输出门未完成。",
+            next_action="修复飞书授权、表格、输出门或网络问题后，按 next_commands 续跑同步。",
+            metrics={"feishu_sync": feishu_sync},
+        )
+
+    thresholds = summary.get("quality_thresholds") if isinstance(summary.get("quality_thresholds"), dict) else {}
+    if thresholds and not thresholds.get("ok", True):
+        add(
+            "quality_threshold_failed",
+            label="质量阈值未达标",
+            severity="acceptance_gate",
+            priority=70,
+            message="本次运行未达到显式覆盖率或可用率验收阈值。",
+            next_action="按 quality_thresholds.failures 和前面的 blocker 先补覆盖或最终可用字段，再续跑状态检查。",
+            metrics={"failures": thresholds.get("failures", [])},
+        )
+
+    blockers.sort(key=lambda item: (item["priority"], item["code"]))
+    return blockers[:10]
+
+
 def _rate_threshold(value: Any) -> float:
     try:
         number = float(value or 0.0)
@@ -1071,7 +1243,15 @@ def account_job_quality_summary(
         if action not in next_actions:
             next_actions.append(action)
     summary["next_actions"] = next_actions[:4]
+    summary["completion_blockers"] = _completion_blockers(summary)
     return summary
+
+
+def emit_result(result: dict[str, Any]) -> None:
+    quality_summary = result.get("quality_summary")
+    if isinstance(quality_summary, dict):
+        result["completion_blockers"] = quality_summary.get("completion_blockers", [])
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def main() -> int:
@@ -1170,7 +1350,7 @@ def main() -> int:
             completion={},
             discover_coverage={"source": "not_run", "complete": False, "incomplete": True, "reasons": ["sqlite_connect"]},
         )
-        print(json.dumps(partial_result, ensure_ascii=False, indent=2))
+        emit_result(partial_result)
         return 1
     feishu_auth_preflight = {"ok": True, "skipped": True}
     if args.sync and not args.dry_run:
@@ -1230,13 +1410,7 @@ def main() -> int:
                 completion=completion,
                 discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
             )
-            print(
-                json.dumps(
-                    partial_result,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
+            emit_result(partial_result)
             return 1
     opencli_preflight = {"ok": True, "skipped": True}
     discover_import: dict[str, Any] | None = None
@@ -1280,13 +1454,7 @@ def main() -> int:
                 completion=completion,
                 discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
             )
-            print(
-                json.dumps(
-                    partial_result,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
+            emit_result(partial_result)
             return 1
         discover_import = discover_and_import(args, target_dates=target_dates)
         if not discover_import.get("ok"):
@@ -1333,13 +1501,7 @@ def main() -> int:
                 completion=completion,
                 discover_coverage=discover_coverage,
             )
-            print(
-                json.dumps(
-                    partial_result,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
+            emit_result(partial_result)
             return 1
 
     posts = scoped_posts(
@@ -1395,7 +1557,7 @@ def main() -> int:
                 completion=completion_before_worker,
                 discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
             )
-            print(json.dumps(partial_result, ensure_ascii=False, indent=2))
+            emit_result(partial_result)
             return 1
     worker_passes: list[dict[str, Any]] = []
     resume_passes = 0 if args.status_only else max(0, args.max_resume_passes)
@@ -1472,6 +1634,7 @@ def main() -> int:
             result["run_status"] = "quality_threshold_failed"
             result["quality_summary"]["run_status"] = "quality_threshold_failed"
             result["quality_summary"]["complete"] = False
+        result["quality_summary"]["completion_blockers"] = _completion_blockers(result["quality_summary"])
     result["next_commands"] = next_commands_for_status(
         args=args,
         target_dates=target_dates,
@@ -1487,7 +1650,7 @@ def main() -> int:
         result["exit_status_reason"] = "incomplete_run_status"
     if result.get("quality_threshold_failed") and sync_result.get("ok", True):
         result["exit_status_reason"] = "quality_threshold_failed"
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    emit_result(result)
     if result.get("quality_threshold_failed"):
         return 2
     if args.fail_on_incomplete and run_status != "complete":

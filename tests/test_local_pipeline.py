@@ -4422,6 +4422,10 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
     assert data["quality_summary"]["top_field_gaps"]
     assert data["quality_summary"]["feishu_sync"]["enabled"] is True
     assert data["quality_summary"]["feishu_sync"]["run_status"] == "synced_ledger_incomplete"
+    blocker_codes = [item["code"] for item in data["completion_blockers"]]
+    assert blocker_codes[0] == "stage_detail_time"
+    assert "field_gaps" in blocker_codes
+    assert data["completion_blockers"] == data["quality_summary"]["completion_blockers"]
     assert any(item["reason"] == "pending_enrichment" for item in data["next_commands"])
     assert "--resume-only" in data["next_commands"][0]["command"]
     assert "--force-recover-running" in data["next_commands"][0]["command"]
@@ -4868,6 +4872,8 @@ def assert_run_account_job_reports_worker_retry_later() -> None:
     assert quality["worker_retry_later"] is True
     assert quality["worker_retry_later_count"] == 2
     assert quality["worker_retry_later_reasons"] == ["detail navigation already running"]
+    assert quality["completion_blockers"][0]["code"] == "worker_retry_later"
+    assert quality["completion_blockers"][0]["metrics"]["retry_later_count"] == 2
 
     class FakeWorkerWithoutCount:
         returncode = 0
@@ -6266,6 +6272,13 @@ def assert_run_account_job_promotes_discover_coverage_status() -> None:
     assert quality["top_field_gaps"][0]["reason"] == "exact_time"
     assert quality["feishu_sync"]["enabled"] is True
     assert quality["feishu_sync"]["output_candidates"] == 12
+    blocker_codes = [item["code"] for item in quality["completion_blockers"]]
+    assert blocker_codes[:2] == ["coverage_incomplete", "codex_summary_required"]
+    assert "field_gaps" in blocker_codes
+    assert "quality_threshold_failed" in blocker_codes
+    coverage_blocker = next(item for item in quality["completion_blockers"] if item["code"] == "coverage_incomplete")
+    assert coverage_blocker["metrics"]["coverage_stop_reason"] == "max_snapshots"
+    assert coverage_blocker["metrics"]["discovered_post_count"] == 12
     threshold_result = quality["quality_thresholds"]
     assert threshold_result["enabled"] is True
     assert threshold_result["ok"] is False
