@@ -3963,8 +3963,8 @@ def assert_partial_review_status_and_task_queue(tmp_path: Path) -> None:
         {"source_skill": "test"},
     )
     assert post["output_status"] == "partial_review"
-    enqueue_enrichment_tasks_for_posts(conn, [post])
-    enqueue_enrichment_tasks_for_posts(conn, [post])
+    task_summary = enqueue_enrichment_tasks_for_posts(conn, [post])
+    repeat_summary = enqueue_enrichment_tasks_for_posts(conn, [post])
     tasks = pending_enrichment_tasks(conn, limit=20)
     assert sorted(task["stage"] for task in tasks) == [
         "article_material",
@@ -3974,6 +3974,17 @@ def assert_partial_review_status_and_task_queue(tmp_path: Path) -> None:
         "post_type",
         "summary",
     ]
+    assert task_summary["candidate_count"] == 1
+    assert task_summary["open_task_count"] == 6
+    assert task_summary["stage_counts"] == {
+        "article_material": 1,
+        "detail_time": 1,
+        "engagement": 1,
+        "lead_link": 1,
+        "post_type": 1,
+        "summary": 1,
+    }
+    assert repeat_summary["open_stage_counts"] == task_summary["stage_counts"]
 
 
 def assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path: Path) -> None:
@@ -6199,6 +6210,9 @@ def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
     assert imported.returncode == 0, imported.stderr or imported.stdout
     import_data = json.loads(imported.stdout)
     assert import_data["enrichment_tasks"]["queued_or_refreshed"] >= 2
+    assert import_data["enrichment_tasks"]["candidate_count"] == 2
+    assert import_data["enrichment_tasks"]["stage_counts"]["article_material"] == 2
+    assert import_data["enrichment_tasks"]["open_stage_counts"]["summary"] == 2
 
     article_worker = run(
         [

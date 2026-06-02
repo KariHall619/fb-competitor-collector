@@ -386,9 +386,28 @@ def enqueue_enrichment_tasks(
 
 def enqueue_enrichment_tasks_for_posts(conn: sqlite3.Connection, posts: list[dict[str, Any]]) -> dict[str, Any]:
     before = conn.total_changes
+    planned_stage_counts: dict[str, int] = {}
     for post in posts:
+        for stage in missing_enrichment_stages(post):
+            if stage in ENRICHMENT_STAGES:
+                planned_stage_counts[stage] = planned_stage_counts.get(stage, 0) + 1
         enqueue_enrichment_tasks(conn, post)
-    return {"queued_or_refreshed": conn.total_changes - before}
+    open_stage_counts: dict[str, int] = {}
+    scoped_tasks = enrichment_tasks_for_posts(conn, posts)
+    for task in scoped_tasks:
+        if task.get("status") not in {"pending", "failed", "running"}:
+            continue
+        stage = str(task.get("stage") or "")
+        if not stage:
+            continue
+        open_stage_counts[stage] = open_stage_counts.get(stage, 0) + 1
+    return {
+        "queued_or_refreshed": conn.total_changes - before,
+        "candidate_count": len(posts),
+        "stage_counts": dict(sorted(planned_stage_counts.items())),
+        "open_stage_counts": dict(sorted(open_stage_counts.items())),
+        "open_task_count": sum(open_stage_counts.values()),
+    }
 
 
 def pending_enrichment_tasks(
