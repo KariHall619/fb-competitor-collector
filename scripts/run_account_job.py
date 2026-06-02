@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ENRICHMENT_STAGES = "detail_time,lead_link,engagement,post_type,article_material"
 DEFAULT_EXPECTED_LABEL_LIMIT = 50
 HUMAN_INTERVENTION_STATUSES = {"human_intervention_required", "login_required", "visitor_preview", "facebook_tab_missing"}
-DEFAULT_RESUME_STALE_RUNNING_SECONDS = 15
+DEFAULT_RESUME_STALE_RUNNING_SECONDS = 1800
 
 
 def run_command(command: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
@@ -478,6 +478,16 @@ def command_text(parts: list[Any]) -> str:
     return " ".join(shell_quote(part) for part in parts)
 
 
+def resume_command(base: list[Any], primary_date: str, *, force_recover_running: bool = False) -> list[Any]:
+    command = list(base)
+    if primary_date:
+        command.extend(["--target-date", primary_date])
+    command.append("--resume-only")
+    if force_recover_running:
+        command.append("--force-recover-running")
+    return command
+
+
 def next_commands_for_status(
     *,
     args: argparse.Namespace,
@@ -524,14 +534,17 @@ def next_commands_for_status(
             }
         )
     if run_status in {"coverage_incomplete", "incomplete_pending_tasks", "synced_ledger_incomplete"} or completion.get("open_task_count"):
-        command = list(base)
-        if primary_date:
-            command.extend(["--target-date", primary_date])
-        command.extend(["--resume-only", "--max-resume-passes", str(max(int(args.max_resume_passes or 0), 2))])
+        command = resume_command(base, primary_date, force_recover_running=True)
+        command.extend(
+            [
+                "--max-resume-passes",
+                str(max(int(args.max_resume_passes or 0), 2)),
+            ]
+        )
         commands.append(
             {
                 "reason": "pending_enrichment",
-                "description": "继续同账号同日期的 SQLite 补抓队列，不重新发现主页。",
+                "description": "继续同账号同日期的 SQLite 补抓队列，不重新发现主页；同时恢复上次中断遗留的 running 任务。",
                 "command": command_text(command),
             }
         )
@@ -558,7 +571,7 @@ def next_commands_for_status(
             {
                 "reason": "blocked_auth",
                 "description": "完成飞书用户授权后，重新运行同一账号作业。",
-                "command": command_text(base + (["--target-date", primary_date] if primary_date else []) + ["--resume-only"]),
+                "command": command_text(resume_command(base, primary_date, force_recover_running=True)),
             }
         )
     if run_status == "blocked_opencli":
@@ -574,7 +587,7 @@ def next_commands_for_status(
             {
                 "reason": "human_intervention_required",
                 "description": "先在正常 Chrome 里确认 Facebook 已登录、账号主页帖子列表可见，再从本地 SQLite 续跑剩余补抓和同步。",
-                "command": command_text(base + (["--target-date", primary_date] if primary_date else []) + ["--resume-only"]),
+                "command": command_text(resume_command(base, primary_date, force_recover_running=True)),
             }
         )
     return commands[:4]
@@ -633,6 +646,11 @@ def main() -> int:
         type=int,
         default=DEFAULT_RESUME_STALE_RUNNING_SECONDS,
         help="Recover scoped running enrichment tasks older than this before resume passes.",
+    )
+    parser.add_argument(
+        "--force-recover-running",
+        action="store_true",
+        help="Immediately recover scoped running enrichment tasks from a known interrupted previous run.",
     )
     parser.add_argument("--max-text", type=int, default=1500)
     parser.add_argument("--max-snapshots", type=int, default=20)
@@ -795,10 +813,11 @@ def main() -> int:
         account_type=args.account_type,
         dates=target_dates,
     )
+    stale_running_seconds = 0 if args.force_recover_running else max(0, int(args.resume_stale_running_seconds or 0))
     recovered_running_tasks = recover_stale_running_tasks_for_posts(
         conn,
         posts,
-        stale_running_seconds=max(0, int(args.resume_stale_running_seconds or 0)),
+        stale_running_seconds=stale_running_seconds,
     )
     enqueue_enrichment_tasks_for_posts(conn, posts)
     worker_passes: list[dict[str, Any]] = []

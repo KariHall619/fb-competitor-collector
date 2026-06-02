@@ -37,7 +37,7 @@ This file is the first-stop project memory for future agents working in this rep
 - The formal Feishu table is also the business capture ledger. If a Facebook post candidate is confirmed by URL and account context, normal sync should upsert it even when incomplete. Missing exact time, lead link, article summary, engagement, post type, or capture coverage is expressed in `是否采用` as `待补抓：...`; later enrichment updates the same row by post URL.
 - Avoid manual stage stitching for business runs. If token refresh, OpenCLI recovery, Codex interruption, or user handoff interrupts the flow, re-run `scripts/run_account_job.py` with the same account/date/window. It should continue from SQLite pending tasks and must not summarize a half-finished ledger write as complete.
 - Login/profile interruptions are not normal补抓 failures. `run_account_job.py` promotes homepage and detail-page login/visitor-preview blockers to `run_status=human_intervention_required` and emits a `--resume-only` command for after the operator restores the correct Chrome/Facebook state.
-- `run_account_job.py --resume-only` recovers scoped stale `running` enrichment tasks before worker passes. The account job default is intentionally short at 15 seconds so Codex/terminal interruptions can resume quickly; raise `--resume-stale-running-seconds` only when an operator wants to protect a still-active worker for longer. Fresh active `running` tasks must stay locked to avoid duplicate detail navigation.
+- `run_account_job.py --resume-only` recovers scoped stale `running` enrichment tasks before worker passes. The default is intentionally conservative at 30 minutes to avoid duplicate detail navigation; account-job `next_commands` use `--force-recover-running` after known interruptions so the operator can continue immediately without waiting.
 
 ## Do Not Reintroduce
 
@@ -109,7 +109,7 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 - `scripts/fb_dom_extractors.js`: page DOM candidate extraction.
 - `scripts/fb_time_extractors.js`: exact Facebook time parsing and timestamp-target helpers.
 - `scripts/prepare_capture_result.py`: normalize raw homepage capture and keep incomplete candidates as `needs_enrichment`.
-- `scripts/run_account_job.py`: preferred resumable business entrypoint for account capture, scoped enrichment, and formal ledger sync. It supports `--resume-only`, `--status-only`, `--last-hours 24`, `--sync`, `--dry-run`, `--expected-post-count`, `--expected-labels`, and `--resume-stale-running-seconds`; it emits `run_status` such as `complete`, `coverage_incomplete`, `incomplete_pending_tasks`, `needs_codex_summary`, `human_intervention_required`, `blocked_opencli`, or `blocked_auth`, plus `next_commands` for the first recovery action.
+- `scripts/run_account_job.py`: preferred resumable business entrypoint for account capture, scoped enrichment, and formal ledger sync. It supports `--resume-only`, `--force-recover-running`, `--status-only`, `--last-hours 24`, `--sync`, `--dry-run`, `--expected-post-count`, `--expected-labels`, and `--resume-stale-running-seconds`; it emits `run_status` such as `complete`, `coverage_incomplete`, `incomplete_pending_tasks`, `needs_codex_summary`, `human_intervention_required`, `blocked_opencli`, or `blocked_auth`, plus `next_commands` for the first recovery action.
 - `scripts/opencli_enrich_post_details.mjs`: open detail pages, confirm exact time, expand comments/replies, resolve lead links, apply target-date filtering.
 - `scripts/run_capture_pipeline.py`: lower-level fast partial capture/import helper. It discovers visible candidates, prepares/imports them as partial records, and queues enrichment, but does not own full job completion. Do not use it as the final business “抓取并写入飞书” path.
 - `scripts/enrichment_worker.py`: resumes queued `detail_time`, `lead_link`, `engagement`, `post_type`, and `article_material` tasks with local concurrency limits. Its `summary` stage no longer generates story summaries; it only verifies that a Codex-written Chinese summary has been applied, otherwise it leaves `requires_codex_chinese_summary`.
@@ -153,7 +153,7 @@ python3 scripts/run_account_job.py --config config/settings.yaml --account-url <
 Resume after Codex interruption, token refresh, or partial run:
 
 ```bash
-python3 scripts/run_account_job.py --config config/settings.yaml --account-url <facebook-account-url> --account-name "<account-name>" --target-date YYMMDD --resume-only --sync
+python3 scripts/run_account_job.py --config config/settings.yaml --account-url <facebook-account-url> --account-name "<account-name>" --target-date YYMMDD --resume-only --force-recover-running --sync
 ```
 
 Status-only check without opening Facebook detail pages:

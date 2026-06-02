@@ -3009,6 +3009,7 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
     assert data["enrichment_completion"]["open_task_count"] > 0
     assert any(item["reason"] == "pending_enrichment" for item in data["next_commands"])
     assert "--resume-only" in data["next_commands"][0]["command"]
+    assert "--force-recover-running" in data["next_commands"][0]["command"]
 
 
 def assert_run_account_job_recovers_scoped_running_tasks(tmp_path: Path) -> None:
@@ -3070,8 +3071,7 @@ def assert_run_account_job_recovers_scoped_running_tasks(tmp_path: Path) -> None
             "--status-only",
             "--sync",
             "--dry-run",
-            "--resume-stale-running-seconds",
-            "1",
+            "--force-recover-running",
         ]
     )
     assert job.returncode == 0, job.stdout
@@ -3119,7 +3119,7 @@ def assert_run_account_job_does_not_recover_fresh_running_tasks(tmp_path: Path) 
         """
         UPDATE enrichment_tasks
         SET status = 'running',
-            locked_at = CURRENT_TIMESTAMP,
+            locked_at = datetime('now', '-60 seconds'),
             next_run_at = NULL
         WHERE stage = 'detail_time'
         """
@@ -3148,6 +3148,38 @@ def assert_run_account_job_does_not_recover_fresh_running_tasks(tmp_path: Path) 
     assert data["recovered_running_tasks"] == 0
     assert data["task_counts"].get("detail_time:running") == 1
     assert data["run_status"] == "incomplete_pending_tasks"
+
+
+def assert_run_account_job_next_commands_force_recover_running() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/example",
+            "account_name": "Example Page",
+            "account_type": "competitor",
+            "sync": True,
+            "dry_run": False,
+            "max_snapshots": 20,
+            "max_resume_passes": 2,
+            "expected_post_count": 0,
+            "expected_labels": "",
+        },
+    )()
+    commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260603"],
+        run_status="incomplete_pending_tasks",
+        completion={"open_task_count": 4},
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    pending = next(item for item in commands if item["reason"] == "pending_enrichment")
+    assert "--resume-only" in pending["command"]
+    assert "--force-recover-running" in pending["command"]
 
 
 def assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path: Path) -> None:
@@ -3322,6 +3354,7 @@ exit 0
     assert data["feishu_auth_preflight"]["ok"] is False
     assert any(item["reason"] == "blocked_auth" for item in data["next_commands"])
     assert "--resume-only" in data["next_commands"][0]["command"]
+    assert "--force-recover-running" in data["next_commands"][0]["command"]
     assert "opencli_preflight" not in data
     assert not opencli_called.exists()
 
@@ -3442,6 +3475,7 @@ def assert_run_account_job_promotes_human_intervention_status() -> None:
     assert status == "human_intervention_required"
     assert commands[0]["reason"] == "human_intervention_required"
     assert "--resume-only" in commands[0]["command"]
+    assert "--force-recover-running" in commands[0]["command"]
     assert "check_env.py" not in commands[0]["command"]
 
     worker_status = run_account_job.summarize_job_status(
@@ -3888,6 +3922,7 @@ def main() -> int:
         assert_run_account_job_resume_status_reports_incomplete(tmp_path)
         assert_run_account_job_recovers_scoped_running_tasks(tmp_path)
         assert_run_account_job_does_not_recover_fresh_running_tasks(tmp_path)
+        assert_run_account_job_next_commands_force_recover_running()
         assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path)
         assert_run_account_job_expected_coverage_marks_missing_posts()
         assert_run_account_job_blocks_auth_before_capture(tmp_path)

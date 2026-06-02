@@ -51,7 +51,7 @@ Map common requests as follows:
   - Treat relative labels such as `3h`, `12h`, and `1d` as homepage candidate-window clues only.
   - If the user says they can see a known checklist such as “13 条” or `38m,1h,2h...`, pass `--expected-post-count` and/or `--expected-labels` into `run_account_job.py`; do not call the run complete when the expected coverage is missing.
   - If extraction reports `capture_blocked`, `login_required`, or `visitor_preview`, stop immediately and ask for human intervention.
-  - If the run is interrupted by token refresh, OpenCLI recovery, or Codex context changes, run the same `run_account_job.py` command again with `--resume-only` when appropriate. Do not manually write ledger rows and call the job finished while enrichment is still pending.
+  - If the run is interrupted by token refresh, OpenCLI recovery, or Codex context changes, use the emitted `next_commands` first, or run the same `run_account_job.py` command again with `--resume-only --force-recover-running` when appropriate. Do not manually write ledger rows and call the job finished while enrichment is still pending.
 
 - “把这份抓取结果导入内容库”
   - Use `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --no-sync`.
@@ -59,7 +59,7 @@ Map common requests as follows:
 
 - “把结果同步到飞书”
   - Confirm `feishu.output_spreadsheet_url` is configured.
-  - Prefer `scripts/run_account_job.py --resume-only --sync` for account-scoped capture results so pending enrichment is reported.
+  - Prefer the emitted `next_commands` or `scripts/run_account_job.py --resume-only --force-recover-running --sync` for account-scoped capture results so pending enrichment is reported.
   - Direct `import_existing_result.py --sync`, `filter_posts.py --sync`, and `sync_feishu.py` can still upsert ledger rows, but their `run_status` / `enrichment_completion` must be reported if incomplete.
 
 - “筛选 5 月 21 日的竞品帖子”
@@ -85,7 +85,7 @@ Run all commands from the skill root.
 | Import and sync new rows | `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --sync` |
 | Resumable account capture + sync | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --last-hours 24 --sync` |
 | Capture with visible checklist | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --sync --expected-post-count 13 --expected-labels "38m,1h,2h"` |
-| Resume interrupted account job | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --resume-only --sync` |
+| Resume interrupted account job | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --resume-only --force-recover-running --sync` |
 | Status-only account check | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --resume-only --status-only --sync --dry-run` |
 | Fast partial capture/import | `python3 scripts/run_capture_pipeline.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --partial` as a lower-level helper only |
 | Resume enrichment queue | `python3 scripts/enrichment_worker.py --config config/settings.yaml --stages detail_time,lead_link,engagement,post_type,article_material --account-url <url> --date YYMMDD --limit 50` |
@@ -159,7 +159,7 @@ Rules:
 - For scale-out runs, first import visible candidates as `partial_review`, then resume queued enrichment stages in SQLite. Normal formal `--sync` upserts auditable candidates by post URL and fills missing-field reasons in `是否采用`; use `--strict-ready-only` only when the operator explicitly wants the legacy ready-only gate.
 - For business capture-and-write requests, prefer `run_account_job.py` over manual stage stitching. The job result must be interpreted by `run_status`: `complete` means the scoped job finished; `synced_ledger_incomplete`, `incomplete_pending_tasks`, `coverage_incomplete`, or `needs_codex_summary` means Feishu may have ledger rows but the capture job is not done.
 - `run_account_job.py` includes `next_commands`; when a run is incomplete or blocked, use those commands as the first recovery path instead of manually stitching later stages.
-- `run_account_job.py --resume-only` recovers scoped stale `running` enrichment tasks before worker passes. The account job default stale window is 15 seconds so interrupted Codex/terminal runs can continue quickly; increase `--resume-stale-running-seconds` when a previous worker may still be active.
+- `run_account_job.py --resume-only` recovers scoped stale `running` enrichment tasks before worker passes. The default stale window is conservative at 30 minutes to avoid duplicate detail navigation; use the generated `--force-recover-running` resume command after a known Codex/terminal interruption.
 - Use `--sync-partial --dry-run` only for business preview output that must not affect the formal table.
 - If current-tab extraction returns `coverage_incomplete=true`, the run hit the snapshot cap while still finding new candidates. Raise `--max-snapshots` or restart from the account homepage top before declaring the visible date window fully covered.
 - If the user supplies a visible expected count or label checklist, missing expected posts/labels is also `coverage_incomplete` even when scrolling itself looked stable.
