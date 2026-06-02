@@ -4272,6 +4272,17 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
     assert data["complete"] is False
     assert data["feishu_sync"]["run_status"] == "synced_ledger_incomplete"
     assert data["enrichment_completion"]["open_task_count"] > 0
+    assert data["quality_summary"]["run_status"] == "incomplete_pending_tasks"
+    assert data["quality_summary"]["coverage_health"] == "not_run"
+    assert data["quality_summary"]["post_count"] == 1
+    assert data["quality_summary"]["ledger_candidate_count"] == 1
+    assert data["quality_summary"]["ledger_usable_rate"] == 1.0
+    assert data["quality_summary"]["final_usable_count"] == 0
+    assert data["quality_summary"]["final_usable_rate"] == 0.0
+    assert data["quality_summary"]["open_task_count"] > 0
+    assert data["quality_summary"]["top_field_gaps"]
+    assert data["quality_summary"]["feishu_sync"]["enabled"] is True
+    assert data["quality_summary"]["feishu_sync"]["run_status"] == "synced_ledger_incomplete"
     assert any(item["reason"] == "pending_enrichment" for item in data["next_commands"])
     assert "--resume-only" in data["next_commands"][0]["command"]
     assert "--force-recover-running" in data["next_commands"][0]["command"]
@@ -4365,6 +4376,12 @@ exit 1
     assert data["opencli_preflight"]["ok"] is False
     assert data["task_counts"].get("detail_time:pending") == 1
     assert "detail_time:failed" not in data["task_counts"]
+    assert data["quality_summary"]["run_status"] == "blocked_opencli"
+    assert data["quality_summary"]["coverage_health"] == "not_run"
+    assert data["quality_summary"]["post_count"] == 1
+    assert data["quality_summary"]["ledger_candidate_count"] == 1
+    assert data["quality_summary"]["final_usable_rate"] == 0.0
+    assert data["quality_summary"]["open_task_count"] > 0
     assert "worker_passes" not in data
     assert any(item["reason"] == "blocked_opencli" for item in data["next_commands"])
     assert any(item["reason"] == "resume_after_opencli" for item in data["next_commands"])
@@ -5034,6 +5051,11 @@ sys.exit(completed.returncode)
         assert prepare_data["discover_import"]["stage"] == "prepare"
         assert prepare_data["discover_import"]["prepare"]["stage"] == "output_load"
         assert prepare_data["discover_import"]["discover"]["post_count"] == 1
+        assert prepare_data["quality_summary"]["run_status"] == "prepare_failed"
+        assert prepare_data["quality_summary"]["coverage_health"] == "incomplete"
+        assert "discover_failed_before_import" in prepare_data["quality_summary"]["coverage_reasons"]
+        assert prepare_data["quality_summary"]["discovered_post_count"] == 1
+        assert prepare_data["quality_summary"]["post_count"] == 0
         assert any(item["reason"] == "prepare_failed" for item in prepare_data["next_commands"])
         assert "--resume-only" not in prepare_data["next_commands"][0]["command"]
 
@@ -5123,6 +5145,11 @@ sys.exit(completed.returncode)
         assert import_data["discover_import"]["stage"] == "import"
         assert import_data["discover_import"]["prepared"] == 1
         assert import_data["discover_import"]["import"]["run_status"] == "import_failed"
+        assert import_data["quality_summary"]["run_status"] == "import_failed"
+        assert import_data["quality_summary"]["coverage_health"] == "incomplete"
+        assert "discover_failed_before_import" in import_data["quality_summary"]["coverage_reasons"]
+        assert import_data["quality_summary"]["discovered_post_count"] == 1
+        assert import_data["quality_summary"]["post_count"] == 0
         assert any(item["reason"] == "import_failed" for item in import_data["next_commands"])
         assert "--resume-only" not in import_data["next_commands"][0]["command"]
 
@@ -5156,6 +5183,9 @@ sys.exit(completed.returncode)
         assert sqlite_data["stage"] == "sqlite_connect"
         assert sqlite_data["run_status"] == "import_failed"
         assert sqlite_data["complete"] is False
+        assert sqlite_data["quality_summary"]["run_status"] == "import_failed"
+        assert sqlite_data["quality_summary"]["coverage_health"] == "incomplete"
+        assert "sqlite_connect" in sqlite_data["quality_summary"]["coverage_reasons"]
         assert any(item["reason"] == "import_failed" for item in sqlite_data["next_commands"])
     finally:
         opencli_status.shutdown()
@@ -5829,6 +5859,36 @@ def assert_run_account_job_promotes_discover_coverage_status() -> None:
     assert "--expected-post-count 13" in next_commands[0]["command"]
     assert "--expected-labels" in next_commands[0]["command"]
     assert "38m,1h,2h" in next_commands[0]["command"]
+    quality = run_account_job.account_job_quality_summary(
+        run_status=status,
+        discover_coverage=summary,
+        completion={
+            "post_count": 12,
+            "ledger_candidate_count": 12,
+            "ledger_usable_rate": 1.0,
+            "final_usable_count": 0,
+            "final_usable_rate": 0.0,
+            "completion_rate": 0.25,
+            "incomplete_post_count": 9,
+            "coverage_incomplete_count": 0,
+            "open_task_count": 9,
+            "auto_open_task_count": 6,
+            "requires_codex_summary_count": 3,
+            "top_field_gaps": [{"reason": "exact_time", "label": "精确时间", "count": 12, "stage": "detail_time"}],
+        },
+        sync_result={"ok": True, "run_status": "synced_ledger_incomplete", "dry_run": True, "output_candidates": 12},
+    )
+    assert quality["run_status"] == "coverage_incomplete"
+    assert quality["coverage_health"] == "incomplete"
+    assert quality["coverage_complete"] is False
+    assert quality["coverage_stop_reason"] == "max_snapshots"
+    assert quality["discovered_post_count"] == 12
+    assert quality["ledger_candidate_count"] == 12
+    assert quality["ledger_usable_rate"] == 1.0
+    assert quality["final_usable_rate"] == 0.0
+    assert quality["top_field_gaps"][0]["reason"] == "exact_time"
+    assert quality["feishu_sync"]["enabled"] is True
+    assert quality["feishu_sync"]["output_candidates"] == 12
 
 
 def assert_run_account_job_promotes_human_intervention_status() -> None:

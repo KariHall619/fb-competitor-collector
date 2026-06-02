@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import subprocess
 import tempfile
 import time
+from json import JSONDecodeError
 from pathlib import Path
 
 from check_env import check_opencli
@@ -80,6 +82,29 @@ def parse_stdout_json(result: subprocess.CompletedProcess[str]) -> dict:
         return {"ok": False, "stdout": result.stdout, "stderr": result.stderr}
 
 
+def capture_pipeline_failed_result(
+    *,
+    stage: str,
+    run_status: str,
+    message: str,
+    error: str = "",
+    next_actions: list[str] | None = None,
+    **extra: object,
+) -> dict:
+    payload = {
+        "ok": False,
+        "stage": stage,
+        "run_status": run_status,
+        "complete": False,
+        "message": message,
+        "next_actions": next_actions if next_actions is not None else capture_pipeline_next_actions(run_status, {}),
+    }
+    if error:
+        payload["error"] = error
+    payload.update(extra)
+    return payload
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/settings.yaml")
@@ -97,7 +122,25 @@ def main() -> int:
     parser.add_argument("--expected-labels", default="", help="Comma-separated visible relative-time labels from the operator checklist.")
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config)
+    except (FileNotFoundError, JSONDecodeError, ValueError, TypeError) as exc:
+        print(
+            json.dumps(
+                capture_pipeline_failed_result(
+                    stage="config_load",
+                    run_status="import_failed",
+                    message="配置文件读取失败；已在 Facebook 采集、导入和飞书写入前停止。",
+                    error=str(exc),
+                    config_path=args.config,
+                    account_url=args.account_url,
+                    target_date=args.target_date,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 1
     if args.sync_partial and not args.dry_run:
         try:
             ensure_user_identity(config)
@@ -124,15 +167,12 @@ def main() -> int:
     if not opencli_preflight.get("ok"):
         print(
             json.dumps(
-                {
-                    "ok": False,
-                    "stage": "opencli_preflight",
-                    "run_status": "blocked_opencli",
-                    "complete": False,
-                    "message": "OpenCLI Browser Bridge 未就绪；已在 Facebook 采集前停止。",
-                    "opencli_browser_bridge": opencli_preflight,
-                    "next_actions": capture_pipeline_next_actions("blocked_opencli", {}),
-                },
+                capture_pipeline_failed_result(
+                    stage="opencli_preflight",
+                    run_status="blocked_opencli",
+                    message="OpenCLI Browser Bridge 未就绪；已在 Facebook 采集前停止。",
+                    opencli_browser_bridge=opencli_preflight,
+                ),
                 ensure_ascii=False,
                 indent=2,
             )
@@ -166,17 +206,17 @@ def main() -> int:
             run_status = "human_intervention_required" if needs_human_intervention(discover_payload) else "discover_failed"
             print(
                 json.dumps(
-                    {
-                        "ok": False,
-                        "stage": run_status if run_status == "human_intervention_required" else "discover",
-                        "run_status": run_status,
-                        "complete": False,
-                        "human_intervention_required": run_status == "human_intervention_required",
-                        "elapsed_ms": int((time.monotonic() - started) * 1000),
-                        "discover_elapsed_ms": int((time.monotonic() - discover_started) * 1000),
-                        "result": discover_payload,
-                        "next_actions": capture_pipeline_next_actions(run_status, {}),
-                    },
+                    capture_pipeline_failed_result(
+                        stage=run_status if run_status == "human_intervention_required" else "discover",
+                        run_status=run_status,
+                        message="Facebook 页面需要人工处理登录态或可见页面后再续跑。"
+                        if run_status == "human_intervention_required"
+                        else "Facebook 主页发现阶段失败；本次未导入本地库，也未写入飞书。",
+                        human_intervention_required=run_status == "human_intervention_required",
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                        discover_elapsed_ms=int((time.monotonic() - discover_started) * 1000),
+                        result=discover_payload,
+                    ),
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -211,14 +251,12 @@ def main() -> int:
         if prepare.returncode != 0:
             print(
                 json.dumps(
-                    {
-                        "ok": False,
-                        "stage": "prepare",
-                        "run_status": "prepare_failed",
-                        "complete": False,
-                        "message": "主页候选发现后标准化失败；本次未导入本地库，也未写入飞书。",
-                        "elapsed_ms": int((time.monotonic() - started) * 1000),
-                        "discover": {
+                    capture_pipeline_failed_result(
+                        stage="prepare",
+                        run_status="prepare_failed",
+                        message="主页候选发现后标准化失败；本次未导入本地库，也未写入飞书。",
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                        discover={
                             "raw_candidate_count": discover_payload.get("raw_candidate_count", 0),
                             "post_count": discover_payload.get("post_count", 0),
                             "capture_complete": discover_payload.get("capture_complete", True),
@@ -226,16 +264,41 @@ def main() -> int:
                             "coverage_blocked": discover_payload.get("coverage_blocked", False),
                             "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
                         },
-                        "stdout": prepare.stdout,
-                        "stderr": prepare.stderr,
-                        "returncode": prepare.returncode,
-                        "next_actions": capture_pipeline_next_actions("prepare_failed", {}),
-                    },
+                        stdout=prepare.stdout,
+                        stderr=prepare.stderr,
+                        returncode=prepare.returncode,
+                    ),
                     ensure_ascii=False,
                     indent=2,
                 )
             )
             return prepare.returncode
+        try:
+            prepared_payload = json.loads(prepared_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, JSONDecodeError, UnicodeDecodeError) as exc:
+            print(
+                json.dumps(
+                    capture_pipeline_failed_result(
+                        stage="prepare",
+                        run_status="prepare_failed",
+                        message="候选标准化命令返回成功，但输出文件不可读取；本次未导入本地库，也未写入飞书。",
+                        error=str(exc),
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                        discover={
+                            "raw_candidate_count": discover_payload.get("raw_candidate_count", 0),
+                            "post_count": discover_payload.get("post_count", 0),
+                            "capture_complete": discover_payload.get("capture_complete", True),
+                            "coverage": discover_payload.get("coverage", {}),
+                            "coverage_blocked": discover_payload.get("coverage_blocked", False),
+                            "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
+                        },
+                        output_path=str(prepared_path),
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
 
         import_started = time.monotonic()
         import_command = [
@@ -262,29 +325,42 @@ def main() -> int:
         if imported.returncode != 0:
             print(
                 json.dumps(
-                    {
-                        "ok": False,
-                        "stage": "import",
-                        "run_status": "import_failed",
-                        "complete": False,
-                        "message": "候选标准化后本地入库失败；本次未完成采集作业，不能把已有输出视为最终结果。",
-                        "elapsed_ms": int((time.monotonic() - started) * 1000),
-                        "prepared": json.loads(prepared_path.read_text(encoding="utf-8")).get("prepared", 0)
-                        if prepared_path.exists()
-                        else 0,
-                        "stdout": imported.stdout,
-                        "stderr": imported.stderr,
-                        "returncode": imported.returncode,
-                        "next_actions": capture_pipeline_next_actions("import_failed", {}),
-                    },
+                    capture_pipeline_failed_result(
+                        stage="import",
+                        run_status="import_failed",
+                        message="候选标准化后本地入库失败；本次未完成采集作业，不能把已有输出视为最终结果。",
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                        prepared=prepared_payload.get("prepared", 0),
+                        stdout=imported.stdout,
+                        stderr=imported.stderr,
+                        returncode=imported.returncode,
+                    ),
                     ensure_ascii=False,
                     indent=2,
                 )
             )
             return imported.returncode
 
-        prepared_payload = json.loads(prepared_path.read_text(encoding="utf-8"))
-        conn = connect(config.get("database_path", "data/posts.sqlite"))
+        database_path = config.get("database_path", "data/posts.sqlite")
+        try:
+            conn = connect(database_path)
+        except sqlite3.Error as exc:
+            print(
+                json.dumps(
+                    capture_pipeline_failed_result(
+                        stage="sqlite_connect",
+                        run_status="import_failed",
+                        message="本地内容库不可打开；候选导入结果无法确认，本次采集作业未完成。",
+                        error=str(exc),
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                        database_path=str(database_path),
+                        prepared=prepared_payload.get("prepared", 0),
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
         scoped_posts = query_posts(
             conn,
             date=normalize_date(args.target_date) if args.target_date else "",

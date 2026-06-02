@@ -739,6 +739,98 @@ def summarize_job_status(
     return "no_work"
 
 
+def _int_metric(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _float_metric(value: Any) -> float:
+    try:
+        return round(float(value or 0.0), 4)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _sync_skipped(sync_result: dict[str, Any]) -> bool:
+    skipped = sync_result.get("skipped")
+    if isinstance(skipped, bool):
+        return skipped
+    return str(sync_result.get("stage") or "") == "sync_disabled" or str(sync_result.get("run_status") or "") == "not_synced"
+
+
+def account_job_quality_summary(
+    *,
+    run_status: str,
+    discover_coverage: dict[str, Any] | None,
+    completion: dict[str, Any] | None,
+    sync_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the small business-facing quality summary for an account job."""
+
+    discover_coverage = discover_coverage or {"source": "not_run", "complete": True, "incomplete": False, "reasons": []}
+    completion = completion or {}
+    sync_result = sync_result or {}
+    coverage_source = str(discover_coverage.get("source") or "unknown")
+    coverage_incomplete = bool(discover_coverage.get("incomplete")) or str(completion.get("coverage_health") or "") == "incomplete"
+    coverage_health = "incomplete" if coverage_incomplete else ("not_run" if coverage_source == "not_run" else "complete")
+    coverage_reasons = sorted(
+        {
+            str(reason)
+            for reason in (discover_coverage.get("reasons") or [])
+            if str(reason)
+        }
+    )
+    sync_enabled = bool(sync_result) and not _sync_skipped(sync_result)
+    next_actions: list[str] = []
+    for source in (sync_result.get("next_actions"), completion.get("next_actions")):
+        if not isinstance(source, list):
+            continue
+        for action in source:
+            text = str(action or "").strip()
+            if text and text not in next_actions:
+                next_actions.append(text)
+
+    return {
+        "run_status": run_status,
+        "complete": run_status == "complete",
+        "coverage_source": coverage_source,
+        "coverage_complete": coverage_health == "complete",
+        "coverage_health": coverage_health,
+        "coverage_reasons": coverage_reasons,
+        "coverage_message": str(discover_coverage.get("message") or ""),
+        "coverage_stop_reason": str(discover_coverage.get("stop_reason") or ""),
+        "discovered_post_count": _int_metric(discover_coverage.get("post_count")),
+        "raw_candidate_count": _int_metric(discover_coverage.get("raw_candidate_count")),
+        "post_count": _int_metric(completion.get("post_count")),
+        "ledger_candidate_count": _int_metric(completion.get("ledger_candidate_count")),
+        "ledger_usable_rate": _float_metric(completion.get("ledger_usable_rate")),
+        "ready_or_synced_posts": _int_metric(completion.get("ready_or_synced_posts")),
+        "final_usable_count": _int_metric(completion.get("final_usable_count")),
+        "final_usable_rate": _float_metric(completion.get("final_usable_rate")),
+        "completion_rate": _float_metric(completion.get("completion_rate")),
+        "incomplete_post_count": _int_metric(completion.get("incomplete_post_count")),
+        "coverage_incomplete_count": _int_metric(completion.get("coverage_incomplete_count")),
+        "open_task_count": _int_metric(completion.get("open_task_count")),
+        "auto_open_task_count": _int_metric(completion.get("auto_open_task_count")),
+        "requires_codex_summary_count": _int_metric(completion.get("requires_codex_summary_count")),
+        "top_field_gaps": completion.get("top_field_gaps") if isinstance(completion.get("top_field_gaps"), list) else [],
+        "field_gap_notes": completion.get("field_gap_notes") if isinstance(completion.get("field_gap_notes"), list) else [],
+        "feishu_sync": {
+            "enabled": sync_enabled,
+            "ok": sync_result.get("ok") if sync_result else None,
+            "run_status": sync_result.get("run_status") or sync_result.get("stage") or ("not_synced" if not sync_enabled else ""),
+            "dry_run": bool(sync_result.get("dry_run")),
+            "audit_output": bool(sync_result.get("audit_output")),
+            "output_candidates": _int_metric(sync_result.get("output_candidates")),
+            "rows": _int_metric(sync_result.get("rows")),
+            "skipped": sync_result.get("skipped", False),
+        },
+        "next_actions": next_actions[:4],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/settings.yaml")
@@ -801,6 +893,12 @@ def main() -> int:
             "account_type": args.account_type,
             "elapsed_ms": int((time.monotonic() - started) * 1000),
         }
+        partial_result["quality_summary"] = account_job_quality_summary(
+            run_status=run_status,
+            discover_coverage={"source": "not_run", "complete": False, "incomplete": True, "reasons": ["sqlite_connect"]},
+            completion={},
+            sync_result={},
+        )
         partial_result["next_commands"] = next_commands_for_status(
             args=args,
             target_dates=target_dates,
@@ -849,6 +947,17 @@ def main() -> int:
                 "enrichment_completion": completion,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
             }
+            partial_result["quality_summary"] = account_job_quality_summary(
+                run_status=run_status,
+                discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+                completion=completion,
+                sync_result={
+                    "ok": False,
+                    "stage": "feishu_auth_preflight",
+                    "run_status": "blocked_auth",
+                    "next_actions": ["完成飞书用户授权后，重新运行同一账号作业。"],
+                },
+            )
             partial_result["next_commands"] = next_commands_for_status(
                 args=args,
                 target_dates=target_dates,
@@ -885,12 +994,19 @@ def main() -> int:
             partial_result = {
                 "ok": False,
                 "run_status": run_status,
+                "complete": False,
                 "message": "OpenCLI Browser Bridge 未就绪；已在 Facebook 实时采集前停止。可修复后用同一命令续跑。",
                 "target_dates": target_dates,
                 "opencli_browser_bridge": opencli_preflight,
                 "enrichment_completion": completion,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
             }
+            partial_result["quality_summary"] = account_job_quality_summary(
+                run_status=run_status,
+                discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+                completion=completion,
+                sync_result={},
+            )
             partial_result["next_commands"] = next_commands_for_status(
                 args=args,
                 target_dates=target_dates,
@@ -921,6 +1037,7 @@ def main() -> int:
                 if needs_human_intervention(discover_import)
                 else discover_import.get("run_status") or discover_import.get("stage") or "discover_failed"
             )
+            discover_coverage = discover_coverage_summary(discover_import)
             partial_result = {
                 "ok": False,
                 "run_status": run_status,
@@ -936,12 +1053,18 @@ def main() -> int:
                 "enrichment_completion": completion,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
             }
+            partial_result["quality_summary"] = account_job_quality_summary(
+                run_status=run_status,
+                discover_coverage=discover_coverage,
+                completion=completion,
+                sync_result={},
+            )
             partial_result["next_commands"] = next_commands_for_status(
                 args=args,
                 target_dates=target_dates,
                 run_status=run_status,
                 completion=completion,
-                discover_coverage=discover_coverage_summary(discover_import),
+                discover_coverage=discover_coverage,
             )
             print(
                 json.dumps(
@@ -991,6 +1114,12 @@ def main() -> int:
                 "enrichment_completion": completion_before_worker,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
             }
+            partial_result["quality_summary"] = account_job_quality_summary(
+                run_status=run_status,
+                discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+                completion=completion_before_worker,
+                sync_result={},
+            )
             partial_result["next_commands"] = next_commands_for_status(
                 args=args,
                 target_dates=target_dates,
@@ -1055,6 +1184,12 @@ def main() -> int:
         "enrichment_completion": completion,
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }
+    result["quality_summary"] = account_job_quality_summary(
+        run_status=run_status,
+        discover_coverage=result["discover_coverage"],
+        completion=completion,
+        sync_result=sync_result,
+    )
     result["next_commands"] = next_commands_for_status(
         args=args,
         target_dates=target_dates,
