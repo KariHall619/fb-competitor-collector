@@ -38,7 +38,7 @@ def summary_request_for(post: dict[str, Any]) -> dict[str, Any]:
 def needs_summary(post: dict[str, Any], *, only_invalid: bool) -> bool:
     if only_invalid:
         return bool(post.get("story_summary") and post.get("summary_source") == "article" and not has_valid_story_summary(post))
-    return not has_valid_story_summary(post) and bool(post.get("landing_url") or post.get("article_url") or article_material_for_post(post))
+    return not has_valid_story_summary(post) and bool(article_material_for_post(post))
 
 
 def main() -> int:

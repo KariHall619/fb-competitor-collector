@@ -956,6 +956,34 @@ def assert_comments_and_shares_are_output_as_engagement() -> None:
     assert row[8] == 1200
 
 
+def assert_time_confirmed_string_false_is_not_ready() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from output_quality import output_quality_errors
+
+    post = normalize_post(
+        {
+            "post_url": "https://www.facebook.com/example/posts/string-false-time",
+            "posted_at": "2026年5月27日 10:00",
+            "time_confirmed": "false",
+            "time_source": "dom_aria_label",
+            "article_url": "https://site.test/story",
+            "landing_url": "https://site.test/story",
+            "lead_url_raw": "https://site.test/story",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "article_summary": VALID_CN_SUMMARY,
+            "summary_source": "article",
+            "output_status": "ready_for_output",
+        }
+    )
+    assert post["time_confirmed"] is False
+    assert post["output_status"] != "ready_for_output"
+    errors = output_quality_errors([{**post, "output_status": "ready_for_output"}])
+    assert errors
+    assert "unconfirmed_or_estimated_posted_at" in errors[0]["errors"]
+
+
 def assert_field_schema_controls_output_rows() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from field_schema import (
@@ -1447,7 +1475,16 @@ def assert_export_summary_requests_can_scope_account_job(tmp_path: Path) -> None
 
 def assert_summary_request_prefers_article_material_source() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
-    from export_summary_requests import summary_request_for
+    from export_summary_requests import needs_summary, summary_request_for
+
+    assert needs_summary(
+        {
+            "post_url": "https://facebook.com/example/posts/no-material",
+            "article_url": "https://story.example/no-material",
+            "landing_url": "https://story.example/no-material",
+        },
+        only_invalid=False,
+    ) is False
 
     request = summary_request_for(
         {
@@ -1486,6 +1523,81 @@ def assert_summary_request_prefers_article_material_source() -> None:
         }
     )
     assert fallback_request["article_url"] == "https://story.example/material-source"
+
+
+def assert_export_summary_requests_skips_rows_without_material(tmp_path: Path) -> None:
+    config = tmp_path / "settings_summary_material_only.yaml"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    db_path = tmp_path / "summary-material-only.sqlite"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {db_path}"),
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, upsert_post
+
+    conn = connect(db_path)
+    with_material = normalize_post(
+        {
+            "account_name": "Summary Source",
+            "account_url": "https://www.facebook.com/summarysource",
+            "account_type": "competitor",
+            "post_url": "https://www.facebook.com/summarysource/posts/with-material",
+            "posted_at": "2026年6月3日 12:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/with-material",
+            "landing_url": "https://story.example/with-material",
+            "lead_url_raw": "https://story.example/with-material",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "article_material": {
+                "ok": True,
+                "title": "With material",
+                "text_excerpt": "This row has enough article material for a Codex-written Chinese summary.",
+            },
+        }
+    )
+    without_material = normalize_post(
+        {
+            "account_name": "Summary Source",
+            "account_url": "https://www.facebook.com/summarysource",
+            "account_type": "competitor",
+            "post_url": "https://www.facebook.com/summarysource/posts/without-material",
+            "posted_at": "2026年6月3日 13:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/without-material",
+            "landing_url": "https://story.example/without-material",
+            "lead_url_raw": "https://story.example/without-material",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+        }
+    )
+    upsert_post(conn, with_material)
+    upsert_post(conn, without_material)
+    output = tmp_path / "summary_requests_material_only.json"
+    exported = run(
+        [
+            PYTHON,
+            "scripts/export_summary_requests.py",
+            "--config",
+            str(config),
+            "--output",
+            str(output),
+            "--date",
+            "260603",
+            "--account-url",
+            "https://www.facebook.com/summarysource",
+        ]
+    )
+    assert exported.returncode == 0, exported.stderr or exported.stdout
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["scope"]["source_post_count"] == 2
+    assert payload["count"] == 1
+    assert payload["requests"][0]["post_url"] == "https://facebook.com/summarysource/posts/with-material"
+    assert payload["requests"][0]["article_material"]["title"] == "With material"
 
 
 def assert_enrich_article_summaries_prefers_article_url(tmp_path: Path) -> None:
@@ -4486,6 +4598,7 @@ def main() -> int:
     assert_url_canonicalization()
     assert_exact_time_parsing_and_relative_time_estimation()
     assert_comments_and_shares_are_output_as_engagement()
+    assert_time_confirmed_string_false_is_not_ready()
     assert_field_schema_controls_output_rows()
     assert_audit_marker_is_written_to_adoption_status()
     assert_ledger_marker_includes_time_summary_and_coverage()
@@ -4567,6 +4680,7 @@ def main() -> int:
         assert_sync_status_prioritizes_auto_work_over_summary(tmp_path)
         assert_export_summary_requests_can_scope_account_job(tmp_path)
         assert_summary_request_prefers_article_material_source()
+        assert_export_summary_requests_skips_rows_without_material(tmp_path)
         assert_enrich_article_summaries_prefers_article_url(tmp_path)
         assert_sync_feishu_strict_marks_ready_rows_synced(tmp_path)
         assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path)

@@ -14,6 +14,7 @@ from field_audit import is_system_audit_marker
 from models import has_qualified_comment_lead_link
 from pipeline_status import crawl_status_for, missing_enrichment_stages, output_status_for
 from story_summary_policy import has_valid_story_summary
+from value_utils import parse_bool
 
 
 POST_COLUMNS = [
@@ -219,7 +220,7 @@ PROTECTED_FINAL_STATUSES = {"ready_for_output", "output_synced"}
 def has_confirmed_time_value(post: dict[str, Any]) -> bool:
     return bool(
         post.get("posted_at")
-        and post.get("time_confirmed")
+        and parse_bool(post.get("time_confirmed"))
         and str(post.get("time_source") or "") not in ESTIMATED_TIME_SOURCES
     )
 

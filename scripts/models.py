@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlencode, unquote, urlparse, urlunparse
 from typing import Any
 
 from field_schema import DEFAULT_OUTPUT_HEADERS, output_row_for_headers
+from value_utils import parse_bool
 
 
 POST_URL_KEYS = ("post_url", "fb_post_url", "Facebook帖子链接", "帖子链接")
@@ -493,7 +494,7 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
         note = append_note(note, "互动数据未确认")
 
     time_confirmed = (
-        bool(raw.get("time_confirmed"))
+        parse_bool(raw.get("time_confirmed"))
         if "time_confirmed" in raw
         else bool(posted_at and not is_estimated_time_source(time_source))
     )

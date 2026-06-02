@@ -8,6 +8,7 @@ from typing import Any
 from models import COMMENT_LEAD_SOURCES, ESTIMATED_TIME_SOURCES, has_qualified_comment_lead_link
 from field_audit import audit_refetch_stages
 from story_summary_policy import article_material_for_post, has_valid_story_summary
+from value_utils import parse_bool
 
 
 PARTIAL_REVIEW = "partial_review"
@@ -23,7 +24,7 @@ OPEN_STATUSES = {PARTIAL_REVIEW, NEEDS_ENRICHMENT}
 def has_confirmed_time(post: dict[str, Any]) -> bool:
     return bool(
         post.get("posted_at")
-        and post.get("time_confirmed")
+        and parse_bool(post.get("time_confirmed"))
         and str(post.get("time_source") or "") not in ESTIMATED_TIME_SOURCES
     )
 

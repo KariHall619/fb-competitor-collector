@@ -36,6 +36,7 @@ from store import (
     upsert_article_material,
     upsert_post,
 )
+from value_utils import parse_bool
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -187,7 +188,7 @@ def run_summary_task(post: dict[str, Any]) -> dict[str, Any]:
 
 def detail_stage_satisfied(post: dict[str, Any], stage: str) -> bool:
     if stage == "detail_time":
-        return bool(post.get("posted_at") and post.get("time_confirmed"))
+        return bool(post.get("posted_at") and parse_bool(post.get("time_confirmed")))
     if stage == "lead_link":
         return has_qualified_comment_lead_link(post)
     if stage == "engagement":

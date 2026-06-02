@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from config_loader import deep_get
 from story_summary_policy import has_valid_story_summary
+from value_utils import parse_bool
 
 
 DEFAULT_REQUIRED_ENGAGEMENT_FIELDS = ["likes", "comments", "shares"]
@@ -119,7 +120,7 @@ def audit_post_fields(post: dict[str, Any], config: dict[str, Any] | None = None
     reasons: list[str] = []
     if (
         not post.get("posted_at")
-        or not post.get("time_confirmed")
+        or not parse_bool(post.get("time_confirmed"))
         or str(post.get("time_source") or "") in ESTIMATED_TIME_SOURCES
     ):
         reasons.append("exact_time")

@@ -7,6 +7,7 @@ from typing import Any
 
 from models import ESTIMATED_TIME_SOURCES, has_qualified_comment_lead_link
 from story_summary_policy import story_summary_errors
+from value_utils import parse_bool
 
 
 def output_quality_errors(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -15,7 +16,7 @@ def output_quality_errors(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         row_errors = []
         if not post.get("posted_at"):
             row_errors.append("missing_hour_level_posted_at")
-        if not post.get("time_confirmed") or post.get("time_source") in ESTIMATED_TIME_SOURCES:
+        if not parse_bool(post.get("time_confirmed")) or post.get("time_source") in ESTIMATED_TIME_SOURCES:
             row_errors.append("unconfirmed_or_estimated_posted_at")
         summary_errors = story_summary_errors(post)
         if post.get("summary_source") != "article":
