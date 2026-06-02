@@ -572,6 +572,81 @@ if (candidate.selected_post_link_kind !== 'post' || candidate.media_link_count !
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_dom_extractor_keeps_path_photo_without_parent_post() -> None:
+    script = """
+const { browserExpression } = require('./scripts/fb_dom_extractors');
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() { return this.innerText; }
+  get href() {
+    if (!this.attrs.href) return '';
+    return new URL(this.attrs.href, global.location.href).href;
+  }
+  getAttribute(name) { return this.attrs[name] || ''; }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a[href]') return node.tagName === 'A' && !!node.attrs.href;
+      if (current === 'h1') return node.tagName === 'H1';
+      if (current === 'h2') return node.tagName === 'H2';
+      if (current === 'article') return node.tagName === 'ARTICLE';
+      if (current === 'div[role="article"]') return node.tagName === 'DIV' && node.attrs.role === 'article';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+const story = new Node('div', { role: 'article' }, [
+  new Node('a', { href: '/themeaningoflife88/photos/a.123/9876543212345678/?type=3' }, [], '2h'),
+  new Node('p', {}, [], 'A photo story reveals a hidden family secret after dinner.'),
+  new Node('span', {}, [], '27 comments'),
+  new Node('span', {}, [], '5 shares')
+]);
+const body = new Node('body', {}, [
+  new Node('h1', {}, [], 'The meaning of life'),
+  story
+]);
+global.document = {
+  title: 'The meaning of life | Facebook',
+  body,
+  querySelectorAll: (selector) => body.querySelectorAll(selector)
+};
+global.location = new URL('https://www.facebook.com/themeaningoflife88');
+const result = eval(browserExpression(800));
+if (result.real_post_count !== 1) {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(1);
+}
+const candidate = result.candidates[0];
+if (!candidate.post_url.includes('/photos/a.123/9876543212345678/')) {
+  console.error(JSON.stringify(candidate, null, 2));
+  process.exit(2);
+}
+if (candidate.selected_post_link_kind !== 'media' || candidate.media_link_count !== 1) {
+  console.error(JSON.stringify(candidate, null, 2));
+  process.exit(3);
+}
+"""
+    result = run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_opencli_extract_script_requires_human_intervention() -> None:
     script_text = (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
     assert "human_intervention_required" in script_text
@@ -6797,6 +6872,7 @@ def main() -> int:
     assert_dom_extractor_excludes_profile_shell_with_external_link()
     assert_dom_extractor_blocks_visitor_preview()
     assert_dom_extractor_prefers_parent_post_over_photo_link()
+    assert_dom_extractor_keeps_path_photo_without_parent_post()
     assert_detail_engagement_is_anchored_to_main_post()
     assert_detail_enrichment_ignores_page_shell_ad_links()
     assert_detail_enrichment_detects_plain_text_comment_links()

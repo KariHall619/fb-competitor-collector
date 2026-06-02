@@ -147,7 +147,7 @@ Rules:
 - Missing `views`/`likes` is allowed; write note `互动数据未确认`.
 - Never invent metrics.
 - Never store passwords, cookies, API keys, or tokens.
-- Capture must keep `photo.php`, `/photo/`, `/reel/`, `/watch/`, and `/videos/` candidates. These are valid FB content candidates and must not be dropped just because a parent `/posts/` link is missing.
+- Capture must keep `photo.php`, `/photo/`, `/photos/`, `/reel/`, `/watch/`, `/video/`, `/videos/`, `/share/`, and group-post candidates. These are valid FB content candidates and must not be dropped just because a parent `/posts/` link is missing.
 - Parent post links are best-effort dedupe helpers. If a parent link is available, store it in `parent_post_url`; if not, keep the original `raw_fb_url` / `post_url` and leave later similarity review to a separate pass.
 - Formal output requires a lead link posted by the account in the comment area or a comment reply. The link must resolve outside Facebook/Meta and be stored as `landing_url`; set `lead_link_status=qualified`.
 - A comment/reply lead link already captured from the homepage or post comments is authoritative. Detail-page enrichment must not overwrite it with unrelated external links from right-column ads, suggested posts, feed ads, or other non-comment page surfaces.

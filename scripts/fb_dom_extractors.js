@@ -29,11 +29,16 @@ function browserExpression(maxText = 1200) {
         const url = parsed.href;
         return isFacebookHost(url) && (
           /\\/posts\\//i.test(parsed.pathname) ||
+          /\\/groups\\/[^/]+\\/posts\\//i.test(parsed.pathname) ||
           /\\/reel\\//i.test(parsed.pathname) ||
           /\\/videos\\//i.test(parsed.pathname) ||
+          /\\/video\\//i.test(parsed.pathname) ||
           /\\/story\\.php/i.test(parsed.pathname) ||
           /\\/watch\\//i.test(parsed.pathname) ||
           /\\/photo\\.php/i.test(parsed.pathname) ||
+          /\\/photo\\//i.test(parsed.pathname) ||
+          /\\/photos\\//i.test(parsed.pathname) ||
+          /\\/share\\//i.test(parsed.pathname) ||
           /\\/permalink\\.php/i.test(parsed.pathname) ||
           parsed.searchParams.has('story_fbid') ||
           parsed.searchParams.has('v') ||
@@ -48,7 +53,7 @@ function browserExpression(maxText = 1200) {
         const parsed = new URL(href, location.href);
         if (!isFacebookHost(parsed.href)) return 'none';
         if (/\\/posts\\//i.test(parsed.pathname) || /\\/story\\.php/i.test(parsed.pathname) || /\\/permalink\\.php/i.test(parsed.pathname) || parsed.searchParams.has('story_fbid')) return 'post';
-        if (/\\/photo\\.php/i.test(parsed.pathname) || /\\/photo\\//i.test(parsed.pathname) || /\\/reel\\//i.test(parsed.pathname) || /\\/watch\\//i.test(parsed.pathname) || /\\/videos\\//i.test(parsed.pathname) || parsed.searchParams.has('fbid') || parsed.searchParams.has('v')) return 'media';
+        if (/\\/photo\\.php/i.test(parsed.pathname) || /\\/photos?\\//i.test(parsed.pathname) || /\\/reel\\//i.test(parsed.pathname) || /\\/watch\\//i.test(parsed.pathname) || /\\/videos?\\//i.test(parsed.pathname) || /\\/share\\//i.test(parsed.pathname) || parsed.searchParams.has('fbid') || parsed.searchParams.has('v')) return 'media';
         return 'other';
       } catch {
         return 'none';
@@ -111,7 +116,7 @@ function browserExpression(maxText = 1200) {
         const postLinks = links.filter((item) => postHref(item.href));
         const timeLinks = links.filter((item) => timeText(item.text) || timeText(item.aria));
         const externalLinks = links.filter((item) => externalHref(item.href));
-        const hasReaction = /All reactions|Like\\s+Comment\\s+Share|Like\\nComment\\nShare|views|plays|Full Story|完整动态|次播放|赞|评论|分享/i.test(text);
+        const hasReaction = /All reactions|Like\\s+Comment\\s+Share|Like\\nComment\\nShare|\\b\\d+(?:\\.\\d+)?\\s*(?:K|M|万)?\\s*(?:views|plays|likes|comments|shares)\\b|\\d+(?:\\.\\d+)?\\s*万?\\s*(?:次播放|赞|评论|分享)|views|plays|Full Story|完整动态|次播放|赞|评论|分享/i.test(text);
         if (
           text.length >= 25
           && text.length <= 2500
@@ -153,7 +158,7 @@ function browserExpression(maxText = 1200) {
       const exactTime = exactTimeHelpers.exactTimeFromItem(selectedTimeLink || {});
       const firstLine = text.split('\\n').map(clean).find(Boolean) || '';
       const ownerMatched = !pageNames.length || pageNames.some((name) => firstLine === name || firstLine.includes(name));
-      const reactionSignals = /All reactions|Like\\s+Comment\\s+Share|Like\\nComment\\nShare|views|plays|Full Story|完整动态|次播放|赞|评论|分享/i.test(text);
+      const reactionSignals = /All reactions|Like\\s+Comment\\s+Share|Like\\nComment\\nShare|\\b\\d+(?:\\.\\d+)?\\s*(?:K|M|万)?\\s*(?:views|plays|likes|comments|shares)\\b|\\d+(?:\\.\\d+)?\\s*万?\\s*(?:次播放|赞|评论|分享)|views|plays|Full Story|完整动态|次播放|赞|评论|分享/i.test(text);
       const commentSignals = /(^|\\n)Like\\nReply(\\n|$)|Write a comment|回复/i.test(text);
       const looksLikeComment = commentSignals && !reactionSignals && externalLinks.length === 0;
       const looksLikePost = postLinks.length > 0 && (timeLinks.length > 0 || reactionSignals || externalLinks.length > 0) && !looksLikeComment;
