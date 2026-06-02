@@ -5008,6 +5008,28 @@ print(json.dumps(payload, ensure_ascii=False))
             ],
             env=env,
         )
+        strict_result = run(
+            [
+                PYTHON,
+                "scripts/run_capture_pipeline.py",
+                "--config",
+                str(config),
+                "--account-url",
+                "https://www.facebook.com/expectedpage",
+                "--account-name",
+                "Expected Page",
+                "--target-date",
+                "260603",
+                "--expected-post-count",
+                "13",
+                "--expected-labels",
+                "38m,1h,2h,10h",
+                "--fail-on-incomplete",
+                "--min-final-usable-rate",
+                "0.9",
+            ],
+            env=env,
+        )
     finally:
         opencli_status.shutdown()
         opencli_status.server_close()
@@ -5020,7 +5042,23 @@ print(json.dumps(payload, ensure_ascii=False))
     assert data["expected_coverage"]["missing_post_count"] == 4
     assert data["expected_coverage"]["missing_labels"] == ["10h"]
     assert data["coverage"]["expected_coverage_failed"] is True
+    assert data["quality_summary"]["run_status"] == "coverage_incomplete"
+    assert data["quality_summary"]["coverage_health"] == "incomplete"
+    assert data["quality_summary"]["ledger_candidate_count"] == 9
+    assert data["quality_summary"]["ledger_usable_rate"] == 1.0
+    assert data["quality_summary"]["final_usable_rate"] == 0.0
+    assert data["quality_summary"]["open_task_stage_counts"]["detail_time"] == 9
+    assert data["quality_summary"]["missing_stage_counts"]["detail_time"] == 9
+    assert any("精确时间" in note for note in data["quality_summary"]["stage_pressure_notes"])
+    assert data["feishu_sync"]["run_status"] == "not_synced"
     assert any("覆盖未完成" in action for action in data["next_actions"])
+    assert strict_result.returncode == 2, strict_result.stdout
+    strict_data = json.loads(strict_result.stdout)
+    assert strict_data["run_status"] == "coverage_incomplete"
+    assert strict_data["complete"] is False
+    assert strict_data["quality_threshold_failed"] is True
+    assert strict_data["exit_status_reason"] == "quality_threshold_failed"
+    assert [failure["metric"] for failure in strict_data["quality_threshold_failures"]] == ["final_usable_rate"]
 
 
 def assert_run_account_job_passes_snapshot_budget(tmp_path: Path) -> None:

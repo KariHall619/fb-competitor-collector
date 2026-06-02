@@ -17,6 +17,7 @@ from config_loader import load_config
 from coverage_expectations import apply_expected_coverage, split_expected_labels
 from lark_io import ensure_user_identity
 from models import normalize_date
+from run_account_job import account_job_quality_summary, discover_coverage_summary, quality_thresholds_from_args
 from store import connect, query_posts
 from sync_status import blocked_auth_result, completion_run_status, enrichment_completion_summary
 
@@ -71,6 +72,34 @@ def capture_pipeline_next_actions(run_status: str, completion: dict) -> list[str
     return list(completion.get("next_actions") or [])
 
 
+def sync_result_from_import_payload(import_payload: dict, *, dry_run: bool) -> dict:
+    if isinstance(import_payload.get("feishu_sync"), dict):
+        return import_payload["feishu_sync"]
+    return {
+        "ok": True,
+        "skipped": True,
+        "stage": "sync_disabled",
+        "run_status": "not_synced",
+        "dry_run": dry_run,
+    }
+
+
+def discover_report_for_quality(discover_payload: dict) -> dict:
+    return {
+        "ok": True,
+        "stage": "discover_import",
+        "discover": {
+            "raw_candidate_count": discover_payload.get("raw_candidate_count", 0),
+            "post_count": discover_payload.get("post_count", 0),
+            "capture_complete": discover_payload.get("capture_complete", True),
+            "coverage": discover_payload.get("coverage", {}),
+            "coverage_blocked": discover_payload.get("coverage_blocked", False),
+            "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
+            "expected_coverage": (discover_payload.get("coverage") or {}).get("expected", {}),
+        },
+    }
+
+
 def run_command(command: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False, timeout=timeout)
 
@@ -120,6 +149,31 @@ def main() -> int:
     parser.add_argument("--min-snapshots", type=int, default=6)
     parser.add_argument("--expected-post-count", type=int, default=0)
     parser.add_argument("--expected-labels", default="", help="Comma-separated visible relative-time labels from the operator checklist.")
+    parser.add_argument(
+        "--fail-on-incomplete",
+        action="store_true",
+        help="Return nonzero when run_status is not complete, even if partial import succeeded.",
+    )
+    parser.add_argument(
+        "--require-coverage-complete",
+        action="store_true",
+        help="Fail the pipeline when homepage/expected coverage is not complete.",
+    )
+    parser.add_argument("--min-ledger-usable-rate", type=float, default=0.0, help="Fail when ledger candidate rate is below this 0-1 threshold.")
+    parser.add_argument("--min-final-usable-rate", type=float, default=0.0, help="Fail when strict final usable rate is below this 0-1 threshold.")
+    parser.add_argument("--min-completion-rate", type=float, default=0.0, help="Fail when enrichment completion rate is below this 0-1 threshold.")
+    parser.add_argument(
+        "--min-expected-post-coverage-rate",
+        type=float,
+        default=0.0,
+        help="Fail when expected-post-count coverage is below this 0-1 threshold.",
+    )
+    parser.add_argument(
+        "--min-expected-label-coverage-rate",
+        type=float,
+        default=0.0,
+        help="Fail when expected-label coverage is below this 0-1 threshold.",
+    )
     args = parser.parse_args()
 
     try:
@@ -322,6 +376,7 @@ def main() -> int:
         else:
             import_command.append("--no-sync")
         imported = run_command(import_command)
+        import_payload = parse_stdout_json(imported)
         if imported.returncode != 0:
             print(
                 json.dumps(
@@ -370,6 +425,18 @@ def main() -> int:
         )
         completion = enrichment_completion_summary(conn, scoped_posts)
         run_status = capture_pipeline_run_status(discover_payload, completion)
+        sync_result = sync_result_from_import_payload(import_payload, dry_run=args.dry_run)
+        quality_summary = account_job_quality_summary(
+            run_status=run_status,
+            discover_coverage=discover_coverage_summary(discover_report_for_quality(discover_payload)),
+            completion=completion,
+            sync_result=sync_result,
+            thresholds=quality_thresholds_from_args(args),
+        )
+        next_actions = capture_pipeline_next_actions(run_status, completion)
+        for action in quality_summary["quality_thresholds"].get("next_actions") or []:
+            if action and action not in next_actions:
+                next_actions.append(action)
         result = {
             "ok": True,
             "mode": "partial" if args.partial else "standard",
@@ -385,18 +452,38 @@ def main() -> int:
             "partial_review": prepared_payload.get("partial_review", 0),
             "needs_enrichment": prepared_payload.get("needs_enrichment", 0),
             "enrichment_completion": completion,
+            "enrichment_tasks": import_payload.get("enrichment_tasks") if isinstance(import_payload, dict) else {},
+            "feishu_sync": sync_result,
+            "quality_summary": quality_summary,
             "complete": run_status == "complete",
             "run_status": run_status,
-            "next_actions": capture_pipeline_next_actions(run_status, completion),
+            "next_actions": next_actions[:4],
             "timing_ms": {
                 "discover": int((time.monotonic() - discover_started) * 1000),
                 "prepare": int((time.monotonic() - prepare_started) * 1000),
                 "import": int((time.monotonic() - import_started) * 1000),
                 "total": int((time.monotonic() - started) * 1000),
             },
+            "import_result": import_payload,
             "import_stdout": imported.stdout,
         }
+        if not quality_summary["quality_thresholds"]["ok"]:
+            result["complete"] = False
+            result["quality_threshold_failed"] = True
+            result["quality_threshold_failures"] = quality_summary["quality_thresholds"]["failures"]
+            if run_status == "complete":
+                result["run_status"] = "quality_threshold_failed"
+                result["quality_summary"]["run_status"] = "quality_threshold_failed"
+                result["quality_summary"]["complete"] = False
+        if args.fail_on_incomplete and result["run_status"] != "complete":
+            result["exit_status_reason"] = "incomplete_run_status"
+        if result.get("quality_threshold_failed"):
+            result["exit_status_reason"] = "quality_threshold_failed"
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        if result.get("quality_threshold_failed"):
+            return 2
+        if args.fail_on_incomplete and result["run_status"] != "complete":
+            return 2
         return 0
 
 
