@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ENRICHMENT_STAGES = "detail_time,lead_link,engagement,post_type,article_material"
 HUMAN_INTERVENTION_STATUSES = {"human_intervention_required", "login_required", "visitor_preview", "facebook_tab_missing"}
 DEFAULT_RESUME_STALE_RUNNING_SECONDS = 1800
+OPENCLI_REQUIRED_STAGES = {"detail_time", "lead_link", "engagement", "post_type"}
 
 
 def run_command(command: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
@@ -246,6 +247,13 @@ def discover_and_import(
             "prepared_counts": prepared_counts,
             "imports": imports,
         }
+
+
+def completion_requires_opencli(completion: dict[str, Any]) -> bool:
+    stage_counts = completion.get("open_task_stage_counts") or completion.get("missing_stage_counts") or {}
+    if not isinstance(stage_counts, dict):
+        return False
+    return any(stage in OPENCLI_REQUIRED_STAGES and int(count or 0) > 0 for stage, count in stage_counts.items())
 
 
 def run_worker_pass(args: argparse.Namespace, *, target_dates: list[str], pass_index: int) -> dict[str, Any]:
@@ -796,6 +804,40 @@ def main() -> int:
         stale_running_seconds=stale_running_seconds,
     )
     enqueue_enrichment_tasks_for_posts(conn, posts)
+    completion_before_worker = enrichment_completion_summary(conn, posts)
+    if args.resume_only and not args.status_only and completion_requires_opencli(completion_before_worker):
+        opencli_preflight = check_opencli(
+            config.get("opencli_command") or [config.get("opencli_path", "opencli")],
+            daemon_port=int(config.get("opencli_daemon_port", 19825) or 19825),
+            auto_fix=True,
+        )
+        if not opencli_preflight.get("ok"):
+            run_status = "blocked_opencli"
+            partial_result = {
+                "ok": False,
+                "run_status": run_status,
+                "complete": False,
+                "message": "OpenCLI Browser Bridge 未就绪；已在详情补抓前停止，避免把可预判的环境问题写成补抓失败任务。",
+                "target_dates": target_dates,
+                "account_url": args.account_url,
+                "account_name": args.account_name,
+                "account_type": args.account_type,
+                "post_count": len(posts),
+                "task_counts": task_counts_for_posts(conn, posts),
+                "recovered_running_tasks": recovered_running_tasks,
+                "opencli_preflight": opencli_preflight,
+                "enrichment_completion": completion_before_worker,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+            partial_result["next_commands"] = next_commands_for_status(
+                args=args,
+                target_dates=target_dates,
+                run_status=run_status,
+                completion=completion_before_worker,
+                discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+            )
+            print(json.dumps(partial_result, ensure_ascii=False, indent=2))
+            return 1
     worker_passes: list[dict[str, Any]] = []
     resume_passes = 0 if args.status_only else max(0, args.max_resume_passes)
     for index in range(resume_passes):

@@ -4013,6 +4013,73 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
     assert strict_data["exit_status_reason"] == "incomplete_run_status"
 
 
+def assert_run_account_job_resume_blocks_opencli_before_detail_tasks(tmp_path: Path) -> None:
+    config = tmp_path / "settings_account_job_resume_opencli.yaml"
+    fake_opencli = tmp_path / "fake-opencli-resume"
+    db_path = tmp_path / "account-job-resume-opencli.sqlite"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
+    config.write_text(text, encoding="utf-8")
+    fake_opencli.write_text(
+        """#!/bin/sh
+echo 'opencli unavailable' >&2
+exit 1
+""",
+        encoding="utf-8",
+    )
+    fake_opencli.chmod(0o755)
+    sample = tmp_path / "resume_opencli.json"
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Resume Page",
+                        "account_url": "https://www.facebook.com/resumepage",
+                        "post_url": "https://www.facebook.com/resumepage/posts/opencli-needed",
+                        "relative_time_text": "1h",
+                        "story_summary": "Visible homepage candidate.",
+                        "crawled_at": "2026-06-02T12:00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
+    assert imported.returncode == 0, imported.stdout
+    job = run(
+        [
+            PYTHON,
+            "scripts/run_account_job.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/resumepage",
+            "--account-name",
+            "Resume Page",
+            "--target-date",
+            "260602",
+            "--resume-only",
+            "--sync",
+            "--dry-run",
+        ]
+    )
+    assert job.returncode == 1, job.stdout
+    data = json.loads(job.stdout)
+    assert data["run_status"] == "blocked_opencli"
+    assert data["complete"] is False
+    assert data["post_count"] == 1
+    assert data["opencli_preflight"]["ok"] is False
+    assert data["task_counts"].get("detail_time:pending") == 1
+    assert "detail_time:failed" not in data["task_counts"]
+    assert "worker_passes" not in data
+    assert any(item["reason"] == "blocked_opencli" for item in data["next_commands"])
+
+
 def assert_run_account_job_recovers_scoped_running_tasks(tmp_path: Path) -> None:
     config = tmp_path / "settings_account_job_running.yaml"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
@@ -5644,6 +5711,7 @@ def main() -> int:
         assert_story_summary_audit_downgrades_invalid_rows(tmp_path)
         assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path)
         assert_run_account_job_resume_status_reports_incomplete(tmp_path)
+        assert_run_account_job_resume_blocks_opencli_before_detail_tasks(tmp_path)
         assert_run_account_job_recovers_scoped_running_tasks(tmp_path)
         assert_run_account_job_does_not_recover_fresh_running_tasks(tmp_path)
         assert_run_account_job_next_commands_force_recover_running()
