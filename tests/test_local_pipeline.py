@@ -640,6 +640,38 @@ if (disabledSummary.opened !== 1 || disabledSummary.closed !== 0 || disabledSumm
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_opencli_detail_session_lock_recovers_stale_files() -> None:
+    script = """
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { acquireSessionLock } from './scripts/opencli_enrich_post_details.mjs';
+
+const session = `unit-stale-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const lockPath = path.join(os.tmpdir(), `fb-competitor-opencli-${session}.lock`);
+fs.writeFileSync(lockPath, JSON.stringify({ pid: 99999999, started_at: '2000-01-01T00:00:00.000Z' }));
+const recovered = acquireSessionLock(session);
+if (!recovered.ok || !recovered.recovered || recovered.previous?.reason !== 'dead_pid') {
+  console.error(JSON.stringify(recovered, null, 2));
+  process.exit(2);
+}
+const busy = acquireSessionLock(session);
+if (busy.ok || busy.stale?.stale) {
+  console.error(JSON.stringify(busy, null, 2));
+  process.exit(3);
+}
+recovered.release();
+const fresh = acquireSessionLock(session);
+if (!fresh.ok || fresh.recovered) {
+  console.error(JSON.stringify(fresh, null, 2));
+  process.exit(4);
+}
+fresh.release();
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_opencli_detail_enrichment_reuses_tab_with_fallback() -> None:
     script_text = (ROOT / "scripts" / "opencli_enrich_post_details.mjs").read_text(encoding="utf-8")
     assert "async function openReusablePostTab" in script_text
@@ -6662,6 +6694,7 @@ def main() -> int:
     assert_opencli_extract_script_requires_human_intervention()
     assert_opencli_runtime_keeps_current_bound_tab()
     assert_opencli_tab_tracker_closes_only_registered_tabs()
+    assert_opencli_detail_session_lock_recovers_stale_files()
     assert_opencli_detail_enrichment_reuses_tab_with_fallback()
     assert_opencli_detail_enrichment_blocks_for_human_login()
     assert_feishu_writes_require_user_identity()

@@ -84,6 +84,7 @@ performance:
   detail_navigation_wait_seconds: 3.5
   synthetic_tooltip_wait_ms: 1200
   real_mouse_tooltip_wait_ms: 1800
+  detail_session_lock_stale_seconds: 1800
   detail_timeout_seconds: 45
   article_timeout_seconds: 12
   partial_output_enabled: true

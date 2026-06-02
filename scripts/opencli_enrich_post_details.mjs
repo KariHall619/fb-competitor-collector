@@ -45,6 +45,7 @@ const REPLY_EXPAND_ROUNDS = Number(value("--reply-expand-rounds", configuredLead
 const RESOLVE_TIMEOUT_MS = Number(value("--resolve-timeout-ms", String(configuredLeadLink.resolveTimeoutSeconds * 1000)));
 const SYNTHETIC_TOOLTIP_WAIT_MS = Number(value("--synthetic-tooltip-wait-ms", String(configuredPerformance.syntheticTooltipWaitMs)));
 const REAL_MOUSE_TOOLTIP_WAIT_MS = Number(value("--real-mouse-tooltip-wait-ms", String(configuredPerformance.realMouseTooltipWaitMs)));
+const SESSION_LOCK_STALE_MS = Number(value("--session-lock-stale-ms", String(configuredPerformance.sessionLockStaleMs)));
 const ALLOWED_DOMAINS = value("--allowed-domains", configuredLeadLink.allowedDomains.join(","))
   .split(",")
   .map((item) => item.trim().replace(/^www\./i, "").toLowerCase())
@@ -101,12 +102,14 @@ function lockPathForSession(session) {
 
 function acquireSessionLock(session) {
   const lockPath = lockPathForSession(session);
-  try {
+  const tryAcquire = (recovered = false, previous = null) => {
     const fd = fs.openSync(lockPath, "wx");
     fs.writeFileSync(fd, JSON.stringify({ pid: PROCESS.pid || 0, started_at: new Date().toISOString() }));
     return {
       ok: true,
       lockPath,
+      recovered,
+      previous,
       release: () => {
         try {
           fs.closeSync(fd);
@@ -116,19 +119,108 @@ function acquireSessionLock(session) {
         } catch {}
       },
     };
-  } catch {
-    return {
-      ok: false,
-      lockPath,
-      release: () => {},
-    };
+  };
+  try {
+    return tryAcquire();
+  } catch {}
+  const stale = staleLockInfo(lockPath, SESSION_LOCK_STALE_MS);
+  if (stale.stale) {
+    try {
+      fs.unlinkSync(lockPath);
+      return tryAcquire(true, stale);
+    } catch (error) {
+      return {
+        ok: false,
+        lockPath,
+        stale,
+        error: String(error?.message || error),
+        release: () => {},
+      };
+    }
   }
+  return {
+    ok: false,
+    lockPath,
+    stale,
+    release: () => {},
+  };
+}
+
+function pidIsAlive(pid) {
+  const number = Number(pid || 0);
+  if (!Number.isInteger(number) || number <= 0) return false;
+  if (number === PROCESS.pid) return true;
+  try {
+    PROCESS.kill(number, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function staleLockInfo(lockPath, staleMs) {
+  const info = {
+    stale: false,
+    reason: "",
+    pid: 0,
+    started_at: "",
+    age_ms: 0,
+    stale_ms: staleMs,
+  };
+  try {
+    const raw = fs.readFileSync(lockPath, "utf8");
+    const parsed = JSON.parse(raw);
+    info.pid = Number(parsed.pid || 0);
+    info.started_at = String(parsed.started_at || "");
+  } catch {
+    info.stale = true;
+    info.reason = "unreadable_lock";
+    return info;
+  }
+  if (info.pid && !pidIsAlive(info.pid)) {
+    info.stale = true;
+    info.reason = "dead_pid";
+    return info;
+  }
+  const startedMs = Date.parse(info.started_at);
+  if (Number.isFinite(startedMs)) {
+    info.age_ms = Math.max(0, Date.now() - startedMs);
+    if (staleMs > 0 && info.age_ms >= staleMs) {
+      info.stale = true;
+      info.reason = "expired_lock";
+      return info;
+    }
+  }
+  if (!info.pid && !info.started_at) {
+    info.stale = true;
+    info.reason = "empty_lock";
+  }
+  return info;
+}
+
+function readPositiveNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function millisecondsFromConfigSeconds(value, fallbackSeconds) {
+  return readPositiveNumber(value, fallbackSeconds) * 1000;
+}
+
+function readNestedYamlNumber(body, key, fallback) {
+  const match = body.match(new RegExp(`^\\s+${key}:\\s*(.*)$`, "m"));
+  return match ? readPositiveNumber(match[1].trim(), fallback) : fallback;
+}
+
+function readNestedYamlMilliseconds(body, key, fallbackSeconds) {
+  return millisecondsFromConfigSeconds(readNestedYamlNumber(body, key, fallbackSeconds), fallbackSeconds);
 }
 
 function readPerformanceConfig(configPath) {
   const fallback = {
     syntheticTooltipWaitMs: 1200,
     realMouseTooltipWaitMs: 1800,
+    sessionLockStaleMs: 30 * 60 * 1000,
   };
   try {
     const resolved = path.resolve(configPath);
@@ -137,13 +229,10 @@ function readPerformanceConfig(configPath) {
     const section = text.match(/^performance:\s*\n([\s\S]*?)(?=^\S|\z)/m);
     if (!section) return fallback;
     const body = section[1];
-    const valueFor = (key) => {
-      const match = body.match(new RegExp(`^\\s+${key}:\\s*(.*)$`, "m"));
-      return match ? match[1].trim() : "";
-    };
     return {
-      syntheticTooltipWaitMs: Number(valueFor("synthetic_tooltip_wait_ms") || fallback.syntheticTooltipWaitMs),
-      realMouseTooltipWaitMs: Number(valueFor("real_mouse_tooltip_wait_ms") || fallback.realMouseTooltipWaitMs),
+      syntheticTooltipWaitMs: readNestedYamlNumber(body, "synthetic_tooltip_wait_ms", fallback.syntheticTooltipWaitMs),
+      realMouseTooltipWaitMs: readNestedYamlNumber(body, "real_mouse_tooltip_wait_ms", fallback.realMouseTooltipWaitMs),
+      sessionLockStaleMs: readNestedYamlMilliseconds(body, "detail_session_lock_stale_seconds", 30 * 60),
     };
   } catch {
     return fallback;
@@ -1496,6 +1585,7 @@ export {
   CURRENT_FILE,
   INVOKED_FILE,
   RUN_MAIN,
+  acquireSessionLock,
   buildCoverageSummary,
   buildPerformanceSummary,
   commentModeBrowserExpression,
