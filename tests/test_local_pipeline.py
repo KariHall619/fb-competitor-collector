@@ -2730,6 +2730,69 @@ def assert_enrichment_worker_scopes_tasks_to_account(tmp_path: Path) -> None:
     assert "Other" not in worker.stdout
 
 
+def assert_enrichment_worker_scope_includes_unknown_date_candidates(tmp_path: Path) -> None:
+    config = tmp_path / "settings_worker_unknown_date.yaml"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'worker-unknown-date.sqlite'}"
+        ),
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, upsert_post
+
+    conn = connect(tmp_path / "worker-unknown-date.sqlite")
+    known = normalize_post(
+        {
+            "account_name": "Target",
+            "account_url": "https://www.facebook.com/target",
+            "post_url": "https://www.facebook.com/target/posts/known",
+            "posted_date": "260602",
+            "post_time_text": "1h",
+            "story_summary": "Visible target candidate.",
+            "crawled_at": "2026-06-02T12:00:00",
+        }
+    )
+    unknown = normalize_post(
+        {
+            "account_name": "Target",
+            "account_url": "https://www.facebook.com/target",
+            "post_url": "https://www.facebook.com/target/posts/date-pending",
+            "story_summary": "Visible target candidate with unknown date.",
+            "crawled_at": "2026-06-02T12:00:00",
+        }
+    )
+    for post in (known, unknown):
+        upsert_post(conn, post)
+        enqueue_enrichment_tasks_for_posts(conn, [post])
+
+    worker = run(
+        [
+            PYTHON,
+            "scripts/enrichment_worker.py",
+            "--config",
+            str(config),
+            "--stages",
+            "detail_time",
+            "--date",
+            "260602",
+            "--account-url",
+            "https://www.facebook.com/target",
+            "--account-type",
+            "competitor",
+            "--limit",
+            "10",
+        ]
+    )
+    assert worker.returncode == 1, worker.stdout
+    data = json.loads(worker.stdout)
+    assert data["scope"]["enabled"] is True
+    assert data["scope"]["post_count"] == 2
+    assert data["input_tasks"] == 2
+
+
 def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> None:
     config = tmp_path / "settings_account_job.yaml"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
@@ -2785,6 +2848,85 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
     assert data["enrichment_completion"]["open_task_count"] > 0
     assert any(item["reason"] == "pending_enrichment" for item in data["next_commands"])
     assert "--resume-only" in data["next_commands"][0]["command"]
+
+
+def assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path: Path) -> None:
+    config = tmp_path / "settings_account_job_unknown_date.yaml"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'account-job-unknown-date.sqlite'}"
+        ),
+        encoding="utf-8",
+    )
+    sample = tmp_path / "unknown_date_job.json"
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Resume Page",
+                        "account_url": "https://www.facebook.com/resumepage",
+                        "post_url": "https://www.facebook.com/resumepage/posts/known-date",
+                        "posted_date": "260602",
+                        "posted_at": "2026年6月2日 10:00",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                        "story_summary": "Visible homepage candidate.",
+                    },
+                    {
+                        "account_name": "Resume Page",
+                        "account_url": "https://www.facebook.com/resumepage",
+                        "post_url": "https://www.facebook.com/resumepage/posts/date-pending",
+                        "story_summary": "Visible homepage candidate with date pending.",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
+    assert imported.returncode == 0, imported.stdout
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+    from store import connect
+
+    conn = connect(tmp_path / "account-job-unknown-date.sqlite")
+    scoped = run_account_job.scoped_posts(
+        conn,
+        account_name="Resume Page",
+        account_url="https://www.facebook.com/resumepage",
+        account_type="competitor",
+        dates=["260602"],
+    )
+    assert {post["post_url"] for post in scoped} == {
+        "https://facebook.com/resumepage/posts/known-date",
+        "https://facebook.com/resumepage/posts/date-pending",
+    }
+
+    job = run(
+        [
+            PYTHON,
+            "scripts/run_account_job.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/resumepage",
+            "--account-name",
+            "Resume Page",
+            "--target-date",
+            "260602",
+            "--resume-only",
+            "--status-only",
+            "--sync",
+            "--dry-run",
+        ]
+    )
+    assert job.returncode == 0, job.stdout
+    data = json.loads(job.stdout)
+    assert data["post_count"] == 2
+    assert data["feishu_sync"]["output_candidates"] == 2
 
 
 def assert_run_account_job_expected_coverage_marks_missing_posts() -> None:
@@ -3313,10 +3455,12 @@ def main() -> int:
         assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path)
         assert_stale_running_enrichment_tasks_are_recovered(tmp_path)
         assert_enrichment_worker_scopes_tasks_to_account(tmp_path)
+        assert_enrichment_worker_scope_includes_unknown_date_candidates(tmp_path)
         assert_enrichment_worker_article_cache_and_summary(tmp_path)
         assert_story_summary_audit_downgrades_invalid_rows(tmp_path)
         assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path)
         assert_run_account_job_resume_status_reports_incomplete(tmp_path)
+        assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path)
         assert_run_account_job_expected_coverage_marks_missing_posts()
         assert_run_account_job_blocks_auth_before_capture(tmp_path)
         assert_run_account_job_promotes_discover_coverage_status()

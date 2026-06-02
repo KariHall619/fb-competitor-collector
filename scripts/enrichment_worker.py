@@ -257,6 +257,7 @@ def main() -> int:
             date=args.date,
             start_date=args.start_date,
             end_date=args.end_date,
+            include_unknown_date=bool(args.date or args.start_date or args.end_date),
             account_name=args.account_name,
             account_url=args.account_url,
             account_type=args.account_type,

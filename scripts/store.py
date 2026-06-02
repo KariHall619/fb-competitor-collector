@@ -730,6 +730,7 @@ def query_posts(
     date: str = "",
     start_date: str = "",
     end_date: str = "",
+    include_unknown_date: bool = False,
     account_name: str = "",
     account_url: str = "",
     account_type: str = "",
@@ -739,15 +740,25 @@ def query_posts(
 ) -> list[dict[str, Any]]:
     clauses: list[str] = []
     params: list[Any] = []
+    date_clauses: list[str] = []
+    date_params: list[Any] = []
     if date:
-        clauses.append("posted_date = ?")
-        params.append(date)
-    if start_date:
-        clauses.append("posted_date >= ?")
-        params.append(start_date)
-    if end_date:
-        clauses.append("posted_date <= ?")
-        params.append(end_date)
+        date_clauses.append("posted_date = ?")
+        date_params.append(date)
+    else:
+        if start_date:
+            date_clauses.append("posted_date >= ?")
+            date_params.append(start_date)
+        if end_date:
+            date_clauses.append("posted_date <= ?")
+            date_params.append(end_date)
+    if date_clauses:
+        date_expr = " AND ".join(date_clauses)
+        if include_unknown_date:
+            clauses.append(f"(({date_expr}) OR posted_date IS NULL OR posted_date = '')")
+        else:
+            clauses.append(date_expr)
+        params.extend(date_params)
     if account_name:
         clauses.append("account_name = ?")
         params.append(account_name)

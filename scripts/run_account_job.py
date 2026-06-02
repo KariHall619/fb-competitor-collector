@@ -166,6 +166,7 @@ def scoped_posts(
         for post in query_posts(
             conn,
             date=date,
+            include_unknown_date=bool(account_url or account_name),
             account_name=account_name,
             account_url=account_url,
             account_type=account_type,
@@ -175,7 +176,7 @@ def scoped_posts(
                 by_key[str(key)] = post
     if not by_key and account_url:
         for post in query_posts(conn, account_url=account_url, account_type=account_type):
-            if dates and post.get("posted_date") not in set(dates):
+            if dates and post.get("posted_date") and post.get("posted_date") not in set(dates):
                 continue
             key = post.get("canonical_post_url") or post.get("post_url")
             if key:
