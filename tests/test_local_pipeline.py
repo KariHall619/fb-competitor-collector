@@ -878,6 +878,7 @@ exit 0
     assert import_data["complete"] is False
     assert import_data["stage"] == "feishu_auth_preflight"
     assert "next_actions" in import_data
+    assert import_data["completion_blockers"][0]["code"] == "blocked_auth"
 
     filter_cmd = run([PYTHON, "scripts/filter_posts.py", "--config", str(config), "--sync"])
     assert filter_cmd.returncode == 1, filter_cmd.stdout
@@ -886,6 +887,7 @@ exit 0
     assert filter_data["feishu_sync"]["complete"] is False
     assert filter_data["feishu_sync"]["stage"] == "feishu_auth_preflight"
     assert "next_actions" in filter_data["feishu_sync"]
+    assert filter_data["feishu_sync"]["completion_blockers"][0]["code"] == "blocked_auth"
 
     sync_cmd = run([PYTHON, "scripts/sync_feishu.py", "--config", str(config)])
     assert sync_cmd.returncode == 1, sync_cmd.stdout
@@ -894,6 +896,7 @@ exit 0
     assert sync_data["complete"] is False
     assert sync_data["stage"] == "feishu_auth_preflight"
     assert "next_actions" in sync_data
+    assert sync_data["completion_blockers"][0]["code"] == "blocked_auth"
 
 
 def assert_import_existing_result_reports_structured_input_failures(tmp_path: Path) -> None:

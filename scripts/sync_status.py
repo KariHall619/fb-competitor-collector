@@ -30,6 +30,18 @@ def blocked_auth_result(message: str, error: str) -> dict[str, Any]:
         "next_actions": [
             "完成飞书用户授权或等待自动刷新恢复后，重新运行同一命令；本次未执行 Facebook 采集、导入或飞书写入。"
         ],
+        "completion_blockers": [
+            {
+                "code": "blocked_auth",
+                "label": "飞书授权阻塞",
+                "severity": "hard_blocker",
+                "priority": 0,
+                "recoverable": True,
+                "message": message,
+                "next_action": "完成飞书用户授权或等待自动刷新恢复后，重新运行同一命令。",
+                "metrics": {"stage": "feishu_auth_preflight"},
+            }
+        ],
     }
 
 
