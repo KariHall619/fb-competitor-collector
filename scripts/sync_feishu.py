@@ -11,7 +11,7 @@ from config_loader import load_config
 from field_schema import configured_output_headers, output_row_for_headers
 from lark_io import ensure_user_identity, write_rows
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review, ready_for_output
-from store import all_posts, connect
+from store import all_posts, connect, mark_output_synced
 from sync_status import annotate_sync_result, enrichment_completion_summary
 
 
@@ -121,6 +121,8 @@ def sync_posts(
     rows = [output_row_for_headers(post, output_headers) for post in ready_posts]
     headers = output_headers if mode == "overwrite" else None
     result = write_rows(config, sheet_key, rows, headers=headers, mode=mode, dry_run=dry_run)
+    if result.get("ok") and conn is not None and not dry_run:
+        mark_output_synced(conn, ready_posts)
     result["ready_for_output"] = len(ready_posts)
     result["needs_enrichment_skipped"] = len(skipped_posts)
     if conn is not None:

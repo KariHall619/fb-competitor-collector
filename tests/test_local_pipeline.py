@@ -1171,6 +1171,72 @@ def assert_sync_status_marks_incomplete_ledger(tmp_path: Path) -> None:
     assert any("覆盖未完成" in action for action in completion["next_actions"])
 
 
+def assert_sync_feishu_strict_marks_ready_rows_synced(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import sync_feishu
+    from models import normalize_post
+    from store import connect, row_for_post, upsert_post
+
+    original_write_rows = sync_feishu.write_rows
+    conn = connect(tmp_path / "strict-sync-mark.sqlite")
+    ready = normalize_post(
+        {
+            "account_name": "Ready Page",
+            "account_url": "https://www.facebook.com/readypage",
+            "post_url": "https://www.facebook.com/readypage/posts/ready",
+            "posted_at": "2026年6月2日 10:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/ready",
+            "landing_url": "https://story.example/ready",
+            "lead_url_raw": "https://story.example/ready",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "story_summary": VALID_CN_SUMMARY,
+            "summary_source": "article",
+            "likes": 20,
+            "comments": 3,
+            "shares": 1,
+            "post_type": "图文",
+        }
+    )
+    upsert_post(conn, ready)
+    stored_ready = row_for_post(conn, ready)
+    assert stored_ready is not None
+    incomplete = normalize_post(
+        {
+            "account_name": "Ready Page",
+            "account_url": "https://www.facebook.com/readypage",
+            "post_url": "https://www.facebook.com/readypage/posts/incomplete",
+            "story_summary": "Visible homepage candidate.",
+        }
+    )
+    upsert_post(conn, incomplete)
+    stored_incomplete = row_for_post(conn, incomplete)
+    assert stored_incomplete is not None
+    config = {
+        "feishu": {
+            "sheets": {"all_posts": "FB竞品帖子链接"},
+            "field_schema": {"output_headers": ["账号", "帖子链接", "是否采用"]},
+        }
+    }
+    try:
+        sync_feishu.write_rows = lambda *_args, **_kwargs: {"ok": True, "rows": 1, "mode": "append"}
+        strict = sync_feishu.sync_posts(config, [stored_ready], "all_posts", "append", False, audit=False, conn=conn)
+        assert strict["ok"] is True
+        synced = row_for_post(conn, ready)
+        assert synced is not None
+        assert synced["output_status"] == "output_synced"
+
+        audit = sync_feishu.sync_posts(config, [stored_incomplete], "all_posts", "append", False, audit=True, conn=conn)
+        assert audit["ok"] is True
+        still_incomplete = row_for_post(conn, incomplete)
+        assert still_incomplete is not None
+        assert still_incomplete["output_status"] != "output_synced"
+    finally:
+        sync_feishu.write_rows = original_write_rows
+
+
 def assert_strict_sync_completion_uses_full_candidate_scope(tmp_path: Path) -> None:
     config = tmp_path / "settings_strict_scope.yaml"
     sample = tmp_path / "strict_scope.json"
@@ -3436,6 +3502,7 @@ def main() -> int:
         assert_sqlite_upsert_preserves_enriched_fields(tmp_path)
         assert_field_audit_marks_refetchable_missing_fields(tmp_path)
         assert_sync_status_marks_incomplete_ledger(tmp_path)
+        assert_sync_feishu_strict_marks_ready_rows_synced(tmp_path)
         assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path)
         assert_strict_sync_completion_uses_full_candidate_scope(tmp_path)
         assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path)
