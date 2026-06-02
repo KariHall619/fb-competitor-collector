@@ -859,6 +859,85 @@ exit 0
     assert "next_actions" in sync_data
 
 
+def assert_import_existing_result_reports_structured_input_failures(tmp_path: Path) -> None:
+    config = tmp_path / "settings_import_failures.yaml"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'import-failures.sqlite'}"
+        ),
+        encoding="utf-8",
+    )
+
+    cases: list[tuple[str, Path]] = [
+        ("missing", tmp_path / "missing.json"),
+        ("malformed_json", tmp_path / "malformed.json"),
+        ("bad_shape", tmp_path / "bad_shape.json"),
+        ("unsupported_suffix", tmp_path / "unsupported.txt"),
+    ]
+    cases[1][1].write_text('{"posts": [', encoding="utf-8")
+    cases[2][1].write_text(json.dumps({"posts": {"not": "a-list"}}), encoding="utf-8")
+    cases[3][1].write_text("post_url=https://www.facebook.com/x/posts/1", encoding="utf-8")
+
+    for case_name, input_path in cases:
+        result = run(
+            [
+                PYTHON,
+                "scripts/import_existing_result.py",
+                "--config",
+                str(config),
+                "--input",
+                str(input_path),
+                "--no-sync",
+            ]
+        )
+        assert result.returncode == 1, f"{case_name}: {result.stdout}\n{result.stderr}"
+        assert "Traceback" not in result.stderr
+        data = json.loads(result.stdout)
+        assert data["ok"] is False
+        assert data["stage"] == "input_load"
+        assert data["run_status"] == "import_failed"
+        assert data["complete"] is False
+        assert data["input_path"] == str(input_path)
+        assert data["config_path"] == str(config)
+        assert data["next_actions"]
+
+
+def assert_prepare_capture_reports_structured_input_failures(tmp_path: Path) -> None:
+    output = tmp_path / "prepared_failures.json"
+    cases: list[tuple[str, Path]] = [
+        ("missing", tmp_path / "missing_raw.json"),
+        ("malformed_json", tmp_path / "malformed_raw.json"),
+        ("bad_shape", tmp_path / "bad_shape_raw.json"),
+    ]
+    cases[1][1].write_text('{"posts": [', encoding="utf-8")
+    cases[2][1].write_text(json.dumps({"posts": {"not": "a-list"}}), encoding="utf-8")
+
+    for case_name, input_path in cases:
+        result = run(
+            [
+                PYTHON,
+                "scripts/prepare_capture_result.py",
+                "--input",
+                str(input_path),
+                "--output",
+                str(output),
+                "--target-date",
+                "260603",
+            ]
+        )
+        assert result.returncode == 1, f"{case_name}: {result.stdout}\n{result.stderr}"
+        assert "Traceback" not in result.stderr
+        data = json.loads(result.stdout)
+        assert data["ok"] is False
+        assert data["stage"] == "input_load"
+        assert data["run_status"] == "prepare_failed"
+        assert data["complete"] is False
+        assert data["input_path"] == str(input_path)
+        assert data["output_path"] == str(output)
+        assert data["next_actions"]
+
+
 def assert_check_env_prefers_opencli_route() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from check_env import recommended_capture_route
@@ -5023,6 +5102,18 @@ def assert_expected_coverage_marks_missing_posts() -> None:
     assert "期望至少 13 条" in expected["message"]
     assert "10h" in checked["coverage"]["message"]
 
+    normalized = coverage_expectations.expected_coverage_check(
+        {
+            "post_count": 3,
+            "snapshots": [{"visible_time_texts": ["38m", "1h", "2 小时"]}],
+        },
+        expected_post_count=0,
+        expected_labels=coverage_expectations.split_expected_labels("38 min,1 hour ago,2小时"),
+    )
+    assert normalized["ok"] is True
+    assert normalized["matched_labels"] == ["38 min", "1 hour ago", "2小时"]
+    assert normalized["missing_labels"] == []
+
     clean = coverage_expectations.apply_expected_coverage(payload, expected_post_count=0, expected_labels=[])
     assert clean == payload
 
@@ -5803,6 +5894,8 @@ def main() -> int:
         assert_sqlite_upsert_does_not_protect_internal_lead_links(tmp_path)
         assert_field_audit_marks_refetchable_missing_fields(tmp_path)
         assert_cli_feishu_auth_blockers_report_run_status(tmp_path)
+        assert_import_existing_result_reports_structured_input_failures(tmp_path)
+        assert_prepare_capture_reports_structured_input_failures(tmp_path)
         assert_sync_status_marks_incomplete_ledger(tmp_path)
         assert_sync_status_promotes_summary_only_work(tmp_path)
         assert_sync_status_prioritizes_auto_work_over_summary(tmp_path)

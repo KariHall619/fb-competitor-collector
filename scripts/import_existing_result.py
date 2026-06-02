@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import sqlite3
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +21,39 @@ from sync_status import annotate_sync_result, blocked_auth_result, enrichment_co
 from lark_io import ensure_user_identity, write_rows
 
 
+def import_failed_result(
+    *,
+    stage: str,
+    message: str,
+    error: str,
+    input_path: str | Path | None = None,
+    config_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Return a machine-readable import failure payload for resumable callers."""
+
+    payload: dict[str, Any] = {
+        "ok": False,
+        "stage": stage,
+        "run_status": "import_failed",
+        "complete": False,
+        "message": message,
+        "error": error,
+        "next_actions": [
+            "修复输入文件或配置后重新运行同一导入/同步命令；本次未完成本地入库或飞书写入。"
+        ],
+    }
+    if input_path is not None:
+        payload["input_path"] = str(input_path)
+    if config_path is not None:
+        payload["config_path"] = str(config_path)
+    return payload
+
+
 def load_records(path: str | Path) -> list[dict[str, Any]]:
     p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Input file not found: {p}")
+    records: list[Any]
     if p.suffix.lower() == ".json":
         data = json.loads(p.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -31,7 +63,12 @@ def load_records(path: str | Path) -> list[dict[str, Any]]:
                 data = data["items"]
             else:
                 data = [data]
-        return list(data)
+        if not isinstance(data, list):
+            raise ValueError("JSON input must be an object, or a list under posts/items.")
+        records = data
+        if not all(isinstance(item, dict) for item in records):
+            raise ValueError("Every input record must be a JSON object.")
+        return records
     if p.suffix.lower() == ".csv":
         with p.open(newline="", encoding="utf-8-sig") as handle:
             return list(csv.DictReader(handle))
@@ -40,6 +77,8 @@ def load_records(path: str | Path) -> list[dict[str, Any]]:
 
 def load_metadata(path: str | Path) -> dict[str, Any]:
     p = Path(path)
+    if not p.exists():
+        return {}
     if p.suffix.lower() != ".json":
         return {}
     data = json.loads(p.read_text(encoding="utf-8"))
@@ -62,7 +101,23 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config)
+    except (FileNotFoundError, JSONDecodeError, ValueError) as exc:
+        print(
+            json.dumps(
+                import_failed_result(
+                    stage="config_load",
+                    message="配置文件读取失败；已在导入、写库和飞书同步前停止。",
+                    error=str(exc),
+                    config_path=args.config,
+                    input_path=args.input,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 1
     real_feishu_write_requested = (
         not args.dry_run
         and not args.no_sync
@@ -91,22 +146,40 @@ def main() -> int:
         "account_type": args.account_type,
         "source_skill": args.source_skill,
     }
-    raw_records = load_records(args.input)
-    metadata = load_metadata(args.input)
-    posts = [normalize_post(record, defaults) for record in raw_records]
+    try:
+        raw_records = load_records(args.input)
+        metadata = load_metadata(args.input)
+        posts = [normalize_post(record, defaults) for record in raw_records]
+    except (FileNotFoundError, JSONDecodeError, UnicodeDecodeError, ValueError, TypeError) as exc:
+        print(
+            json.dumps(
+                import_failed_result(
+                    stage="input_load",
+                    message="输入结果文件读取或解析失败；已在本地入库和飞书同步前停止。",
+                    error=str(exc),
+                    input_path=args.input,
+                    config_path=args.config,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 1
     conn = connect(config.get("database_path", "data/posts.sqlite"))
     try:
         result = upsert_posts(conn, posts)
     except sqlite3.OperationalError as exc:
+        payload = import_failed_result(
+            stage="sqlite_write",
+            message="本地内容库不可写，已停止导入；请确认当前执行环境有项目目录写权限。",
+            error=str(exc),
+            input_path=args.input,
+            config_path=args.config,
+        )
+        payload["database_path"] = config.get("database_path", "data/posts.sqlite")
         print(
             json.dumps(
-                {
-                    "ok": False,
-                    "stage": "sqlite_write",
-                    "error": str(exc),
-                    "database_path": config.get("database_path", "data/posts.sqlite"),
-                    "message": "本地内容库不可写，已停止导入；请确认当前执行环境有项目目录写权限。",
-                },
+                payload,
                 ensure_ascii=False,
                 indent=2,
             )

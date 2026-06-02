@@ -50,6 +50,7 @@ Map common requests as follows:
   - Ask the user to keep the target Facebook account page open in normal Chrome if no matching tab is available.
   - Treat relative labels such as `3h`, `12h`, and `1d` as homepage candidate-window clues only.
   - If the user says they can see a known checklist such as “13 条” or `38m,1h,2h...`, pass `--expected-post-count` and/or `--expected-labels` into `run_account_job.py`; do not call the run complete when the expected coverage is missing.
+  - Expected labels can use common variants such as `1h`, `1 hour ago`, `1 小时`, or `1小时`; the coverage check normalizes these for matching.
   - If extraction reports `capture_blocked`, `login_required`, or `visitor_preview`, stop immediately and ask for human intervention.
   - If the run is interrupted by token refresh, OpenCLI recovery, or Codex context changes, use the emitted `next_commands` first, or run the same `run_account_job.py` command again with `--resume-only --force-recover-running` when appropriate. Do not manually write ledger rows and call the job finished while enrichment is still pending.
   - For automation or Codex-driven chaining, add `--fail-on-incomplete` so a non-`complete` `run_status` returns a nonzero exit code instead of being mistaken for a finished job.

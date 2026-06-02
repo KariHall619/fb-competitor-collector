@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 from datetime import datetime
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,45 @@ from pipeline_status import crawl_status_for, output_status_for
 
 
 MEDIA_LINK_RE = re.compile(r"facebook\.com/(?:photo(?:\.php|/)|reel/|watch/|[^/]+/videos/|videos/)", re.I)
+
+
+def prepare_failed_result(
+    *,
+    stage: str,
+    message: str,
+    error: str,
+    input_path: str | Path | None = None,
+    output_path: str | Path | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ok": False,
+        "stage": stage,
+        "run_status": "prepare_failed",
+        "complete": False,
+        "message": message,
+        "error": error,
+        "next_actions": [
+            "修复 OpenCLI 原始抓取结果结构后，从账号主页顶部重新运行 run_account_job.py；本次未生成可入库候选。"
+        ],
+    }
+    if input_path is not None:
+        payload["input_path"] = str(input_path)
+    if output_path is not None:
+        payload["output_path"] = str(output_path)
+    return payload
+
+
+def load_raw_posts(path: str | Path) -> tuple[dict[str, Any] | list[dict[str, Any]], list[dict[str, Any]]]:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Input file not found: {p}")
+    payload = json.loads(p.read_text(encoding="utf-8"))
+    raw_posts = payload.get("posts") if isinstance(payload, dict) else payload
+    if not isinstance(raw_posts, list):
+        raise ValueError("Raw capture input must be a list, or an object with a posts list.")
+    if not all(isinstance(item, dict) for item in raw_posts):
+        raise ValueError("Every raw capture post must be a JSON object.")
+    return payload, raw_posts
 
 
 def clean_story_placeholder(raw: dict[str, Any]) -> str:
@@ -224,8 +264,23 @@ def main() -> int:
     parser.add_argument("--account-type", default="competitor")
     args = parser.parse_args()
 
-    payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
-    raw_posts = payload.get("posts") if isinstance(payload, dict) else payload
+    try:
+        payload, raw_posts = load_raw_posts(args.input)
+    except (FileNotFoundError, JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        print(
+            json.dumps(
+                prepare_failed_result(
+                    stage="input_load",
+                    message="OpenCLI 原始抓取结果读取或解析失败；已在标准化和入库前停止。",
+                    error=str(exc),
+                    input_path=args.input,
+                    output_path=args.output,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 1
     coverage_note = coverage_note_from_payload(payload if isinstance(payload, dict) else {})
     defaults = {
         "account_name": args.account_name,
@@ -239,7 +294,19 @@ def main() -> int:
     media_candidates: list[dict[str, Any]] = []
     coverage_warnings: list[dict[str, Any]] = []
     for raw in raw_posts:
-        record, reason = prepare_record(raw, defaults, args.target_date)
+        try:
+            record, reason = prepare_record(raw, defaults, args.target_date)
+        except Exception as exc:
+            rejected.append(
+                {
+                    "reason": "prepare_record_error",
+                    "post_url": raw.get("post_url"),
+                    "post_time_text": raw.get("post_time_text"),
+                    "error": str(exc),
+                    "message": "单条候选标准化失败；已跳过该候选并继续处理其它已发现帖子。",
+                }
+            )
+            continue
         if record:
             prepared.append(record)
             if is_media_link(raw):
