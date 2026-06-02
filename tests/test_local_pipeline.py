@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -28,12 +29,47 @@ class QuietHTTPRequestHandler(SimpleHTTPRequestHandler):
         return
 
 
+class OpenCLIStatusHandler(SimpleHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path != "/status":
+            self.send_response(404)
+            self.end_headers()
+            return
+        payload = {
+            "ok": True,
+            "daemonVersion": "1.8.1",
+            "extensionConnected": True,
+            "profileRequired": False,
+            "profileDisconnected": False,
+            "profiles": [{"id": "test", "connected": True}],
+            "pending": 0,
+            "commandResultUnknown": 0,
+            "port": self.server.server_port,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
 def start_static_http_server(directory: Path) -> tuple[ThreadingHTTPServer, str]:
     handler = partial(QuietHTTPRequestHandler, directory=str(directory))
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, f"http://127.0.0.1:{server.server_port}"
+
+
+def start_opencli_status_server() -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), OpenCLIStatusHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
 
 
 def assert_url_canonicalization() -> None:
@@ -4217,9 +4253,11 @@ def assert_run_capture_pipeline_applies_expected_coverage(tmp_path: Path) -> Non
     fake_bin = tmp_path / "bin"
     fake_opencli = tmp_path / "fake-opencli"
     db_path = tmp_path / "capture-expected.sqlite"
+    opencli_status = start_opencli_status_server()
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
     text = config.read_text(encoding="utf-8")
     text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
     text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
     config.write_text(text, encoding="utf-8")
     fake_opencli.write_text(
@@ -4259,27 +4297,32 @@ print(json.dumps(payload, ensure_ascii=False))
         encoding="utf-8",
     )
     (fake_bin / "node").chmod(0o755)
-    env = {"PATH": f"{fake_bin}:{ROOT}:{tmp_path}"}
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
 
-    result = run(
-        [
-            PYTHON,
-            "scripts/run_capture_pipeline.py",
-            "--config",
-            str(config),
-            "--account-url",
-            "https://www.facebook.com/expectedpage",
-            "--account-name",
-            "Expected Page",
-            "--target-date",
-            "260603",
-            "--expected-post-count",
-            "13",
-            "--expected-labels",
-            "38m,1h,2h,10h",
-        ],
-        env=env,
-    )
+    try:
+        result = run(
+            [
+                PYTHON,
+                "scripts/run_capture_pipeline.py",
+                "--config",
+                str(config),
+                "--account-url",
+                "https://www.facebook.com/expectedpage",
+                "--account-name",
+                "Expected Page",
+                "--target-date",
+                "260603",
+                "--expected-post-count",
+                "13",
+                "--expected-labels",
+                "38m,1h,2h,10h",
+            ],
+            env=env,
+        )
+    finally:
+        opencli_status.shutdown()
+        opencli_status.server_close()
     assert result.returncode == 0, result.stdout
     data = json.loads(result.stdout)
     assert data["run_status"] == "coverage_incomplete"
