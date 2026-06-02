@@ -2355,7 +2355,8 @@ if (postKey(first) !== postKey(duplicate)) {
   process.exit(2);
 }
 if (!validCandidate(first)) process.exit(3);
-if (validCandidate({ post_url: first.post_url, story_summary: 'short' })) process.exit(4);
+if (!validCandidate({ post_url: first.post_url, story_summary: 'short' })) process.exit(4);
+if (validCandidate({ story_summary: 'short text without any post URL' })) process.exit(5);
 """
     result = run(["node", "--input-type=module", "-e", js])
     assert result.returncode == 0, result.stderr or result.stdout

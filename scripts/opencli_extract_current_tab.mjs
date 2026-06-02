@@ -74,7 +74,6 @@ function postKey(post) {
 function validCandidate(candidate) {
   const text = `${candidate.story_summary || ""} ${candidate.raw_text || ""}`;
   if (!candidate.post_url) return false;
-  if (!text || text.length < 40) return false;
   if (/^\s*Honor Reward\s+9\.9 万次赞/i.test(text)) return false;
   return true;
 }
