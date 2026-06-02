@@ -58,7 +58,9 @@ def audit_output_candidates(posts: list[dict[str, Any]]) -> tuple[list[dict[str,
     candidates = [
         post
         for post in posts
-        if post.get("post_url") and post.get("output_status") not in {"blocked", "output_synced"}
+        if post.get("post_url")
+        and (post.get("account_name") or post.get("account_url"))
+        and post.get("output_status") not in {"blocked", "output_synced"}
     ]
     skipped = [post for post in posts if post not in candidates]
     return candidates, skipped

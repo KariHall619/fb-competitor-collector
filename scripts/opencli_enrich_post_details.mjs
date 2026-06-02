@@ -9,6 +9,7 @@
 
 import { createRequire } from "node:module";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -90,6 +91,37 @@ function readLeadLinkConfig(configPath) {
     };
   } catch {
     return fallback;
+  }
+}
+
+function lockPathForSession(session) {
+  const safe = String(session || "default").replace(/[^a-z0-9_.-]+/gi, "_");
+  return path.join(os.tmpdir(), `fb-competitor-opencli-${safe}.lock`);
+}
+
+function acquireSessionLock(session) {
+  const lockPath = lockPathForSession(session);
+  try {
+    const fd = fs.openSync(lockPath, "wx");
+    fs.writeFileSync(fd, JSON.stringify({ pid: PROCESS.pid || 0, started_at: new Date().toISOString() }));
+    return {
+      ok: true,
+      lockPath,
+      release: () => {
+        try {
+          fs.closeSync(fd);
+        } catch {}
+        try {
+          fs.unlinkSync(lockPath);
+        } catch {}
+      },
+    };
+  } catch {
+    return {
+      ok: false,
+      lockPath,
+      release: () => {},
+    };
   }
 }
 
@@ -1173,6 +1205,18 @@ async function main() {
   const posts = payload.posts || [];
   const inputPostCount = posts.length;
   const rawContext = loadOpencliContext();
+  const sessionLock = acquireSessionLock(rawContext.session);
+  if (!sessionLock.ok) {
+    outputJson({
+      ok: false,
+      route: "opencli_browser_bridge",
+      status: "opencli_session_busy",
+      action_required: "retry_later",
+      message: "同一个 OpenCLI session 正在执行详情页导航。为避免并行探针互相覆盖页面，已拒绝本次详情富化，请等待上一轮结束后重试。",
+      lock_path: sessionLock.lockPath,
+    });
+    return 73;
+  }
   const openedTabTracker = createOpenedTabTracker({
     opencliCommand: rawContext.opencliCommand,
     session: rawContext.session,
@@ -1292,6 +1336,7 @@ async function main() {
     }
   } finally {
     tabCleanup = await openedTabTracker.closeAll();
+    sessionLock.release();
   }
   if (TARGET_DATE) {
     const kept = [];

@@ -172,13 +172,13 @@ filters:
 7. `prepare_capture_result.py` 标准化候选并保留 `needs_enrichment`；
 8. `opencli_enrich_post_details.mjs` 优先复用一个详情标签页确认精确时间、评论/回复引流链接和目标日期；单帖低打扰失败时回退到原来的新开详情页流程；
 9. `enrich_article_summaries.py` 抓取落地页材料，`export_summary_requests.py` 导出待 Codex 生成的中文概要请求，`apply_article_summaries.py` 写入 Codex 中文摘要；
-10. 只有 `output_quality.py` 判定为 `ready_for_output` 的记录才允许同步飞书。
+10. 普通 `--sync` 将已确认 Facebook 帖子候选写入飞书台账；缺字段用 `是否采用` 的 `待补抓：...` 标记。只有显式使用 `--strict-ready-only` 时，才只同步 `ready_for_output` 完整记录。
 
 采集阶段不得因为链接形态过早丢弃内容。`/posts/`、`story.php`、`permalink.php`、`reel`、`photo.php`、`watch`、`videos` 都先作为 FB 内容候选保存。父帖链接只作为优先去重依据；抓不到父帖时保留原始内容链接，后续再做相似度/人工复核去重。
 
-详情补全阶段会进入每条候选内容，先从时间 tooltip 或 DOM 属性确认精确发帖时间，再展开评论和评论回复，寻找账号主发的引流链接，并锚定当前主帖补互动数据和帖子类型。为了减少打扰，脚本优先复用一个详情标签页处理多条候选；如果复用标签页失败或采集结果变少，则对该帖子回退到原来的单帖新开详情页流程。只有当该链接最终解析到外部网站，并且精确时间、落地页摘要等字段齐全时，记录才进入 `ready_for_output` 并允许写入飞书最终表。字段不完整的有效候选仍先入库并保留为 `needs_enrichment`，后续继续补采。
+详情补全阶段会进入每条候选内容，先从时间 tooltip 或 DOM 属性确认精确发帖时间，再展开评论和评论回复，寻找账号主发的引流链接，并锚定当前主帖补互动数据和帖子类型。为了减少打扰，脚本优先复用一个详情标签页处理多条候选；如果复用标签页失败或采集结果变少，则对该帖子回退到原来的单帖新开详情页流程。字段完整时记录进入 `ready_for_output`；字段不完整的有效候选仍写入飞书台账并保留为 `needs_enrichment`，用 `待补抓：...` 标明缺口，后续补采后按帖子链接更新同一行。
 
-扩量提速后的补全任务状态保存在 SQLite `enrichment_tasks` 表中，按 `canonical_post_url + stage` 去重。`run_capture_pipeline.py` 先完成 discover/prepare/import，`enrichment_worker.py` 再按 `detail_time`, `lead_link`, `engagement`, `post_type`, `article_material` 阶段恢复执行；`summary` 阶段只校验是否已应用 Codex 中文概要，不会把标题、meta 描述或英文原文摘录伪装成概要。`partial_review` 可用于业务预览，正式 `--sync` 仍只同步 `ready_for_output`；`--sync-audit` 只用于显式审计/调试输出缺字段候选。
+扩量提速后的补全任务状态保存在 SQLite `enrichment_tasks` 表中，按 `canonical_post_url + stage` 去重。`run_capture_pipeline.py` 先完成 discover/prepare/import，`enrichment_worker.py` 再按 `detail_time`, `lead_link`, `engagement`, `post_type`, `article_material` 阶段恢复执行；`summary` 阶段只校验是否已应用 Codex 中文概要，不会把标题、meta 描述或英文原文摘录伪装成概要。正式 `--sync` 是台账 upsert，`--strict-ready-only` 才是只写 `ready_for_output` 完整行，`--sync-partial` 只用于不影响正式表的业务预览。
 
 已验证的时间流程：
 
@@ -341,7 +341,7 @@ python3 scripts/filter_posts.py --config config/settings.yaml --date 260521 --ac
 7. Codex 打开候选帖子详情页，确认精确 `posted_at`、评论/回复引流链接和落地页；
 8. Codex 基于导出的落地页材料生成中文故事概要，并通过 `apply_article_summaries.py` 应用；
 9. Codex 入库去重，字段不完整的候选保留为 `needs_enrichment`；
-10. Codex 只把 `ready_for_output` 且符合 A-K 表格格式的记录写入飞书输出表；
+10. Codex 将已确认 Facebook 帖子候选按 A-K 表格格式 upsert 到飞书输出表；缺字段候选用 `待补抓：...` 标记，完整候选保持 `ready_for_output` 质量状态；
 11. Codex 返回新增数、重复数、异常数、跳过补全数和飞书写入结果。
 
 ## 11. Mac/Windows 迁移

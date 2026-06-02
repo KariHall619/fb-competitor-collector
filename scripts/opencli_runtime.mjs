@@ -131,12 +131,16 @@ function defaultSession(config) {
 }
 
 function runOpencli(args, options = {}) {
-  const command = options.command || ["npx", "-y", "@jackwener/opencli"];
+  const rawCommand = options.command || ["npx", "-y", "@jackwener/opencli"];
+  let command = rawCommand;
+  let commandArgs = [...command.slice(1), ...args];
+  const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(String(command[0] || ""));
   const env = { ...process.env, ...(options.env || {}) };
   return new Promise((resolve) => {
-    const child = spawn(command[0], [...command.slice(1), ...args], {
+    const child = spawn(command[0], commandArgs, {
       env,
       stdio: ["ignore", "pipe", "pipe"],
+      shell: needsShell,
     });
     let stdout = "";
     let stderr = "";

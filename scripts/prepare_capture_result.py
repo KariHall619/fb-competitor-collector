@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from coverage_status import coverage_note_from_payload
 from models import (
     clean_article_url,
     clean_post_url,
@@ -203,7 +204,7 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
         "shares": parse_count(raw.get("shares") or raw.get("分享数")),
         "engagement_data": engagement,
         "crawl_status": "captured",
-        "coverage_note": raw.get("coverage_note") or "",
+        "coverage_note": raw.get("coverage_note") or defaults.get("coverage_note", ""),
         "crawled_at": crawled_at,
         "note": "；".join(note_parts),
         "raw_payload": raw,
@@ -225,11 +226,13 @@ def main() -> int:
 
     payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
     raw_posts = payload.get("posts") if isinstance(payload, dict) else payload
+    coverage_note = coverage_note_from_payload(payload if isinstance(payload, dict) else {})
     defaults = {
         "account_name": args.account_name,
         "account_url": args.account_url,
         "account_type": args.account_type,
         "source_skill": "fb-competitor-collector",
+        "coverage_note": coverage_note,
     }
     prepared: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -272,6 +275,8 @@ def main() -> int:
         "media_suspect_count": len(media_suspects),
         "covered_media_suspect_count": len(covered_media_suspects),
         "coverage_warning_count": len(coverage_warnings),
+        "coverage_note": coverage_note,
+        "coverage": payload.get("coverage", {}) if isinstance(payload, dict) else {},
         "media_suspects": media_suspects,
         "covered_media_suspects": covered_media_suspects,
         "coverage_warnings": coverage_warnings,

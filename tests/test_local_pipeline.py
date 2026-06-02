@@ -207,6 +207,84 @@ if (result.candidates[0].post_time_text !== '1d') {
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_dom_extractor_splits_multi_post_container() -> None:
+    script = """
+const { browserExpression } = require('./scripts/fb_dom_extractors');
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() { return this.innerText; }
+  get href() {
+    if (!this.attrs.href) return '';
+    return new URL(this.attrs.href, global.location.href).href;
+  }
+  getAttribute(name) { return this.attrs[name] || ''; }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a[href]') return node.tagName === 'A' && !!node.attrs.href;
+      if (current === 'h1') return node.tagName === 'H1';
+      if (current === 'h2') return node.tagName === 'H2';
+      if (current === 'article') return node.tagName === 'ARTICLE';
+      if (current === 'div[role="article"]') return node.tagName === 'DIV' && node.attrs.role === 'article';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+const postBlock = (id, time, story) => new Node('div', {}, [
+  new Node('a', { href: `/LessonsTaughtByLifepage/posts/${id}` }, [], time),
+  new Node('p', {}, [], story),
+  new Node('a', { href: `https://kaylestore.net/story-${id}` }, [], 'Read more'),
+  new Node('span', {}, [], 'Like'),
+  new Node('span', {}, [], 'Comment'),
+  new Node('span', {}, [], 'Share')
+]);
+const container = new Node('div', { role: 'article' }, [
+  postBlock('1001', '46m', 'Doctors reveal a breakfast habit that protects bones and joints.'),
+  postBlock('1002', '3h', 'A bride discovers a hidden document before her wedding and changes everything.'),
+  postBlock('1003', '4h', 'A daughter finds the truth about the family house and fights back.')
+]);
+const body = new Node('body', {}, [
+  new Node('h1', {}, [], 'Lessons Taught By Life'),
+  container
+]);
+global.document = {
+  title: 'Lessons Taught By Life | Facebook',
+  body,
+  querySelectorAll: (selector) => body.querySelectorAll(selector)
+};
+global.location = new URL('https://www.facebook.com/LessonsTaughtByLifepage');
+const result = eval(browserExpression(900));
+const urls = [...new Set(result.candidates.map((item) => item.post_url))];
+if (urls.length < 3) {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(1);
+}
+if (!result.candidates.some((item) => item.source_split === 'time_anchor')) {
+  console.error(JSON.stringify(result.candidates, null, 2));
+  process.exit(2);
+}
+"""
+    result = run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_dom_extractor_excludes_profile_shell_with_external_link() -> None:
     script = """
 const { browserExpression } = require('./scripts/fb_dom_extractors');
@@ -822,6 +900,11 @@ def assert_field_audit_marks_refetchable_missing_fields(tmp_path: Path) -> None:
     assert audit["refetch_stages"] == ["lead_link", "engagement", "post_type"]
     assert "待补抓：引流链接、评论数、分享数、点赞数异常低、帖子类型" == audit["field_audit_note"]
 
+    no_summary = {**missing, "story_summary": "", "summary_source": "pending_article_summary"}
+    no_summary_audit = audit_post_fields(no_summary, config)
+    assert "article_summary" in no_summary_audit["field_audit_reasons"]
+    assert "summary" in no_summary_audit["refetch_stages"]
+
     good = {
         **missing,
         "post_type": "图文",
@@ -829,6 +912,7 @@ def assert_field_audit_marks_refetchable_missing_fields(tmp_path: Path) -> None:
         "landing_url": "https://site.test/story",
         "lead_link_status": "qualified",
         "lead_link_source": "comment",
+        "summary_source": "article",
         "likes": 6,
         "comments": 3,
         "shares": 1,
@@ -864,6 +948,25 @@ def assert_audit_marker_is_written_to_adoption_status() -> None:
     assert output_row_for_headers(manual, headers)[1] == "采用"
 
 
+def assert_ledger_marker_includes_time_summary_and_coverage() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from field_schema import output_row_for_headers
+
+    headers = ["帖子链接", "发帖时间", "是否采用"]
+    post = {
+        "post_url": "https://facebook.com/example/posts/ledger",
+        "posted_at": "2026年6月2日 14:00",
+        "time_source": "relative_estimated",
+        "coverage_note": "本次覆盖不完整，需补抓。",
+        "field_audit_reasons": '["exact_time", "article_summary", "coverage"]',
+    }
+    assert output_row_for_headers(post, headers) == [
+        "https://facebook.com/example/posts/ledger",
+        "约2026年6月2日 14:00",
+        "待补抓：精确时间、文章概要、覆盖不足",
+    ]
+
+
 def assert_feishu_upsert_merges_rows_without_overwriting_manual_adoption() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from lark_io import merge_upsert_row
@@ -890,9 +993,10 @@ def assert_sync_feishu_audit_and_strict_modes() -> None:
     }
     incomplete = [
         {
+            "account_name": "Example Page",
             "post_url": "https://facebook.com/example/posts/incomplete",
             "output_status": "needs_enrichment",
-            "field_audit_reasons": '["lead_link"]',
+            "field_audit_reasons": '["exact_time", "lead_link", "article_summary"]',
         }
     ]
     audit = sync_feishu.sync_posts(config, incomplete, "all_posts", "append", True, audit=True)
@@ -900,12 +1004,64 @@ def assert_sync_feishu_audit_and_strict_modes() -> None:
     assert audit["dry_run"] is True
     assert audit["audit_output"] is True
     assert audit["output_candidates"] == 1
+    assert audit["keys"] == ["https://facebook.com/example/posts/incomplete"]
 
     strict = sync_feishu.sync_posts(config, incomplete, "all_posts", "append", True, audit=False)
     assert strict["ok"] is False
     assert strict["stage"] == "quality_gate"
     assert strict["ready_for_output"] == 0
     assert strict["needs_enrichment_skipped"] == 1
+
+
+def assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path: Path) -> None:
+    config = tmp_path / "settings_minimal_ledger.yaml"
+    sample = tmp_path / "minimal_ledger.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'minimal-ledger.sqlite'}"
+        ),
+        encoding="utf-8",
+    )
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Ledger Page",
+                        "account_url": "https://www.facebook.com/ledgerpage",
+                        "post_url": "https://www.facebook.com/ledgerpage/posts/minimal",
+                        "relative_time_text": "1h",
+                        "story_summary": "Visible candidate from homepage.",
+                        "crawled_at": "2026-06-02T14:00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    sync = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--sync", "--dry-run"])
+    assert sync.returncode == 0, sync.stdout
+    assert '"audit_output": true' in sync.stdout
+    assert '"output_candidates": 1' in sync.stdout
+    assert '"rows": 1' in sync.stdout
+
+    strict = run(
+        [
+            PYTHON,
+            "scripts/import_existing_result.py",
+            "--config",
+            str(config),
+            "--input",
+            str(sample),
+            "--sync",
+            "--strict-ready-only",
+            "--dry-run",
+        ]
+    )
+    assert strict.returncode == 1, strict.stdout
+    assert '"ready_for_output": 0' in strict.stdout
 
 
 def assert_sqlite_upsert_preserves_enriched_fields(tmp_path: Path) -> None:
@@ -1152,6 +1308,8 @@ def assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_p
             {
                 "posts": [
                     {
+                        "account_name": "Example Page",
+                        "account_url": "https://www.facebook.com/example",
                         "post_url": "https://www.facebook.com/example/posts/estimated",
                         "posted_at": "2026年5月27日 10:00",
                         "time_confirmed": True,
@@ -1845,11 +2003,12 @@ if (validCandidate({ post_url: first.post_url, story_summary: 'short' })) proces
 
 def assert_opencli_extract_has_under_capture_guards() -> None:
     script_text = (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
-    assert 'value("--max-snapshots", "16")' in script_text
-    assert 'value("--min-snapshots", "4")' in script_text
+    assert 'value("--max-snapshots", "32")' in script_text
+    assert 'value("--min-snapshots", "6")' in script_text
     assert "minSnapshotsReached" in script_text
     assert "noMovementCount" in script_text
     assert "coverage_incomplete" in script_text
+    assert "capture_complete" in script_text
     assert "已达到最大滚动快照数但最后一屏仍有新增候选" in script_text
 
 
@@ -2056,6 +2215,8 @@ def assert_thirteen_incomplete_candidates_are_imported_for_enrichment(tmp_path: 
         json.dumps(
             [
                 {
+                    "account_name": "Example Page",
+                    "account_url": "https://www.facebook.com/example",
                     "post_url": f"https://www.facebook.com/example/posts/incomplete-{index}",
                     "posted_at": "2026年6月1日 12:00",
                     "time_confirmed": True,
@@ -2548,11 +2709,13 @@ def main() -> int:
     assert_comments_and_shares_are_output_as_engagement()
     assert_field_schema_controls_output_rows()
     assert_audit_marker_is_written_to_adoption_status()
+    assert_ledger_marker_includes_time_summary_and_coverage()
     assert_feishu_upsert_merges_rows_without_overwriting_manual_adoption()
     assert_sync_feishu_audit_and_strict_modes()
     assert_generic_photo_canonical_is_recomputed()
     assert_mobile_dom_extractor_can_see_story_links()
     assert_dom_extractor_does_not_treat_story_clock_as_post_time()
+    assert_dom_extractor_splits_multi_post_container()
     assert_dom_extractor_excludes_profile_shell_with_external_link()
     assert_dom_extractor_blocks_visitor_preview()
     assert_dom_extractor_prefers_parent_post_over_photo_link()
@@ -2616,6 +2779,7 @@ def main() -> int:
         assert hot_after_many_data["count"] == 1, hot_after_many.stdout
         assert_sqlite_upsert_preserves_enriched_fields(tmp_path)
         assert_field_audit_marks_refetchable_missing_fields(tmp_path)
+        assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path)
         assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path)
         assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_path)
         assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path)

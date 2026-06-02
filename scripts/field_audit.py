@@ -8,12 +8,15 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from config_loader import deep_get
+from story_summary_policy import has_valid_story_summary
 
 
 DEFAULT_REQUIRED_ENGAGEMENT_FIELDS = ["likes", "comments", "shares"]
 DEFAULT_REQUIRED_POST_TYPES = ["图文", "视频", "仅图片", "仅文字"]
 SYSTEM_MARKER_PREFIX = "待补抓："
 COMMENT_LEAD_SOURCES = {"comment", "comment_reply"}
+ESTIMATED_TIME_SOURCES = {"relative_hour", "relative_estimated", "relative_label"}
+COVERAGE_INCOMPLETE_REASONS = {"coverage_blocked", "coverage_incomplete"}
 FACEBOOK_INTERNAL_HOSTS = {
     "facebook.com",
     "m.facebook.com",
@@ -25,16 +28,21 @@ FACEBOOK_INTERNAL_HOSTS = {
 }
 
 REASON_LABELS = {
+    "exact_time": "精确时间",
     "lead_link": "引流链接",
+    "article_summary": "文章概要",
     "likes": "点赞数",
     "comments": "评论数",
     "shares": "分享数",
     "likes_low": "点赞数异常低",
     "post_type": "帖子类型",
+    "coverage": "覆盖不足",
 }
 
 REASON_STAGES = {
+    "exact_time": "detail_time",
     "lead_link": "lead_link",
+    "article_summary": "summary",
     "likes": "engagement",
     "comments": "engagement",
     "shares": "engagement",
@@ -109,8 +117,16 @@ def _missing_number(post: dict[str, Any], field: str) -> bool:
 def audit_post_fields(post: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = audit_config(config)
     reasons: list[str] = []
+    if (
+        not post.get("posted_at")
+        or not post.get("time_confirmed")
+        or str(post.get("time_source") or "") in ESTIMATED_TIME_SOURCES
+    ):
+        reasons.append("exact_time")
     if cfg["assume_lead_link_exists"] and not has_qualified_audit_lead(post):
         reasons.append("lead_link")
+    if not has_valid_story_summary(post):
+        reasons.append("article_summary")
     for field in cfg["required_engagement_fields"]:
         if _missing_number(post, field):
             reasons.append(field)
@@ -123,6 +139,11 @@ def audit_post_fields(post: dict[str, Any], config: dict[str, Any] | None = None
         reasons.append("likes_low")
     if post.get("post_type") not in set(cfg["required_post_types"]):
         reasons.append("post_type")
+    if str(post.get("coverage_note") or "").strip() or any(
+        str(post.get(field) or "").strip() in COVERAGE_INCOMPLETE_REASONS
+        for field in ("coverage_status", "coverage_reason")
+    ):
+        reasons.append("coverage")
 
     ordered: list[str] = []
     for reason in reasons:

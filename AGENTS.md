@@ -31,6 +31,7 @@ This file is the first-stop project memory for future agents working in this rep
 - Homepage capture should avoid stopping on a few stable DOM snapshots while Facebook can still scroll. `opencli_extract_current_tab.mjs` uses a higher default snapshot budget, a minimum snapshot count, and scroll-movement guards; `coverage_incomplete=true` means the last allowed snapshot still found new candidates and the operator should raise `--max-snapshots` or retry from the page top.
 - SQLite upsert must be merge-oriented, not overwrite-oriented. Re-imported partial rows must not downgrade confirmed time, qualified comment/comment-reply lead links, external landing/article URLs, valid Chinese article summaries, engagement values, manual adoption decisions, or final statuses.
 - Missing or suspicious fields such as lead link, engagement, low likes, or post type can be marked with `待补抓：...` and queued for `lead_link`, `engagement`, or `post_type` refetch. These markers are operational audit hints, not permission to bypass the final quality gate.
+- The formal Feishu table is also the business capture ledger. If a Facebook post candidate is confirmed by URL and account context, normal sync should upsert it even when incomplete. Missing exact time, lead link, article summary, engagement, post type, or capture coverage is expressed in `是否采用` as `待补抓：...`; later enrichment updates the same row by post URL.
 
 ## Do Not Reintroduce
 
@@ -188,7 +189,7 @@ Sync candidates to the formal table and mark missing fields:
 python3 scripts/import_existing_result.py --config config/settings.yaml --input exports/prepared.json --sync --dry-run
 ```
 
-Strict ready-only sync:
+Strict ready-only sync, only when explicitly requested:
 
 ```bash
 python3 scripts/import_existing_result.py --config config/settings.yaml --input exports/ready.json --sync --strict-ready-only --dry-run

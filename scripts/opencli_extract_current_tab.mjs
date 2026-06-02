@@ -22,9 +22,9 @@ const { browserExpression } = require("./fb_dom_extractors.js");
 const { value } = extractArgs();
 const ACCOUNT_URL = value("--account-url", "");
 const MAX_TEXT = Number(value("--max-text", "1500"));
-const MAX_SNAPSHOTS = Number(value("--max-snapshots", "16"));
+const MAX_SNAPSHOTS = Number(value("--max-snapshots", "32"));
 const STABLE_SNAPSHOTS = Number(value("--stable-snapshots", "3"));
-const MIN_SNAPSHOTS = Number(value("--min-snapshots", "4"));
+const MIN_SNAPSHOTS = Number(value("--min-snapshots", "6"));
 const SCROLL_PIXELS = Number(value("--scroll-pixels", "1400"));
 const CURRENT_FILE = fileURLToPath(import.meta.url);
 const INVOKED_FILE = process.argv?.[1] ? path.resolve(process.argv[1]) : "";
@@ -230,6 +230,7 @@ async function main() {
   }
 
   const posts = capture.posts;
+  const captureComplete = !capture.coverage_blocked && !capture.coverage_incomplete;
 
   outputJson({
     ok: posts.length > 0,
@@ -243,12 +244,14 @@ async function main() {
     tab: tabResult.tab,
     raw_candidate_count: Math.max(0, ...capture.snapshots.map((item) => item.raw_candidate_count || 0)),
     post_count: posts.length,
+    capture_complete: captureComplete,
     coverage: {
       snapshot_count: capture.snapshots.length,
       stable_snapshot_count: capture.stable_snapshot_count,
       no_movement_snapshot_count: capture.no_movement_snapshot_count,
       coverage_blocked: capture.coverage_blocked,
       coverage_incomplete: capture.coverage_incomplete,
+      capture_complete: captureComplete,
       message: capture.coverage_incomplete
         ? "已达到最大滚动快照数但最后一屏仍有新增候选；可能还有更早帖子未覆盖，请提高 --max-snapshots 或继续从页面顶部重试。"
         : capture.coverage_blocked
