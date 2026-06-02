@@ -4816,6 +4816,85 @@ def assert_run_account_job_next_commands_force_recover_running() -> None:
     assert "--force-recover-running" in pending["command"]
 
 
+def assert_run_account_job_reports_worker_retry_later() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/retrylater",
+            "account_name": "Retry Later Page",
+            "account_type": "competitor",
+            "enrichment_limit": 10,
+        },
+    )()
+    original_run_command = run_account_job.run_command
+
+    class FakeWorker:
+        returncode = 0
+        stdout = json.dumps(
+            {
+                "ok": True,
+                "run_status": "incomplete_pending_tasks",
+                "retry_later": True,
+                "retry_later_reasons": ["detail navigation already running"],
+                "requeued": 2,
+                "failed": 0,
+            },
+            ensure_ascii=False,
+        )
+        stderr = ""
+
+    try:
+        run_account_job.run_command = lambda _command: FakeWorker()
+        worker_pass = run_account_job.run_worker_pass(args, target_dates=["260603"], pass_index=1)
+    finally:
+        run_account_job.run_command = original_run_command
+    assert worker_pass["ok"] is True
+    assert worker_pass["retry_later"] is True
+    assert worker_pass["retry_later_count"] == 2
+    assert worker_pass["retry_later_reasons"] == ["detail navigation already running"]
+    retry_summary = run_account_job.worker_retry_summary([worker_pass])
+    quality = run_account_job.account_job_quality_summary(
+        run_status="incomplete_pending_tasks",
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+        completion={"post_count": 2, "open_task_count": 2},
+        sync_result={"ok": True, "skipped": True, "run_status": "not_synced"},
+        worker_retry=retry_summary,
+    )
+    assert quality["worker_retry_later"] is True
+    assert quality["worker_retry_later_count"] == 2
+    assert quality["worker_retry_later_reasons"] == ["detail navigation already running"]
+
+    class FakeWorkerWithoutCount:
+        returncode = 0
+        stdout = json.dumps(
+            {
+                "ok": True,
+                "run_status": "incomplete_pending_tasks",
+                "retry_later": True,
+                "retry_later_reasons": ["opencli_session_busy"],
+                "failed": 0,
+            },
+            ensure_ascii=False,
+        )
+        stderr = ""
+
+    try:
+        run_account_job.run_command = lambda _command: FakeWorkerWithoutCount()
+        worker_pass = run_account_job.run_worker_pass(args, target_dates=["260603"], pass_index=2)
+    finally:
+        run_account_job.run_command = original_run_command
+    assert worker_pass["retry_later"] is True
+    assert worker_pass["retry_later_count"] == 0
+    retry_summary = run_account_job.worker_retry_summary([worker_pass])
+    assert retry_summary["retry_later"] is True
+    assert retry_summary["retry_later_count"] == 0
+
+
 def assert_run_account_job_summary_only_next_command_exports_requests() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import run_account_job
@@ -6800,6 +6879,7 @@ def main() -> int:
         assert_run_account_job_recovers_scoped_running_tasks(tmp_path)
         assert_run_account_job_does_not_recover_fresh_running_tasks(tmp_path)
         assert_run_account_job_next_commands_force_recover_running()
+        assert_run_account_job_reports_worker_retry_later()
         assert_run_account_job_summary_only_next_command_exports_requests()
         assert_run_account_job_prioritizes_auto_work_before_summary_export()
         assert_run_capture_pipeline_uses_completion_status_helpers()

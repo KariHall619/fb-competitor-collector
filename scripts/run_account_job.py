@@ -374,6 +374,16 @@ def run_worker_pass(args: argparse.Namespace, *, target_dates: list[str], pass_i
         results.append(payload)
     failed = [item for item in results if item.get("returncode") not in {0, 1}]
     human_intervention = [item for item in results if needs_human_intervention(item)]
+    retry_later_seen = any(bool(item.get("retry_later")) for item in results)
+    retry_later_count = sum(_int_metric(item.get("requeued")) for item in results if item.get("retry_later"))
+    retry_later_reasons: list[str] = []
+    for item in results:
+        if not item.get("retry_later"):
+            continue
+        for reason in item.get("retry_later_reasons") or [item.get("run_status") or item.get("status") or "retry_later"]:
+            text = str(reason or "").strip()
+            if text and text not in retry_later_reasons:
+                retry_later_reasons.append(text)
     return {
         "ok": not failed and not human_intervention,
         "pass": pass_index,
@@ -384,6 +394,9 @@ def run_worker_pass(args: argparse.Namespace, *, target_dates: list[str], pass_i
             for reason in (item.get("human_intervention_reasons") or [item.get("reason") or item.get("run_status") or item.get("status")])
             if reason
         ][:10],
+        "retry_later": retry_later_seen,
+        "retry_later_count": retry_later_count,
+        "retry_later_reasons": retry_later_reasons[:10],
         "results": results,
     }
 
@@ -811,6 +824,24 @@ def _sync_skipped(sync_result: dict[str, Any]) -> bool:
     return str(sync_result.get("stage") or "") == "sync_disabled" or str(sync_result.get("run_status") or "") == "not_synced"
 
 
+def worker_retry_summary(worker_passes: list[dict[str, Any]]) -> dict[str, Any]:
+    count = 0
+    retry_later_seen = False
+    reasons: list[str] = []
+    for worker_pass in worker_passes:
+        retry_later_seen = retry_later_seen or bool(worker_pass.get("retry_later"))
+        count += _int_metric(worker_pass.get("retry_later_count"))
+        for reason in worker_pass.get("retry_later_reasons") or []:
+            text = str(reason or "").strip()
+            if text and text not in reasons:
+                reasons.append(text)
+    return {
+        "retry_later": retry_later_seen,
+        "retry_later_count": count,
+        "retry_later_reasons": reasons[:10],
+    }
+
+
 def _count_dict(value: Any) -> dict[str, int]:
     if not isinstance(value, dict):
         return {}
@@ -955,12 +986,14 @@ def account_job_quality_summary(
     completion: dict[str, Any] | None,
     sync_result: dict[str, Any] | None = None,
     thresholds: dict[str, Any] | None = None,
+    worker_retry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the small business-facing quality summary for an account job."""
 
     discover_coverage = discover_coverage or {"source": "not_run", "complete": True, "incomplete": False, "reasons": []}
     completion = completion or {}
     sync_result = sync_result or {}
+    worker_retry = worker_retry or {}
     coverage_source = str(discover_coverage.get("source") or "unknown")
     coverage_incomplete = bool(discover_coverage.get("incomplete")) or str(completion.get("coverage_health") or "") == "incomplete"
     coverage_health = "incomplete" if coverage_incomplete else ("not_run" if coverage_source == "not_run" else "complete")
@@ -1011,6 +1044,9 @@ def account_job_quality_summary(
         "open_task_count": _int_metric(completion.get("open_task_count")),
         "auto_open_task_count": _int_metric(completion.get("auto_open_task_count")),
         "requires_codex_summary_count": _int_metric(completion.get("requires_codex_summary_count")),
+        "worker_retry_later": bool(worker_retry.get("retry_later")),
+        "worker_retry_later_count": _int_metric(worker_retry.get("retry_later_count")),
+        "worker_retry_later_reasons": worker_retry.get("retry_later_reasons") if isinstance(worker_retry.get("retry_later_reasons"), list) else [],
         "open_task_stage_counts": open_task_stage_counts,
         "missing_stage_counts": missing_stage_counts,
         "stage_pressure": stage_pressure,
@@ -1389,6 +1425,7 @@ def main() -> int:
     )
     sync_result = run_sync(config, args, posts, conn)
     completion = enrichment_completion_summary(conn, posts)
+    retry_summary = worker_retry_summary(worker_passes)
     run_status = summarize_job_status(
         preflight=opencli_preflight,
         discover_import=discover_import,
@@ -1411,6 +1448,9 @@ def main() -> int:
         "feishu_auth_preflight": feishu_auth_preflight,
         "opencli_preflight": opencli_preflight,
         "discover_import": discover_import,
+        "worker_retry_later": retry_summary["retry_later"],
+        "worker_retry_later_count": retry_summary["retry_later_count"],
+        "worker_retry_later_reasons": retry_summary["retry_later_reasons"],
         "worker_passes": worker_passes,
         "feishu_sync": sync_result,
         "enrichment_completion": completion,
@@ -1422,6 +1462,7 @@ def main() -> int:
         completion=completion,
         sync_result=sync_result,
         thresholds=quality_thresholds_from_args(args),
+        worker_retry=retry_summary,
     )
     if not result["quality_summary"]["quality_thresholds"]["ok"]:
         result["complete"] = False
