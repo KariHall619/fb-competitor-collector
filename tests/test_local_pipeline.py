@@ -938,6 +938,107 @@ def assert_prepare_capture_reports_structured_input_failures(tmp_path: Path) -> 
         assert data["next_actions"]
 
 
+def assert_article_summary_scripts_report_structured_input_failures(tmp_path: Path) -> None:
+    config = tmp_path / "settings_article_structured_failures.yaml"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'article-structured.sqlite'}"
+        ),
+        encoding="utf-8",
+    )
+
+    article_output = tmp_path / "with_material.json"
+    malformed_article_input = tmp_path / "malformed_article_input.json"
+    malformed_article_input.write_text('{"posts": [', encoding="utf-8")
+    article_result = run(
+        [
+            PYTHON,
+            "scripts/enrich_article_summaries.py",
+            "--config",
+            str(config),
+            "--input",
+            str(malformed_article_input),
+            "--output",
+            str(article_output),
+        ]
+    )
+    assert article_result.returncode == 1, article_result.stdout + article_result.stderr
+    assert "Traceback" not in article_result.stderr
+    article_data = json.loads(article_result.stdout)
+    assert article_data["run_status"] == "article_material_failed"
+    assert article_data["stage"] == "input_load"
+    assert article_data["complete"] is False
+    assert article_data["input_path"] == str(malformed_article_input)
+    assert article_data["output_path"] == str(article_output)
+    assert not article_output.exists()
+
+    summaries_output = tmp_path / "summary_applied.json"
+    valid_posts = tmp_path / "valid_posts.json"
+    valid_posts.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "post_url": "https://www.facebook.com/example/posts/one",
+                        "article_url": "https://example.com/story-one",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    bad_summaries = tmp_path / "bad_summaries.json"
+    bad_summaries.write_text('{"https://example.com/story-one": ', encoding="utf-8")
+    summary_result = run(
+        [
+            PYTHON,
+            "scripts/apply_article_summaries.py",
+            "--input",
+            str(valid_posts),
+            "--summaries",
+            str(bad_summaries),
+            "--output",
+            str(summaries_output),
+        ]
+    )
+    assert summary_result.returncode == 1, summary_result.stdout + summary_result.stderr
+    assert "Traceback" not in summary_result.stderr
+    summary_data = json.loads(summary_result.stdout)
+    assert summary_data["run_status"] == "summary_apply_failed"
+    assert summary_data["stage"] == "summaries_load"
+    assert summary_data["complete"] is False
+    assert summary_data["summaries_path"] == str(bad_summaries)
+    assert summary_data["input_path"] == str(valid_posts)
+    assert summary_data["output_path"] == str(summaries_output)
+    assert not summaries_output.exists()
+
+    valid_summaries = tmp_path / "valid_summaries.json"
+    valid_summaries.write_text(json.dumps({"https://example.com/story-one": VALID_CN_SUMMARY}, ensure_ascii=False), encoding="utf-8")
+    bad_file_input = tmp_path / "bad_file_input.json"
+    bad_file_input.write_text(json.dumps({"posts": {"not": "a-list"}}, ensure_ascii=False), encoding="utf-8")
+    input_result = run(
+        [
+            PYTHON,
+            "scripts/apply_article_summaries.py",
+            "--input",
+            str(bad_file_input),
+            "--summaries",
+            str(valid_summaries),
+            "--output",
+            str(summaries_output),
+        ]
+    )
+    assert input_result.returncode == 1, input_result.stdout + input_result.stderr
+    assert "Traceback" not in input_result.stderr
+    input_data = json.loads(input_result.stdout)
+    assert input_data["run_status"] == "summary_apply_failed"
+    assert input_data["stage"] == "input_load"
+    assert input_data["input_path"] == str(bad_file_input)
+    assert not summaries_output.exists()
+
+
 def assert_check_env_prefers_opencli_route() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from check_env import recommended_capture_route
@@ -5941,6 +6042,7 @@ def main() -> int:
         assert_cli_feishu_auth_blockers_report_run_status(tmp_path)
         assert_import_existing_result_reports_structured_input_failures(tmp_path)
         assert_prepare_capture_reports_structured_input_failures(tmp_path)
+        assert_article_summary_scripts_report_structured_input_failures(tmp_path)
         assert_sync_status_marks_incomplete_ledger(tmp_path)
         assert_sync_status_promotes_summary_only_work(tmp_path)
         assert_sync_status_prioritizes_auto_work_over_summary(tmp_path)

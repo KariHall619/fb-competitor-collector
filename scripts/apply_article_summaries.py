@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,63 @@ from pipeline_status import crawl_status_for, output_status_for
 from story_summary_policy import story_summary_errors
 from config_loader import load_config
 from store import all_posts, connect, mark_stage_done, update_post_fields
+
+
+def summary_apply_failed_result(
+    *,
+    stage: str,
+    message: str,
+    error: str,
+    summaries_path: str | Path | None = None,
+    input_path: str | Path | None = None,
+    output_path: str | Path | None = None,
+    config_path: str | Path | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ok": False,
+        "stage": stage,
+        "run_status": "summary_apply_failed",
+        "complete": False,
+        "message": message,
+        "error": error,
+        "next_actions": [
+            "修复 Codex 中文概要 JSON 或输入配置后重新运行同一命令；本次未更新本地库或输出文件。"
+        ],
+    }
+    if summaries_path is not None:
+        payload["summaries_path"] = str(summaries_path)
+    if input_path is not None:
+        payload["input_path"] = str(input_path)
+    if output_path is not None:
+        payload["output_path"] = str(output_path)
+    if config_path is not None:
+        payload["config_path"] = str(config_path)
+    return payload
+
+
+def load_summary_map(path: str | Path) -> dict[str, Any]:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Summaries file not found: {p}")
+    summaries = json.loads(p.read_text(encoding="utf-8"))
+    if not isinstance(summaries, dict):
+        raise ValueError("Summaries input must be a JSON object keyed by post/canonical/article URL.")
+    return summaries
+
+
+def load_input_posts(path: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Input file not found: {p}")
+    payload = json.loads(p.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Apply-summary file input must be a JSON object with a posts list.")
+    posts = payload.get("posts", [])
+    if not isinstance(posts, list):
+        raise ValueError("Apply-summary input field posts must be a list.")
+    if not all(isinstance(item, dict) for item in posts):
+        raise ValueError("Every apply-summary post must be a JSON object.")
+    return payload, posts
 
 
 def summary_for_post(post: dict[str, Any], summaries: dict[str, Any]) -> str:
@@ -77,9 +135,43 @@ def main() -> int:
     parser.add_argument("--output", default="")
     args = parser.parse_args()
 
-    summaries = json.loads(Path(args.summaries).read_text(encoding="utf-8"))
+    try:
+        summaries = load_summary_map(args.summaries)
+    except (FileNotFoundError, JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        print(
+            json.dumps(
+                summary_apply_failed_result(
+                    stage="summaries_load",
+                    message="Codex 中文概要 JSON 读取或解析失败；已在更新本地库或输出文件前停止。",
+                    error=str(exc),
+                    summaries_path=args.summaries,
+                    input_path=args.input or None,
+                    output_path=args.output or None,
+                    config_path=args.config or None,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 1
     if args.config and not args.input:
-        config = load_config(args.config)
+        try:
+            config = load_config(args.config)
+        except (FileNotFoundError, JSONDecodeError, ValueError) as exc:
+            print(
+                json.dumps(
+                    summary_apply_failed_result(
+                        stage="config_load",
+                        message="摘要应用配置读取失败；已在更新本地库前停止。",
+                        error=str(exc),
+                        summaries_path=args.summaries,
+                        config_path=args.config,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
         conn = connect(config.get("database_path", "data/posts.sqlite"))
         posts = all_posts(conn)
         result = apply_to_posts(posts, summaries)
@@ -110,8 +202,25 @@ def main() -> int:
     if not args.input or not args.output:
         parser.error("--input and --output are required unless --config is used for SQLite mode")
 
-    payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
-    posts = payload.get("posts", [])
+    try:
+        payload, posts = load_input_posts(args.input)
+    except (FileNotFoundError, JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        print(
+            json.dumps(
+                summary_apply_failed_result(
+                    stage="input_load",
+                    message="摘要应用输入读取或解析失败；已在写出结果前停止。",
+                    error=str(exc),
+                    summaries_path=args.summaries,
+                    input_path=args.input,
+                    output_path=args.output,
+                    config_path=args.config or None,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 1
     result = apply_to_posts(posts, summaries)
 
     payload["article_summary_applied"] = result["applied"]
