@@ -16,6 +16,7 @@ This file is the first-stop project memory for future agents working in this rep
   7. Normal `--sync` upserts all auditable candidates to the formal Feishu table by post URL and marks missing/suspicious fields in `是否采用` as `待补抓：...`.
   8. Use `--strict-ready-only` only when the operator explicitly wants the legacy ready-only gate.
   9. Business “抓取并写入飞书” runs should use `scripts/run_account_job.py`, which persists progress in SQLite, resumes scoped enrichment after interruptions, and reports `run_status`. A ledger write with pending enrichment is not a completed job.
+  10. If homepage discovery or detail enrichment sees `login_required`, `visitor_preview`, `facebook_tab_missing`, or `human_intervention_required`, the account job must stop with `run_status=human_intervention_required`; do not import/sync visitor-preview rows or hide this as a generic failed enrichment task.
 
 ## Important User Feedback Already Incorporated
 
@@ -35,6 +36,7 @@ This file is the first-stop project memory for future agents working in this rep
 - Missing or suspicious fields such as lead link, engagement, low likes, or post type can be marked with `待补抓：...` and queued for `lead_link`, `engagement`, or `post_type` refetch. These markers are operational audit hints, not permission to bypass the final quality gate.
 - The formal Feishu table is also the business capture ledger. If a Facebook post candidate is confirmed by URL and account context, normal sync should upsert it even when incomplete. Missing exact time, lead link, article summary, engagement, post type, or capture coverage is expressed in `是否采用` as `待补抓：...`; later enrichment updates the same row by post URL.
 - Avoid manual stage stitching for business runs. If token refresh, OpenCLI recovery, Codex interruption, or user handoff interrupts the flow, re-run `scripts/run_account_job.py` with the same account/date/window. It should continue from SQLite pending tasks and must not summarize a half-finished ledger write as complete.
+- Login/profile interruptions are not normal补抓 failures. `run_account_job.py` promotes homepage and detail-page login/visitor-preview blockers to `run_status=human_intervention_required` and emits a `--resume-only` command for after the operator restores the correct Chrome/Facebook state.
 
 ## Do Not Reintroduce
 
@@ -106,7 +108,7 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 - `scripts/fb_dom_extractors.js`: page DOM candidate extraction.
 - `scripts/fb_time_extractors.js`: exact Facebook time parsing and timestamp-target helpers.
 - `scripts/prepare_capture_result.py`: normalize raw homepage capture and keep incomplete candidates as `needs_enrichment`.
-- `scripts/run_account_job.py`: preferred resumable business entrypoint for account capture, scoped enrichment, and formal ledger sync. It supports `--resume-only`, `--status-only`, `--last-hours 24`, `--sync`, `--dry-run`, `--expected-post-count`, and `--expected-labels`; it emits `run_status` such as `complete`, `coverage_incomplete`, `incomplete_pending_tasks`, `needs_codex_summary`, `blocked_opencli`, or `blocked_auth`, plus `next_commands` for the first recovery action.
+- `scripts/run_account_job.py`: preferred resumable business entrypoint for account capture, scoped enrichment, and formal ledger sync. It supports `--resume-only`, `--status-only`, `--last-hours 24`, `--sync`, `--dry-run`, `--expected-post-count`, and `--expected-labels`; it emits `run_status` such as `complete`, `coverage_incomplete`, `incomplete_pending_tasks`, `needs_codex_summary`, `human_intervention_required`, `blocked_opencli`, or `blocked_auth`, plus `next_commands` for the first recovery action.
 - `scripts/opencli_enrich_post_details.mjs`: open detail pages, confirm exact time, expand comments/replies, resolve lead links, apply target-date filtering.
 - `scripts/run_capture_pipeline.py`: lower-level fast partial capture/import helper. It discovers visible candidates, prepares/imports them as partial records, and queues enrichment, but does not own full job completion. Do not use it as the final business “抓取并写入飞书” path.
 - `scripts/enrichment_worker.py`: resumes queued `detail_time`, `lead_link`, `engagement`, `post_type`, and `article_material` tasks with local concurrency limits. Its `summary` stage no longer generates story summaries; it only verifies that a Codex-written Chinese summary has been applied, otherwise it leaves `requires_codex_chinese_summary`.

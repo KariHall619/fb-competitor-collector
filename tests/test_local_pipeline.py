@@ -3217,6 +3217,128 @@ def assert_run_account_job_promotes_discover_coverage_status() -> None:
     assert "38m,1h,2h" in next_commands[0]["command"]
 
 
+def assert_run_account_job_promotes_human_intervention_status() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/example",
+            "account_name": "Example Page",
+            "account_type": "competitor",
+            "sync": True,
+            "dry_run": False,
+            "max_snapshots": 20,
+            "max_resume_passes": 2,
+            "expected_post_count": 0,
+            "expected_labels": "",
+        },
+    )()
+    discover_import = {
+        "ok": False,
+        "stage": "human_intervention_required",
+        "discover": {
+            "ok": False,
+            "status": "login_required",
+            "action_required": "human_intervention_required",
+        },
+    }
+    completion = {
+        "requires_codex_summary_count": 0,
+        "coverage_incomplete_count": 0,
+        "has_incomplete_enrichment": False,
+        "open_task_count": 0,
+    }
+    status = run_account_job.summarize_job_status(
+        preflight={"ok": True},
+        discover_import=discover_import,
+        worker_passes=[],
+        sync_result={"ok": True},
+        completion=completion,
+    )
+    commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260602"],
+        run_status=status,
+        completion=completion,
+        discover_coverage=run_account_job.discover_coverage_summary(discover_import),
+    )
+    assert status == "human_intervention_required"
+    assert commands[0]["reason"] == "human_intervention_required"
+    assert "--resume-only" in commands[0]["command"]
+    assert "check_env.py" not in commands[0]["command"]
+
+    worker_status = run_account_job.summarize_job_status(
+        preflight={"ok": True},
+        discover_import=None,
+        worker_passes=[{"human_intervention_required": True, "human_intervention_reasons": ["visitor_preview"]}],
+        sync_result={"ok": True},
+        completion={**completion, "has_incomplete_enrichment": True},
+    )
+    assert worker_status == "human_intervention_required"
+
+
+def assert_enrichment_worker_reports_human_intervention_batch(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import enrichment_worker
+
+    fake_node = tmp_path / "node"
+    payload_path = tmp_path / "blocked_payload.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "posts": [],
+                "status": "human_intervention_required",
+                "action_required": "human_intervention_required",
+                "blocked_reason": "login_required",
+                "human_intervention_required": True,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    fake_node.write_text(
+        f"""#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then
+    shift
+    cp {payload_path} "$1"
+  fi
+  shift
+done
+echo '{{"ok":false,"status":"human_intervention_required","action_required":"human_intervention_required"}}'
+exit 1
+""",
+        encoding="utf-8",
+    )
+    fake_node.chmod(0o755)
+    original_root = enrichment_worker.ROOT
+    original_run = enrichment_worker.subprocess.run
+
+    def fake_run(command, **kwargs):
+        return original_run([str(fake_node), *command[1:]], **kwargs)
+
+    try:
+        enrichment_worker.subprocess.run = fake_run
+        result = enrichment_worker.run_detail_batch(
+            "config/settings.yaml",
+            {"performance": {"detail_timeout_seconds": 1}},
+            [{"post_url": "https://facebook.com/example/posts/one"}],
+            {"detail_time"},
+            "260602",
+        )
+    finally:
+        enrichment_worker.subprocess.run = original_run
+        enrichment_worker.ROOT = original_root
+    assert result["ok"] is False
+    assert result["human_intervention_required"] is True
+    assert result["status"] == "human_intervention_required"
+    assert result["reason"] == "login_required"
+
+
 def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
     config = tmp_path / "settings.yaml"
     db_path = tmp_path / "worker.sqlite"
@@ -3594,6 +3716,8 @@ def main() -> int:
         assert_run_account_job_expected_coverage_marks_missing_posts()
         assert_run_account_job_blocks_auth_before_capture(tmp_path)
         assert_run_account_job_promotes_discover_coverage_status()
+        assert_run_account_job_promotes_human_intervention_status()
+        assert_enrichment_worker_reports_human_intervention_batch(tmp_path)
 
     print("local pipeline acceptance passed")
     return 0

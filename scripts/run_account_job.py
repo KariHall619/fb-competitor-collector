@@ -30,6 +30,7 @@ from sync_status import enrichment_completion_summary
 ROOT = Path(__file__).resolve().parents[1]
 ENRICHMENT_STAGES = "detail_time,lead_link,engagement,post_type,article_material"
 DEFAULT_EXPECTED_LABEL_LIMIT = 50
+HUMAN_INTERVENTION_STATUSES = {"human_intervention_required", "login_required", "visitor_preview", "facebook_tab_missing"}
 
 
 def run_command(command: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
@@ -41,6 +42,22 @@ def parse_json_output(result: subprocess.CompletedProcess[str]) -> dict[str, Any
         return json.loads(result.stdout)
     except json.JSONDecodeError:
         return {"ok": False, "stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode}
+
+
+def needs_human_intervention(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("human_intervention_required") or payload.get("action_required") == "human_intervention_required":
+        return True
+    if str(payload.get("status") or payload.get("run_status") or "") in HUMAN_INTERVENTION_STATUSES:
+        return True
+    nested = payload.get("discover")
+    if isinstance(nested, dict) and needs_human_intervention(nested):
+        return True
+    nested = payload.get("result")
+    if isinstance(nested, dict) and needs_human_intervention(nested):
+        return True
+    return False
 
 
 def normalize_date_text(value: str) -> str:
@@ -240,9 +257,11 @@ def discover_and_import(
         discover_payload = parse_json_output(discover)
         discover_payload["returncode"] = discover.returncode
         if discover.returncode != 0 or not discover_payload.get("ok"):
+            stage = "human_intervention_required" if needs_human_intervention(discover_payload) else "discover"
             return {
                 "ok": False,
-                "stage": "discover",
+                "stage": stage,
+                "human_intervention_required": needs_human_intervention(discover_payload),
                 "elapsed_ms": int((time.monotonic() - discover_started) * 1000),
                 "discover": discover_payload,
             }
@@ -349,9 +368,17 @@ def run_worker_pass(args: argparse.Namespace, *, target_dates: list[str], pass_i
         payload["target_date"] = target_date
         results.append(payload)
     failed = [item for item in results if item.get("returncode") not in {0, 1}]
+    human_intervention = [item for item in results if needs_human_intervention(item)]
     return {
-        "ok": not failed,
+        "ok": not failed and not human_intervention,
         "pass": pass_index,
+        "human_intervention_required": bool(human_intervention),
+        "human_intervention_reasons": [
+            reason
+            for item in human_intervention
+            for reason in (item.get("human_intervention_reasons") or [item.get("reason") or item.get("run_status") or item.get("status")])
+            if reason
+        ][:10],
         "results": results,
     }
 
@@ -540,6 +567,14 @@ def next_commands_for_status(
                 "command": command_text(["python3", "scripts/check_env.py", "--config", args.config, "--fix-opencli"]),
             }
         )
+    if run_status == "human_intervention_required":
+        commands.append(
+            {
+                "reason": "human_intervention_required",
+                "description": "先在正常 Chrome 里确认 Facebook 已登录、账号主页帖子列表可见，再从本地 SQLite 续跑剩余补抓和同步。",
+                "command": command_text(base + (["--target-date", primary_date] if primary_date else []) + ["--resume-only"]),
+            }
+        )
     return commands[:4]
 
 
@@ -555,6 +590,10 @@ def summarize_job_status(
         return "blocked_opencli"
     if sync_result.get("run_status") == "blocked_auth":
         return "blocked_auth"
+    if discover_import and needs_human_intervention(discover_import):
+        return "human_intervention_required"
+    if any(worker_pass.get("human_intervention_required") for worker_pass in worker_passes):
+        return "human_intervention_required"
     if discover_has_incomplete_coverage(discover_import):
         return "coverage_incomplete"
     if completion.get("requires_codex_summary_count"):
@@ -697,15 +736,44 @@ def main() -> int:
             return 1
         discover_import = discover_and_import(args, target_dates=target_dates)
         if not discover_import.get("ok"):
+            current_posts = scoped_posts(
+                conn,
+                account_name=args.account_name,
+                account_url=args.account_url,
+                account_type=args.account_type,
+                dates=target_dates,
+            )
+            completion = enrichment_completion_summary(conn, current_posts)
+            run_status = (
+                "human_intervention_required"
+                if needs_human_intervention(discover_import)
+                else discover_import.get("stage") or "discover_failed"
+            )
+            partial_result = {
+                "ok": False,
+                "run_status": run_status,
+                "complete": False,
+                "message": "Facebook 页面需要人工处理登录态或可见页面后再续跑。"
+                if run_status == "human_intervention_required"
+                else "Facebook 主页发现阶段失败；本地已有结果未丢失，可按 next_commands 排查或续跑。",
+                "target_dates": target_dates,
+                "account_url": args.account_url,
+                "account_name": args.account_name,
+                "account_type": args.account_type,
+                "discover_import": discover_import,
+                "enrichment_completion": completion,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+            partial_result["next_commands"] = next_commands_for_status(
+                args=args,
+                target_dates=target_dates,
+                run_status=run_status,
+                completion=completion,
+                discover_coverage=discover_coverage_summary(discover_import),
+            )
             print(
                 json.dumps(
-                    {
-                        "ok": False,
-                        "run_status": discover_import.get("stage") or "discover_failed",
-                        "target_dates": target_dates,
-                        "discover_import": discover_import,
-                        "elapsed_ms": int((time.monotonic() - started) * 1000),
-                    },
+                    partial_result,
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -726,7 +794,10 @@ def main() -> int:
         completion_before = enrichment_completion_summary(conn, posts)
         if not completion_before.get("open_task_count"):
             break
-        worker_passes.append(run_worker_pass(args, target_dates=target_dates, pass_index=index + 1))
+        worker_pass = run_worker_pass(args, target_dates=target_dates, pass_index=index + 1)
+        worker_passes.append(worker_pass)
+        if worker_pass.get("human_intervention_required"):
+            break
         posts = scoped_posts(
             conn,
             account_name=args.account_name,

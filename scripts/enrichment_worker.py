@@ -94,6 +94,26 @@ def run_detail_batch(
             timeout=timeout,
         )
         if result.returncode != 0:
+            payload: dict[str, Any] = {}
+            if output_path.exists():
+                try:
+                    payload = json.loads(output_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    payload = {}
+            if not payload and result.stdout:
+                try:
+                    payload = json.loads(result.stdout)
+                except json.JSONDecodeError:
+                    payload = {}
+            if payload.get("human_intervention_required") or payload.get("action_required") == "human_intervention_required":
+                return {
+                    "ok": False,
+                    "human_intervention_required": True,
+                    "status": "human_intervention_required",
+                    "reason": payload.get("blocked_reason") or payload.get("reason") or payload.get("status") or "facebook_login_blocked",
+                    "payload": payload,
+                    "error": result.stderr or result.stdout or f"exit={result.returncode}",
+                }
             return {"ok": False, "error": result.stderr or result.stdout or f"exit={result.returncode}"}
         if not output_path.exists():
             return {"ok": False, "error": "detail enrichment did not write output"}
@@ -273,6 +293,8 @@ def main() -> int:
     started = time.monotonic()
     completed = 0
     failed = 0
+    human_intervention_required = False
+    human_intervention_reasons: list[str] = []
 
     detail_tasks = [task for task in tasks if task["stage"] in DETAIL_STAGES]
     if detail_tasks:
@@ -290,6 +312,11 @@ def main() -> int:
             try:
                 result = run_detail_batch(args.config, config, batch, stage_set, args.target_date)
                 if not result.get("ok"):
+                    if result.get("human_intervention_required"):
+                        human_intervention_required = True
+                        reason = str(result.get("reason") or "facebook_login_blocked")
+                        if reason not in human_intervention_reasons:
+                            human_intervention_reasons.append(reason)
                     raise RuntimeError(result.get("error") or "detail enrichment failed")
                 apply_detail_results(conn, batch, result.get("posts", []))
                 batch_succeeded = True
@@ -355,6 +382,9 @@ def main() -> int:
 
     result = {
         "ok": failed == 0,
+        "run_status": "human_intervention_required" if human_intervention_required else ("complete" if failed == 0 else "failed"),
+        "human_intervention_required": human_intervention_required,
+        "human_intervention_reasons": human_intervention_reasons,
         "input_tasks": len(tasks),
         "completed": completed,
         "failed": failed,
