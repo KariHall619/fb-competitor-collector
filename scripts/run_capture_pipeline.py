@@ -13,6 +13,9 @@ from pathlib import Path
 from check_env import check_opencli
 from config_loader import load_config
 from lark_io import ensure_user_identity
+from models import normalize_date
+from store import connect, query_posts
+from sync_status import enrichment_completion_summary
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -188,6 +191,15 @@ def main() -> int:
             return imported.returncode
 
         prepared_payload = json.loads(prepared_path.read_text(encoding="utf-8"))
+        conn = connect(config.get("database_path", "data/posts.sqlite"))
+        scoped_posts = query_posts(
+            conn,
+            date=normalize_date(args.target_date) if args.target_date else "",
+            account_name=args.account_name,
+            account_url=args.account_url,
+            account_type=args.account_type,
+        )
+        completion = enrichment_completion_summary(conn, scoped_posts)
         result = {
             "ok": True,
             "mode": "partial" if args.partial else "standard",
@@ -201,6 +213,9 @@ def main() -> int:
             "ready_for_output": prepared_payload.get("ready_for_output", 0),
             "partial_review": prepared_payload.get("partial_review", 0),
             "needs_enrichment": prepared_payload.get("needs_enrichment", 0),
+            "enrichment_completion": completion,
+            "complete": bool(completion.get("post_count")) and not completion.get("has_incomplete_enrichment"),
+            "run_status": "complete" if completion.get("post_count") and not completion.get("has_incomplete_enrichment") else "incomplete_pending_tasks",
             "timing_ms": {
                 "discover": int((time.monotonic() - discover_started) * 1000),
                 "prepare": int((time.monotonic() - prepare_started) * 1000),

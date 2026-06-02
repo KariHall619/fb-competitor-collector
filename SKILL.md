@@ -45,13 +45,12 @@ Map common requests as follows:
   - Do not write Feishu during this test.
 
 - “采集竞品调研账户第一个账号今天的帖子”
-  - Run the environment check first.
+  - Run the resumable account job as the business entrypoint: `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --sync`.
   - Use `scripts/read_accounts.py` if the first account URL is needed from Feishu.
   - Ask the user to keep the target Facebook account page open in normal Chrome if no matching tab is available.
-  - Extract visible post candidates with `scripts/fb_dom_extractors.js`. Treat relative labels such as `3h`, `12h`, and `1d` as homepage candidate-window clues only.
-  - Open each candidate post detail page with OpenCLI Browser Bridge to confirm exact `posted_at`, expand comments/replies, and capture the account-owned lead link.
+  - Treat relative labels such as `3h`, `12h`, and `1d` as homepage candidate-window clues only.
   - If extraction reports `capture_blocked`, `login_required`, or `visitor_preview`, stop immediately and ask for human intervention.
-  - Import/sync only after extracted candidates are non-empty and plausible.
+  - If the run is interrupted by token refresh, OpenCLI recovery, or Codex context changes, run the same `run_account_job.py` command again with `--resume-only` when appropriate. Do not manually write ledger rows and call the job finished while enrichment is still pending.
 
 - “把这份抓取结果导入内容库”
   - Use `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --no-sync`.
@@ -59,7 +58,8 @@ Map common requests as follows:
 
 - “把结果同步到飞书”
   - Confirm `feishu.output_spreadsheet_url` is configured.
-  - Import or filter first, then sync with the relevant script and `--sync`.
+  - Prefer `scripts/run_account_job.py --resume-only --sync` for account-scoped capture results so pending enrichment is reported.
+  - Direct `import_existing_result.py --sync`, `filter_posts.py --sync`, and `sync_feishu.py` can still upsert ledger rows, but their `run_status` / `enrichment_completion` must be reported if incomplete.
 
 - “筛选 5 月 21 日的竞品帖子”
   - Use `python3 scripts/filter_posts.py --config config/settings.yaml --date YYMMDD --account-type competitor`.
@@ -82,8 +82,11 @@ Run all commands from the skill root.
 | Verify FB exact timestamp capture | `scripts/opencli_verify_exact_time.mjs --run` from the OpenCLI Browser Bridge runtime |
 | Import existing JSON/CSV | `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --no-sync` |
 | Import and sync new rows | `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --sync` |
-| Fast partial capture/import | `python3 scripts/run_capture_pipeline.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --partial` runs OpenCLI preflight/recovery before capture |
-| Resume enrichment queue | `python3 scripts/enrichment_worker.py --config config/settings.yaml --stages detail_time,lead_link,engagement,post_type,article_material --limit 50` |
+| Resumable account capture + sync | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --last-hours 24 --sync` |
+| Resume interrupted account job | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --resume-only --sync` |
+| Status-only account check | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --resume-only --status-only --sync --dry-run` |
+| Fast partial capture/import | `python3 scripts/run_capture_pipeline.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --partial` as a lower-level helper only |
+| Resume enrichment queue | `python3 scripts/enrichment_worker.py --config config/settings.yaml --stages detail_time,lead_link,engagement,post_type,article_material --account-url <url> --date YYMMDD --limit 50` |
 | Audit missing fields and queue refetch | `python3 scripts/audit_fields.py --config config/settings.yaml --fix` |
 | Filter local library | `python3 scripts/filter_posts.py --config config/settings.yaml ...` |
 | Filter and sync | `python3 scripts/filter_posts.py --config config/settings.yaml ... --sync` |
@@ -152,6 +155,7 @@ Rules:
 - Before deleting any remaining relative-time fallback code, run the exact-time verifier against a real logged-in Facebook tab through the trusted OpenCLI Browser Bridge runtime and require `status=exact_time_confirmed`.
 - Short posts must be kept if they have a valid FB content URL. If comment/reply lead link, landing URL, article summary, engagement, or exact time is missing, keep them as `needs_enrichment` instead of dropping them.
 - For scale-out runs, first import visible candidates as `partial_review`, then resume queued enrichment stages in SQLite. Normal formal `--sync` upserts auditable candidates by post URL and fills missing-field reasons in `是否采用`; use `--strict-ready-only` only when the operator explicitly wants the legacy ready-only gate.
+- For business capture-and-write requests, prefer `run_account_job.py` over manual stage stitching. The job result must be interpreted by `run_status`: `complete` means the scoped job finished; `synced_ledger_incomplete`, `incomplete_pending_tasks`, `coverage_incomplete`, or `needs_codex_summary` means Feishu may have ledger rows but the capture job is not done.
 - Use `--sync-partial --dry-run` only for business preview output that must not affect the formal table.
 - If current-tab extraction returns `coverage_incomplete=true`, the run hit the snapshot cap while still finding new candidates. Raise `--max-snapshots` or restart from the account homepage top before declaring the visible date window fully covered.
 - Re-importing the same post must preserve higher-quality stored fields. Do not overwrite confirmed detail time, qualified comment/reply lead links, external landing URLs, valid Chinese article summaries, engagement values, manual `是否采用`, or final output status with weaker partial data.

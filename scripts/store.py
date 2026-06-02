@@ -400,21 +400,7 @@ def pending_enrichment_tasks(
     limit: int = 50,
     stale_running_seconds: int = 1800,
 ) -> list[dict[str, Any]]:
-    stale_cutoff = (datetime.utcnow() - timedelta(seconds=stale_running_seconds)).isoformat(timespec="seconds")
-    conn.execute(
-        """
-        UPDATE enrichment_tasks
-        SET status = 'pending',
-            locked_at = NULL,
-            next_run_at = CURRENT_TIMESTAMP,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE status = 'running'
-          AND locked_at IS NOT NULL
-          AND locked_at <= ?
-        """,
-        (stale_cutoff,),
-    )
-    conn.commit()
+    recover_stale_running_tasks(conn, stale_running_seconds=stale_running_seconds)
     clauses = ["status IN ('pending', 'failed')", "(next_run_at IS NULL OR next_run_at <= CURRENT_TIMESTAMP)"]
     params: list[Any] = []
     if stages:
@@ -429,15 +415,124 @@ def pending_enrichment_tasks(
             CASE stage
                 WHEN 'detail_time' THEN 1
                 WHEN 'lead_link' THEN 2
-                WHEN 'article_material' THEN 3
-                WHEN 'summary' THEN 4
-                ELSE 5
+                WHEN 'engagement' THEN 3
+                WHEN 'post_type' THEN 4
+                WHEN 'article_material' THEN 5
+                WHEN 'summary' THEN 6
+                ELSE 7
             END,
             attempts ASC,
             id ASC
         LIMIT ?
         """,
         [*params, limit],
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def recover_stale_running_tasks(conn: sqlite3.Connection, *, stale_running_seconds: int = 1800) -> int:
+    stale_cutoff = (datetime.utcnow() - timedelta(seconds=stale_running_seconds)).isoformat(timespec="seconds")
+    before = conn.total_changes
+    conn.execute(
+        """
+        UPDATE enrichment_tasks
+        SET status = 'pending',
+            locked_at = NULL,
+            next_run_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE status = 'running'
+          AND locked_at IS NOT NULL
+          AND locked_at <= ?
+        """,
+        (stale_cutoff,),
+    )
+    conn.commit()
+    return conn.total_changes - before
+
+
+def task_scope_keys(posts: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    canonical_keys = sorted(
+        {
+            str(post.get("canonical_post_url") or post.get("post_url") or "").strip()
+            for post in posts
+            if str(post.get("canonical_post_url") or post.get("post_url") or "").strip()
+        }
+    )
+    post_urls = sorted(
+        {
+            str(post.get("post_url") or "").strip()
+            for post in posts
+            if str(post.get("post_url") or "").strip()
+        }
+    )
+    return canonical_keys, post_urls
+
+
+def task_scope_clause(posts: list[dict[str, Any]]) -> tuple[str, list[Any]]:
+    canonical_keys, post_urls = task_scope_keys(posts)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if canonical_keys:
+        placeholders = ", ".join("?" for _ in canonical_keys)
+        clauses.append(f"canonical_post_url IN ({placeholders})")
+        params.extend(canonical_keys)
+    if post_urls:
+        placeholders = ", ".join("?" for _ in post_urls)
+        clauses.append(f"post_url IN ({placeholders})")
+        params.extend(post_urls)
+    if not clauses:
+        return "1 = 0", []
+    return "(" + " OR ".join(clauses) + ")", params
+
+
+def pending_enrichment_tasks_for_posts(
+    conn: sqlite3.Connection,
+    posts: list[dict[str, Any]],
+    *,
+    stages: list[str] | tuple[str, ...] | None = None,
+    limit: int = 50,
+    stale_running_seconds: int = 1800,
+) -> list[dict[str, Any]]:
+    recover_stale_running_tasks(conn, stale_running_seconds=stale_running_seconds)
+    scope_clause, params = task_scope_clause(posts)
+    clauses = ["status IN ('pending', 'failed')", "(next_run_at IS NULL OR next_run_at <= CURRENT_TIMESTAMP)"]
+    clauses.append(scope_clause)
+    if stages:
+        placeholders = ", ".join("?" for _ in stages)
+        clauses.append(f"stage IN ({placeholders})")
+        params.extend(stages)
+    rows = conn.execute(
+        f"""
+        SELECT * FROM enrichment_tasks
+        WHERE {' AND '.join(clauses)}
+        ORDER BY
+            CASE stage
+                WHEN 'detail_time' THEN 1
+                WHEN 'lead_link' THEN 2
+                WHEN 'engagement' THEN 3
+                WHEN 'post_type' THEN 4
+                WHEN 'article_material' THEN 5
+                WHEN 'summary' THEN 6
+                ELSE 7
+            END,
+            attempts ASC,
+            id ASC
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def enrichment_tasks_for_posts(conn: sqlite3.Connection, posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    scope_clause, params = task_scope_clause(posts)
+    rows = conn.execute(
+        f"""
+        SELECT * FROM enrichment_tasks
+        WHERE {scope_clause}
+        ORDER BY id ASC
+        """,
+        params,
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -519,6 +614,20 @@ def mark_task_failed(
 def task_counts(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute(
         "SELECT stage, status, COUNT(*) AS count FROM enrichment_tasks GROUP BY stage, status"
+    ).fetchall()
+    return {f"{row['stage']}:{row['status']}": int(row["count"]) for row in rows}
+
+
+def task_counts_for_posts(conn: sqlite3.Connection, posts: list[dict[str, Any]]) -> dict[str, int]:
+    scope_clause, params = task_scope_clause(posts)
+    rows = conn.execute(
+        f"""
+        SELECT stage, status, COUNT(*) AS count
+        FROM enrichment_tasks
+        WHERE {scope_clause}
+        GROUP BY stage, status
+        """,
+        params,
     ).fetchall()
     return {f"{row['stage']}:{row['status']}": int(row["count"]) for row in rows}
 
@@ -621,6 +730,8 @@ def query_posts(
     date: str = "",
     start_date: str = "",
     end_date: str = "",
+    account_name: str = "",
+    account_url: str = "",
     account_type: str = "",
     post_type: str = "",
     min_views: int | None = None,
@@ -637,6 +748,12 @@ def query_posts(
     if end_date:
         clauses.append("posted_date <= ?")
         params.append(end_date)
+    if account_name:
+        clauses.append("account_name = ?")
+        params.append(account_name)
+    if account_url:
+        clauses.append("account_url = ?")
+        params.append(account_url)
     if account_type:
         clauses.append("account_type = ?")
         params.append(account_type)

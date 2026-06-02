@@ -15,6 +15,7 @@ from field_schema import configured_output_headers, output_row_for_headers
 from models import normalize_post
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review
 from store import connect, enqueue_enrichment_tasks_for_posts, mark_output_synced, upsert_posts
+from sync_status import annotate_sync_result, enrichment_completion_summary
 from lark_io import ensure_user_identity, write_rows
 
 
@@ -136,6 +137,7 @@ def main() -> int:
                             "message": "当前没有可供业务预览的 partial_review 记录。",
                             "partial_review": 0,
                             "skipped": len(skipped_posts),
+                            "enrichment_completion": enrichment_completion_summary(conn, sync_candidates),
                         }
                     },
                     ensure_ascii=False,
@@ -156,6 +158,11 @@ def main() -> int:
         sync_result["partial_review"] = len(partial_posts)
         sync_result["skipped"] = len(skipped_posts)
         sync_result["formal_output_unchanged"] = True
+        sync_result = annotate_sync_result(
+            sync_result,
+            enrichment_completion_summary(conn, sync_candidates),
+            ledger_mode=True,
+        )
         print(json.dumps({**import_summary, "feishu_sync": sync_result}, ensure_ascii=False, indent=2))
         return 0 if sync_result.get("ok") else 1
 
@@ -173,6 +180,7 @@ def main() -> int:
                             "message": "当前没有可写入正式表的候选记录。",
                             "output_candidates": 0,
                             "skipped": len(skipped_posts),
+                            "enrichment_completion": enrichment_completion_summary(conn, sync_candidates),
                         }
                     },
                     ensure_ascii=False,
@@ -192,6 +200,11 @@ def main() -> int:
         sync_result["output_candidates"] = len(output_posts)
         sync_result["skipped"] = len(skipped_posts)
         sync_result["audit_output"] = True
+        sync_result = annotate_sync_result(
+            sync_result,
+            enrichment_completion_summary(conn, sync_candidates),
+            ledger_mode=True,
+        )
         print(json.dumps({**import_summary, "feishu_sync": sync_result}, ensure_ascii=False, indent=2))
         return 0 if sync_result.get("ok") else 1
 
@@ -208,6 +221,7 @@ def main() -> int:
                             "stage": "quality_gate",
                             "message": "同步已停止：存在完全缺失发帖时间、未生成文章来源中文概要，或缺少评论/回复引流落地链接的记录。",
                             "errors": quality_errors,
+                            "enrichment_completion": enrichment_completion_summary(conn, sync_candidates),
                         }
                     },
                     ensure_ascii=False,
@@ -226,6 +240,7 @@ def main() -> int:
                             "message": "同步已停止：当前没有字段完整、可写最终表的记录；候选已保存在本地库，需继续补齐发帖时间、摘要和评论/回复引流落地链接。",
                             "ready_for_output": 0,
                             "needs_enrichment_skipped": skipped,
+                            "enrichment_completion": enrichment_completion_summary(conn, sync_candidates),
                         }
                     },
                     ensure_ascii=False,
@@ -247,6 +262,11 @@ def main() -> int:
             mark_output_synced(conn, ready_posts)
         sync_result["ready_for_output"] = len(ready_posts)
         sync_result["needs_enrichment_skipped"] = skipped
+        sync_result = annotate_sync_result(
+            sync_result,
+            enrichment_completion_summary(conn, sync_candidates),
+            ledger_mode=False,
+        )
         print(json.dumps({**import_summary, "feishu_sync": sync_result}, ensure_ascii=False, indent=2))
         return 0 if sync_result.get("ok") else 1
     print(json.dumps(import_summary, ensure_ascii=False, indent=2))

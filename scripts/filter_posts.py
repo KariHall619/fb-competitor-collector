@@ -13,6 +13,7 @@ from lark_io import ensure_user_identity, write_rows
 from models import normalize_date
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review, ready_for_output
 from store import connect, query_posts
+from sync_status import annotate_sync_result, enrichment_completion_summary
 
 
 def main() -> int:
@@ -21,6 +22,8 @@ def main() -> int:
     parser.add_argument("--date", default="")
     parser.add_argument("--start-date", default="")
     parser.add_argument("--end-date", default="")
+    parser.add_argument("--account-name", default="")
+    parser.add_argument("--account-url", default="")
     parser.add_argument("--account-type", default="")
     parser.add_argument("--post-type", default="")
     parser.add_argument("--min-views", type=int)
@@ -67,6 +70,8 @@ def main() -> int:
         date=normalize_date(args.date) if args.date else "",
         start_date=normalize_date(args.start_date) if args.start_date else "",
         end_date=normalize_date(args.end_date) if args.end_date else "",
+        account_name=args.account_name,
+        account_url=args.account_url,
         account_type=args.account_type,
         post_type=args.post_type,
         min_views=min_views,
@@ -78,6 +83,8 @@ def main() -> int:
             f"date={args.date}" if args.date else "",
             f"start={args.start_date}" if args.start_date else "",
             f"end={args.end_date}" if args.end_date else "",
+            f"account_name={args.account_name}" if args.account_name else "",
+            f"account_url={args.account_url}" if args.account_url else "",
             f"account_type={args.account_type}" if args.account_type else "",
             f"post_type={args.post_type}" if args.post_type else "",
             f"views>={min_views}" if min_views is not None else "",
@@ -99,6 +106,7 @@ def main() -> int:
                             "message": "筛选结果中没有可供业务预览的 partial_review 记录。",
                             "partial_review": 0,
                             "skipped": len(skipped_posts),
+                            "enrichment_completion": enrichment_completion_summary(conn, posts),
                         }
                     },
                     ensure_ascii=False,
@@ -118,6 +126,11 @@ def main() -> int:
         result["partial_review"] = len(partial_posts)
         result["skipped"] = len(skipped_posts)
         result["formal_output_unchanged"] = True
+        result = annotate_sync_result(
+            result,
+            enrichment_completion_summary(conn, posts),
+            ledger_mode=True,
+        )
         print(json.dumps({"feishu_sync": result}, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 1
 
@@ -134,6 +147,7 @@ def main() -> int:
                             "message": "筛选结果中没有可写入正式表的候选记录。",
                             "output_candidates": 0,
                             "skipped": len(skipped_posts),
+                            "enrichment_completion": enrichment_completion_summary(conn, posts),
                         }
                     },
                     ensure_ascii=False,
@@ -153,6 +167,11 @@ def main() -> int:
         result["output_candidates"] = len(output_posts)
         result["skipped"] = len(skipped_posts)
         result["audit_output"] = True
+        result = annotate_sync_result(
+            result,
+            enrichment_completion_summary(conn, posts),
+            ledger_mode=True,
+        )
         print(json.dumps({"feishu_sync": result}, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 1
 
@@ -168,6 +187,7 @@ def main() -> int:
                             "ok": False,
                             "stage": "quality_gate",
                             "errors": errors,
+                            "enrichment_completion": enrichment_completion_summary(conn, posts),
                         }
                     },
                     ensure_ascii=False,
@@ -185,6 +205,7 @@ def main() -> int:
                             "message": "筛选结果中没有字段完整、可写最终表的记录。",
                             "ready_for_output": 0,
                             "needs_enrichment_skipped": len(skipped_posts),
+                            "enrichment_completion": enrichment_completion_summary(conn, posts),
                         }
                     },
                     ensure_ascii=False,
@@ -203,6 +224,11 @@ def main() -> int:
         )
         result["ready_for_output"] = len(ready_posts)
         result["needs_enrichment_skipped"] = len(skipped_posts)
+        result = annotate_sync_result(
+            result,
+            enrichment_completion_summary(conn, posts),
+            ledger_mode=False,
+        )
         print(json.dumps({"feishu_sync": result}, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 1
     return 0

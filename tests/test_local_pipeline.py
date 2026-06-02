@@ -1124,6 +1124,125 @@ def assert_sync_feishu_audit_and_strict_modes() -> None:
     assert strict["needs_enrichment_skipped"] == 1
 
 
+def assert_sync_status_marks_incomplete_ledger(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import sync_feishu
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, row_for_post, upsert_post
+
+    conn = connect(tmp_path / "sync-status.sqlite")
+    post = normalize_post(
+        {
+            "account_name": "Example Page",
+            "account_url": "https://www.facebook.com/example",
+            "post_url": "https://www.facebook.com/example/posts/incomplete-ledger",
+            "post_time_text": "1h",
+            "story_summary": "Visible homepage candidate.",
+            "coverage_note": "采集达到快照上限时仍有新增候选，本次覆盖不完整，需从主页顶部继续补抓。",
+            "crawled_at": "2026-06-02T12:00:00",
+        }
+    )
+    upsert_post(conn, post)
+    stored = row_for_post(conn, post)
+    assert stored is not None
+    enqueue_enrichment_tasks_for_posts(conn, [stored])
+
+    config = {
+        "feishu": {
+            "sheets": {"all_posts": "FB竞品帖子链接"},
+            "field_schema": {"output_headers": ["帖子链接", "是否采用"]},
+        }
+    }
+    result = sync_feishu.sync_posts(config, [stored], "all_posts", "append", True, audit=True, conn=conn)
+    assert result["ok"] is True
+    assert result["run_status"] == "synced_ledger_incomplete"
+    assert result["complete"] is False
+    completion = result["enrichment_completion"]
+    assert completion["post_count"] == 1
+    assert completion["ledger_candidate_count"] == 1
+    assert completion["ledger_usable_rate"] == 1.0
+    assert completion["final_usable_rate"] == 0.0
+    assert completion["completion_rate"] == 0.0
+    assert completion["coverage_complete"] is False
+    assert completion["coverage_health"] == "incomplete"
+    assert completion["coverage_incomplete_count"] == 1
+    assert completion["open_task_count"] > 0
+    assert completion["missing_stage_counts"]["coverage"] == 1
+    assert any("覆盖未完成" in action for action in completion["next_actions"])
+
+
+def assert_strict_sync_completion_uses_full_candidate_scope(tmp_path: Path) -> None:
+    config = tmp_path / "settings_strict_scope.yaml"
+    sample = tmp_path / "strict_scope.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'strict-scope.sqlite'}"
+        ),
+        encoding="utf-8",
+    )
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Story Hub",
+                        "account_url": "https://www.facebook.com/storyhub",
+                        "post_url": "https://www.facebook.com/storyhub/posts/ready-scope",
+                        "posted_at": "2026年6月2日 10:00",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                        "article_url": "https://story.example/ready-scope",
+                        "landing_url": "https://story.example/ready-scope",
+                        "lead_url_raw": "https://story.example/ready-scope",
+                        "lead_link_status": "qualified",
+                        "lead_link_source": "comment",
+                        "story_summary": VALID_CN_SUMMARY,
+                        "summary_source": "article",
+                        "likes": 80,
+                        "comments": 12,
+                        "shares": 3,
+                        "post_type": "图文",
+                    },
+                    {
+                        "account_name": "Story Hub",
+                        "account_url": "https://www.facebook.com/storyhub",
+                        "post_url": "https://www.facebook.com/storyhub/posts/incomplete-scope",
+                        "relative_time_text": "2h",
+                        "story_summary": "Visible homepage candidate.",
+                        "crawled_at": "2026-06-02T12:00:00",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    sync = run(
+        [
+            PYTHON,
+            "scripts/import_existing_result.py",
+            "--config",
+            str(config),
+            "--input",
+            str(sample),
+            "--sync",
+            "--strict-ready-only",
+            "--dry-run",
+        ]
+    )
+    assert sync.returncode == 0, sync.stdout
+    data = json.loads(sync.stdout)
+    completion = data["feishu_sync"]["enrichment_completion"]
+    assert data["feishu_sync"]["ready_for_output"] == 1
+    assert data["feishu_sync"]["complete"] is False
+    assert data["feishu_sync"]["run_status"] == "incomplete_pending_tasks"
+    assert completion["post_count"] == 2
+    assert completion["ready_or_synced_posts"] == 1
+    assert completion["final_usable_rate"] == 0.5
+    assert completion["has_incomplete_enrichment"] is True
+
+
 def assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path: Path) -> None:
     config = tmp_path / "settings_minimal_ledger.yaml"
     sample = tmp_path / "minimal_ledger.json"
@@ -2545,6 +2664,185 @@ def assert_stale_running_enrichment_tasks_are_recovered(tmp_path: Path) -> None:
     assert tasks[0]["status"] == "pending"
 
 
+def assert_enrichment_worker_scopes_tasks_to_account(tmp_path: Path) -> None:
+    config = tmp_path / "settings_worker_scope.yaml"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'worker-scope.sqlite'}"),
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, upsert_post
+
+    conn = connect(tmp_path / "worker-scope.sqlite")
+    target = normalize_post(
+        {
+            "account_name": "Target",
+            "account_url": "https://www.facebook.com/target",
+            "post_url": "https://www.facebook.com/target/posts/one",
+            "post_time_text": "1h",
+            "story_summary": "Visible target candidate.",
+            "crawled_at": "2026-06-02T12:00:00",
+        }
+    )
+    other = normalize_post(
+        {
+            "account_name": "Other",
+            "account_url": "https://www.facebook.com/other",
+            "post_url": "https://www.facebook.com/other/posts/one",
+            "post_time_text": "1h",
+            "story_summary": "Visible other candidate.",
+            "crawled_at": "2026-06-02T12:00:00",
+        }
+    )
+    for post in (target, other):
+        upsert_post(conn, post)
+        enqueue_enrichment_tasks_for_posts(conn, [post])
+
+    worker = run(
+        [
+            PYTHON,
+            "scripts/enrichment_worker.py",
+            "--config",
+            str(config),
+            "--stages",
+            "summary",
+            "--date",
+            "260602",
+            "--account-url",
+            "https://www.facebook.com/target",
+            "--account-type",
+            "competitor",
+            "--limit",
+            "10",
+        ]
+    )
+    assert worker.returncode == 1, worker.stdout
+    data = json.loads(worker.stdout)
+    assert data["scope"]["enabled"] is True
+    assert data["scope"]["post_count"] == 1
+    assert data["input_tasks"] == 1
+    assert data["task_counts"].get("summary:failed") == 1
+    assert "Other" not in worker.stdout
+
+
+def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> None:
+    config = tmp_path / "settings_account_job.yaml"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'account-job.sqlite'}"),
+        encoding="utf-8",
+    )
+    sample = tmp_path / "account_job.json"
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Resume Page",
+                        "account_url": "https://www.facebook.com/resumepage",
+                        "post_url": "https://www.facebook.com/resumepage/posts/one",
+                        "relative_time_text": "1h",
+                        "story_summary": "Visible homepage candidate.",
+                        "crawled_at": "2026-06-02T12:00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
+    assert imported.returncode == 0, imported.stdout
+    job = run(
+        [
+            PYTHON,
+            "scripts/run_account_job.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/resumepage",
+            "--account-name",
+            "Resume Page",
+            "--target-date",
+            "260602",
+            "--resume-only",
+            "--status-only",
+            "--sync",
+            "--dry-run",
+        ]
+    )
+    assert job.returncode == 0, job.stdout
+    data = json.loads(job.stdout)
+    assert data["post_count"] == 1
+    assert data["run_status"] == "incomplete_pending_tasks"
+    assert data["complete"] is False
+    assert data["feishu_sync"]["run_status"] == "synced_ledger_incomplete"
+    assert data["enrichment_completion"]["open_task_count"] > 0
+
+
+def assert_run_account_job_blocks_auth_before_capture(tmp_path: Path) -> None:
+    config = tmp_path / "settings_account_job_auth.yaml"
+    fake_lark = tmp_path / "fake-lark-cli"
+    fake_opencli = tmp_path / "fake-opencli"
+    opencli_called = tmp_path / "opencli-called"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'account-job-auth.sqlite'}")
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/bin/sh
+if [ "$1" = "config" ]; then
+  echo "$2: user"
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo '{"identity":"bot","tokenStatus":"valid"}'
+  exit 0
+fi
+echo '{}'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_opencli.write_text(
+        f"""#!/bin/sh
+touch {opencli_called}
+echo '1.8.1'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    fake_opencli.chmod(0o755)
+
+    job = run(
+        [
+            PYTHON,
+            "scripts/run_account_job.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/authblocked",
+            "--account-name",
+            "Auth Blocked",
+            "--target-date",
+            "260602",
+            "--sync",
+        ]
+    )
+    assert job.returncode == 1, job.stdout
+    data = json.loads(job.stdout)
+    assert data["run_status"] == "blocked_auth"
+    assert data["complete"] is False
+    assert data["feishu_auth_preflight"]["ok"] is False
+    assert "opencli_preflight" not in data
+    assert not opencli_called.exists()
+
+
 def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
     config = tmp_path / "settings.yaml"
     db_path = tmp_path / "worker.sqlite"
@@ -2890,7 +3188,9 @@ def main() -> int:
         assert hot_after_many_data["count"] == 1, hot_after_many.stdout
         assert_sqlite_upsert_preserves_enriched_fields(tmp_path)
         assert_field_audit_marks_refetchable_missing_fields(tmp_path)
+        assert_sync_status_marks_incomplete_ledger(tmp_path)
         assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path)
+        assert_strict_sync_completion_uses_full_candidate_scope(tmp_path)
         assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path)
         assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_path)
         assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path)
@@ -2907,9 +3207,12 @@ def main() -> int:
         assert_partial_review_status_and_task_queue(tmp_path)
         assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path)
         assert_stale_running_enrichment_tasks_are_recovered(tmp_path)
+        assert_enrichment_worker_scopes_tasks_to_account(tmp_path)
         assert_enrichment_worker_article_cache_and_summary(tmp_path)
         assert_story_summary_audit_downgrades_invalid_rows(tmp_path)
         assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path)
+        assert_run_account_job_resume_status_reports_incomplete(tmp_path)
+        assert_run_account_job_blocks_auth_before_capture(tmp_path)
 
     print("local pipeline acceptance passed")
     return 0

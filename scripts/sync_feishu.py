@@ -12,6 +12,7 @@ from field_schema import configured_output_headers, output_row_for_headers
 from lark_io import ensure_user_identity, write_rows
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review, ready_for_output
 from store import all_posts, connect
+from sync_status import annotate_sync_result, enrichment_completion_summary
 
 
 def sync_posts(
@@ -23,17 +24,27 @@ def sync_posts(
     *,
     partial: bool = False,
     audit: bool = False,
+    conn: Any | None = None,
+    completion_posts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    completion_scope = completion_posts if completion_posts is not None else posts
     if partial:
         partial_posts, skipped_posts = partial_for_review(posts)
         if not partial_posts:
-            return {
+            result = {
                 "ok": False,
                 "stage": "partial_gate",
                 "message": "没有可供业务预览的 partial_review 记录。",
                 "partial_review": 0,
                 "skipped": len(skipped_posts),
             }
+            if conn is not None:
+                return annotate_sync_result(
+                    result,
+                    enrichment_completion_summary(conn, completion_scope),
+                    ledger_mode=True,
+                )
+            return result
         output_headers = configured_output_headers(config)
         rows = [output_row_for_headers(post, output_headers) for post in partial_posts]
         headers = output_headers if mode == "overwrite" else None
@@ -41,44 +52,83 @@ def sync_posts(
         result["partial_review"] = len(partial_posts)
         result["skipped"] = len(skipped_posts)
         result["formal_output_unchanged"] = True
+        if conn is not None:
+            return annotate_sync_result(
+                result,
+                enrichment_completion_summary(conn, completion_scope),
+                ledger_mode=True,
+            )
         return result
 
     if audit:
         output_headers = configured_output_headers(config)
         output_posts, skipped_posts = audit_output_candidates(posts)
         if not output_posts:
-            return {
+            result = {
                 "ok": False,
                 "stage": "audit_output_gate",
                 "message": "没有可写入正式表的候选记录。",
                 "output_candidates": 0,
                 "skipped": len(skipped_posts),
             }
+            if conn is not None:
+                return annotate_sync_result(
+                    result,
+                    enrichment_completion_summary(conn, completion_scope),
+                    ledger_mode=True,
+                )
+            return result
         rows = [output_row_for_headers(post, output_headers) for post in output_posts]
         result = write_rows(config, sheet_key, rows, headers=output_headers, mode="upsert", dry_run=dry_run)
         result["output_candidates"] = len(output_posts)
         result["skipped"] = len(skipped_posts)
         result["audit_output"] = True
+        if conn is not None:
+            return annotate_sync_result(
+                result,
+                enrichment_completion_summary(conn, completion_scope),
+                ledger_mode=True,
+            )
         return result
 
     ready_posts, skipped_posts = ready_for_output(posts)
     errors = output_quality_errors(ready_posts)
     if errors:
-        return {"ok": False, "stage": "quality_gate", "errors": errors}
+        result = {"ok": False, "stage": "quality_gate", "errors": errors}
+        if conn is not None:
+            return annotate_sync_result(
+                result,
+                enrichment_completion_summary(conn, completion_scope),
+                ledger_mode=False,
+            )
+        return result
     if not ready_posts:
-        return {
+        result = {
             "ok": False,
             "stage": "quality_gate",
             "message": "没有字段完整、可写最终表的记录。",
             "ready_for_output": 0,
             "needs_enrichment_skipped": len(skipped_posts),
         }
+        if conn is not None:
+            return annotate_sync_result(
+                result,
+                enrichment_completion_summary(conn, completion_scope),
+                ledger_mode=False,
+            )
+        return result
     output_headers = configured_output_headers(config)
     rows = [output_row_for_headers(post, output_headers) for post in ready_posts]
     headers = output_headers if mode == "overwrite" else None
     result = write_rows(config, sheet_key, rows, headers=headers, mode=mode, dry_run=dry_run)
     result["ready_for_output"] = len(ready_posts)
     result["needs_enrichment_skipped"] = len(skipped_posts)
+    if conn is not None:
+        return annotate_sync_result(
+            result,
+            enrichment_completion_summary(conn, completion_scope),
+            ledger_mode=False,
+        )
     return result
 
 
@@ -120,8 +170,9 @@ def main() -> int:
         args.dry_run,
         partial=args.partial,
         audit=args.audit or not args.strict_ready_only,
+        conn=conn,
     )
-    print(result)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("ok") else 1
 
 

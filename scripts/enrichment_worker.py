@@ -25,9 +25,12 @@ from store import (
     mark_task_failed,
     mark_task_running,
     pending_enrichment_tasks,
+    pending_enrichment_tasks_for_posts,
     post_for_task,
+    query_posts,
     row_for_post,
     task_counts,
+    task_counts_for_posts,
     update_post_fields,
     upsert_article_material,
     upsert_post,
@@ -221,8 +224,14 @@ def batches_for_detail_units(units: list[dict[str, Any]], batch_size: int) -> li
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/settings.yaml")
-    parser.add_argument("--stages", default="detail_time,lead_link,article_material")
+    parser.add_argument("--stages", default="detail_time,lead_link,engagement,post_type,article_material")
     parser.add_argument("--target-date", default="")
+    parser.add_argument("--date", default="")
+    parser.add_argument("--start-date", default="")
+    parser.add_argument("--end-date", default="")
+    parser.add_argument("--account-name", default="")
+    parser.add_argument("--account-url", default="")
+    parser.add_argument("--account-type", default="")
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--detail-concurrency", type=int, default=0)
     parser.add_argument("--article-concurrency", type=int, default=0)
@@ -232,7 +241,34 @@ def main() -> int:
     db_path = config.get("database_path", "data/posts.sqlite")
     conn = connect(db_path)
     stages = split_stages(args.stages)
-    tasks = pending_enrichment_tasks(conn, stages=stages, limit=args.limit)
+    scope_enabled = any(
+        [
+            args.date,
+            args.start_date,
+            args.end_date,
+            args.account_name,
+            args.account_url,
+            args.account_type,
+        ]
+    )
+    scoped_posts = (
+        query_posts(
+            conn,
+            date=args.date,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            account_name=args.account_name,
+            account_url=args.account_url,
+            account_type=args.account_type,
+        )
+        if scope_enabled
+        else []
+    )
+    tasks = (
+        pending_enrichment_tasks_for_posts(conn, scoped_posts, stages=stages, limit=args.limit)
+        if scope_enabled
+        else pending_enrichment_tasks(conn, stages=stages, limit=args.limit)
+    )
     started = time.monotonic()
     completed = 0
     failed = 0
@@ -322,7 +358,17 @@ def main() -> int:
         "completed": completed,
         "failed": failed,
         "elapsed_ms": int((time.monotonic() - started) * 1000),
-        "task_counts": task_counts(conn),
+        "scope": {
+            "enabled": scope_enabled,
+            "date": args.date,
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+            "account_name": args.account_name,
+            "account_url": args.account_url,
+            "account_type": args.account_type,
+            "post_count": len(scoped_posts) if scope_enabled else None,
+        },
+        "task_counts": task_counts_for_posts(conn, scoped_posts) if scope_enabled else task_counts(conn),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if failed == 0 else 1
