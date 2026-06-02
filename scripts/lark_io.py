@@ -8,6 +8,7 @@ import json
 import subprocess
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, unquote, urlparse
 
 from config_loader import deep_get, load_config
 from field_audit import is_system_audit_marker
@@ -285,6 +286,49 @@ def key_column_index(headers: list[Any], key_field: str) -> int | None:
     return None
 
 
+def normalized_upsert_key(value: Any, key_field: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if key_field != "post_url":
+        return text
+    try:
+        parsed = urlparse(text)
+    except Exception:
+        return text
+    if "l.facebook.com" in parsed.netloc:
+        qs = parse_qs(parsed.query)
+        if qs.get("u"):
+            return normalized_upsert_key(unquote(qs["u"][0]), key_field)
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("m."):
+        netloc = netloc[2:]
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    path = parsed.path.rstrip("/")
+    qs = parse_qs(parsed.query)
+    parts = [part for part in path.split("/") if part]
+    story_fbid = (qs.get("story_fbid") or qs.get("fbid") or [""])[0]
+    account_id = (qs.get("id") or [""])[0]
+    if story_fbid and account_id:
+        return f"facebook:{account_id}:posts:{story_fbid}"
+    if "posts" in parts:
+        index = parts.index("posts")
+        if index > 0 and index + 1 < len(parts):
+            return f"facebook:{parts[index - 1]}:posts:{parts[index + 1]}"
+    if "reel" in parts:
+        index = parts.index("reel")
+        if index + 1 < len(parts):
+            return f"facebook:reel:{parts[index + 1]}"
+    if "watch" in parts and qs.get("v"):
+        return f"facebook:watch:{qs['v'][0]}"
+    if ("photo.php" in path or parts == ["photo"]) and story_fbid:
+        return f"facebook:photo:{story_fbid}"
+    if netloc.endswith("facebook.com"):
+        return f"https://facebook.com{path}"
+    return text
+
+
 def merge_upsert_row(existing: list[Any], incoming: list[Any], headers: list[str]) -> list[Any]:
     width = max(len(headers), len(existing), len(incoming))
     merged = list(existing) + [""] * (width - len(existing))
@@ -346,12 +390,12 @@ def upsert_rows(
     by_key: dict[str, int] = {}
     for index, row in enumerate(existing_rows):
         if len(row) > key_index and row[key_index]:
-            by_key[str(row[key_index])] = index
+            by_key[normalized_upsert_key(row[key_index], key_field)] = index
     updated = 0
     inserted = 0
     merged_rows = [list(row) for row in existing_rows]
     for row in rows:
-        key = str(row[key_index]) if len(row) > key_index and row[key_index] else ""
+        key = normalized_upsert_key(row[key_index], key_field) if len(row) > key_index and row[key_index] else ""
         if key and key in by_key:
             row_index = by_key[key]
             merged_rows[row_index] = merge_upsert_row(merged_rows[row_index], row, headers)

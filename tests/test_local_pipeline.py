@@ -1080,7 +1080,7 @@ def assert_ledger_marker_includes_time_summary_and_coverage() -> None:
 
 def assert_feishu_upsert_merges_rows_without_overwriting_manual_adoption() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
-    from lark_io import merge_upsert_row
+    from lark_io import merge_upsert_row, normalized_upsert_key
 
     headers = ["帖子链接", "故事概要", "是否采用"]
     existing = ["https://facebook.com/post/1", "旧概要", "采用"]
@@ -1090,6 +1090,67 @@ def assert_feishu_upsert_merges_rows_without_overwriting_manual_adoption() -> No
     existing_marker = ["https://facebook.com/post/2", "旧概要", "待补抓：评论数"]
     incoming_ready = ["https://facebook.com/post/2", "新概要", ""]
     assert merge_upsert_row(existing_marker, incoming_ready, headers) == ["https://facebook.com/post/2", "新概要", ""]
+    assert normalized_upsert_key(
+        "https://www.facebook.com/storyhub/posts/pfbid123?utm_source=x",
+        "post_url",
+    ) == normalized_upsert_key("https://facebook.com/storyhub/posts/pfbid123", "post_url")
+    assert normalized_upsert_key(
+        "https://m.facebook.com/story.php?story_fbid=123&id=456&ref=share",
+        "post_url",
+    ) == normalized_upsert_key("https://facebook.com/456/posts/123", "post_url")
+
+
+def assert_feishu_upsert_matches_canonical_post_urls(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import lark_io
+
+    original_require_user_identity = lark_io.require_user_identity
+    original_ensure_sheet = lark_io.ensure_sheet
+    original_read_range = lark_io.read_range
+    original_write_range = lark_io.write_range
+
+    class FakeResult:
+        def __init__(self, stdout: str = "", returncode: int = 0, stderr: str = ""):
+            self.stdout = stdout
+            self.returncode = returncode
+            self.stderr = stderr
+
+    written: dict[str, Any] = {}
+    headers = ["账号", "帖子链接", "故事概要", "是否采用"]
+    existing = [
+        headers,
+        ["Story Hub", "https://www.facebook.com/storyhub/posts/pfbid123?utm_source=x", "旧概要", "采用"],
+    ]
+    incoming = [["Story Hub", "https://facebook.com/storyhub/posts/pfbid123", "新概要", "待补抓：引流链接"]]
+    config = {"feishu": {"sheets": {"all_posts": "FB竞品帖子链接"}}}
+    try:
+        lark_io.require_user_identity = lambda _config: {"identity": "user", "tokenStatus": "valid"}
+        lark_io.ensure_sheet = lambda _config, _title: {"ok": True, "sheet": {"sheet_id": "sheet123", "title": "FB竞品帖子链接"}}
+        lark_io.read_range = lambda _config, _range: FakeResult(
+            json.dumps({"data": {"valueRange": {"values": existing}}}, ensure_ascii=False)
+        )
+
+        def fake_write(_config, range_expr, values):
+            written["range"] = range_expr
+            written["values"] = values
+            return FakeResult("{}")
+
+        lark_io.write_range = fake_write
+        result = lark_io.upsert_rows(config, "all_posts", incoming, headers=headers, dry_run=False)
+        assert result["ok"] is True
+        assert result["updated"] == 1
+        assert result["inserted"] == 0
+        assert written["values"][1] == [
+            "Story Hub",
+            "https://facebook.com/storyhub/posts/pfbid123",
+            "新概要",
+            "采用",
+        ]
+    finally:
+        lark_io.require_user_identity = original_require_user_identity
+        lark_io.ensure_sheet = original_ensure_sheet
+        lark_io.read_range = original_read_range
+        lark_io.write_range = original_write_range
 
 
 def assert_sync_feishu_audit_and_strict_modes() -> None:
@@ -3433,6 +3494,8 @@ def main() -> int:
     assert_audit_marker_is_written_to_adoption_status()
     assert_ledger_marker_includes_time_summary_and_coverage()
     assert_feishu_upsert_merges_rows_without_overwriting_manual_adoption()
+    with tempfile.TemporaryDirectory() as tmp:
+        assert_feishu_upsert_matches_canonical_post_urls(Path(tmp))
     assert_sync_feishu_audit_and_strict_modes()
     assert_generic_photo_canonical_is_recomputed()
     assert_mobile_dom_extractor_can_see_story_links()
