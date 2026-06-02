@@ -7,12 +7,14 @@ from typing import Any
 
 from field_audit import REASON_LABELS, REASON_STAGES, audit_post_fields, parse_reasons
 from pipeline_status import missing_enrichment_stages
+from story_summary_policy import article_material_for_post, has_valid_story_summary
 from store import enrichment_tasks_for_posts
 
 
 OPEN_TASK_STATUSES = {"pending", "failed", "running"}
 FINAL_OUTPUT_STATUSES = {"ready_for_output", "output_synced"}
 NON_LEDGER_STATUSES = {"blocked"}
+AUTO_ENRICHMENT_STAGES = {"detail_time", "lead_link", "engagement", "post_type", "article_material"}
 
 
 def _post_key(post: dict[str, Any]) -> str:
@@ -67,6 +69,10 @@ def _open_task_stage_counts(open_tasks: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _requires_codex_summary(post: dict[str, Any]) -> bool:
+    return bool(not has_valid_story_summary(post) and article_material_for_post(post))
+
+
 def _field_gap_reasons(post: dict[str, Any]) -> list[str]:
     stored_reasons = parse_reasons(post.get("field_audit_reasons"))
     if stored_reasons:
@@ -119,8 +125,7 @@ def _next_actions(
         return ["先从账号主页顶部运行采集；没有候选时不要同步空结果。"]
     if coverage_incomplete_count:
         actions.append("覆盖未完成：从账号主页顶部重跑采集，必要时提高 --max-snapshots 后继续补抓。")
-    detail_stages = {"detail_time", "lead_link", "engagement", "post_type", "article_material"}
-    if open_task_count or detail_stages.intersection(missing_stage_counts):
+    if open_task_count or AUTO_ENRICHMENT_STAGES.intersection(missing_stage_counts):
         actions.append(
             "继续运行 enrichment_worker 的 detail_time,lead_link,engagement,post_type,article_material 阶段。"
         )
@@ -161,12 +166,24 @@ def enrichment_completion_summary(conn: Any, posts: list[dict[str, Any]]) -> dic
     incomplete_keys = set(missing_by_post)
     incomplete_keys.update(_task_key(task) for task in open_tasks if _task_key(task))
     incomplete_keys.update(coverage_incomplete_urls)
-    summary_blockers = [
+    auto_open_tasks = [task for task in open_tasks if task.get("stage") in AUTO_ENRICHMENT_STAGES]
+    summary_open_tasks = [task for task in open_tasks if task.get("stage") == "summary"]
+    summary_task_blockers = [
         task
         for task in open_tasks
         if task.get("stage") == "summary"
         and "requires_codex_chinese_summary" in str(task.get("last_error") or "")
     ]
+    summary_required_urls = {
+        _post_key(post)
+        for post in posts
+        if _post_key(post) and _requires_codex_summary(post)
+    }
+    summary_required_urls.update(
+        _task_key(task)
+        for task in summary_task_blockers
+        if _task_key(task)
+    )
     post_count = len(posts)
     ready_or_synced_posts = [
         post for post in posts if post.get("output_status") in FINAL_OUTPUT_STATUSES
@@ -193,6 +210,8 @@ def enrichment_completion_summary(conn: Any, posts: list[dict[str, Any]]) -> dic
         "completion_rate": _rate(max(0, post_count - len(incomplete_keys)), post_count),
         "incomplete_post_urls": sorted(incomplete_keys)[:10],
         "open_task_count": len(open_tasks),
+        "auto_open_task_count": len(auto_open_tasks),
+        "summary_open_task_count": len(summary_open_tasks),
         "task_counts": task_counts,
         "open_task_stage_counts": open_stage_counts,
         "missing_stages_by_post": dict(list(missing_by_post.items())[:10]),
@@ -200,20 +219,23 @@ def enrichment_completion_summary(conn: Any, posts: list[dict[str, Any]]) -> dic
         "field_gap_counts": field_gap_counts,
         "top_field_gaps": _top_field_gaps(field_gap_counts),
         "field_gap_notes": _field_gap_notes(field_gap_counts),
-        "requires_codex_summary_count": len(summary_blockers),
-        "requires_codex_summary_urls": sorted({_task_key(task) for task in summary_blockers if _task_key(task)})[:10],
+        "requires_codex_summary_count": len(summary_required_urls),
+        "requires_codex_summary_urls": sorted(summary_required_urls)[:10],
         "coverage_complete": coverage_incomplete_count == 0,
         "coverage_health": "complete" if coverage_incomplete_count == 0 else "incomplete",
         "coverage_incomplete_count": coverage_incomplete_count,
         "coverage_incomplete_urls": sorted(set(coverage_incomplete_urls))[:10],
         "has_incomplete_enrichment": bool(incomplete_keys or open_tasks),
+        "has_auto_enrichment_work": bool(auto_open_tasks or AUTO_ENRICHMENT_STAGES.intersection(missing_stage_counts)),
+        "has_summary_only_work": bool(summary_required_urls)
+        and not (auto_open_tasks or AUTO_ENRICHMENT_STAGES.intersection(missing_stage_counts)),
         "next_actions": _next_actions(
             post_count=post_count,
             coverage_incomplete_count=coverage_incomplete_count,
             missing_stage_counts=missing_stage_counts,
             field_gap_counts=field_gap_counts,
-            requires_codex_summary_count=len(summary_blockers),
-            open_task_count=len(open_tasks),
+            requires_codex_summary_count=len(summary_required_urls),
+            open_task_count=len(auto_open_tasks),
         ),
     }
 

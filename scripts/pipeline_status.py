@@ -7,7 +7,7 @@ from typing import Any
 
 from models import COMMENT_LEAD_SOURCES, ESTIMATED_TIME_SOURCES, has_qualified_comment_lead_link
 from field_audit import audit_refetch_stages
-from story_summary_policy import has_valid_story_summary
+from story_summary_policy import article_material_for_post, has_valid_story_summary
 
 
 PARTIAL_REVIEW = "partial_review"
@@ -58,7 +58,7 @@ def missing_enrichment_stages(post: dict[str, Any]) -> list[str]:
     if not has_qualified_comment_lead_link(post):
         stages.append("lead_link")
     if post.get("landing_url") or post.get("article_url"):
-        if not post.get("article_material") and not has_article_summary(post):
+        if not article_material_for_post(post) and not has_article_summary(post):
             stages.append("article_material")
     if not has_article_summary(post):
         stages.append("summary")

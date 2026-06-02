@@ -96,7 +96,7 @@ Run all commands from the skill root.
 | Detail enrichment | `node scripts/opencli_enrich_post_details.mjs --input <prepared.json> --output <detail_enriched.json> --target-date YYMMDD` |
 | Fetch article material | `python3 scripts/enrich_article_summaries.py --input <detail_enriched.json> --output <with_article_material.json>` |
 | Apply Codex Chinese summaries | `python3 scripts/apply_article_summaries.py --input <with_article_material.json> --summaries <summaries.json> --output <ready.json>` |
-| Export SQLite summary requests | `python3 scripts/export_summary_requests.py --config config/settings.yaml --output exports/summary_requests.json` |
+| Export SQLite summary requests | `python3 scripts/export_summary_requests.py --config config/settings.yaml --output exports/summary_requests.json --date YYMMDD --account-url <url> --account-type competitor` |
 | Audit local summaries | `python3 scripts/audit_story_summaries.py --config config/settings.yaml` |
 | Local acceptance test | `python3 tests/test_local_pipeline.py` |
 
@@ -165,6 +165,7 @@ Rules:
 - If the user supplies a visible expected count or label checklist, missing expected posts/labels is also `coverage_incomplete` even when scrolling itself looked stable.
 - Re-importing the same post must preserve higher-quality stored fields. Do not overwrite confirmed detail time, qualified comment/reply lead links, external landing URLs, valid Chinese article summaries, engagement values, manual `是否采用`, or final output status with weaker partial data.
 - `enrichment_worker.py --stages summary` does not generate summaries. It only verifies whether a valid Codex-written Chinese summary has already been applied; otherwise it leaves `requires_codex_chinese_summary`. Generate Chinese summaries from `export_summary_requests.py` output and apply them with `apply_article_summaries.py --config ... --summaries ...`.
+- When an account job reports `needs_codex_summary`, use its scoped `next_commands` export first. Do not run an unscoped all-database summary export for an account-specific job.
 
 ## Feishu Workflow
 

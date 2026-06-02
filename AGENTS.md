@@ -114,7 +114,7 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 - `scripts/run_capture_pipeline.py`: lower-level fast partial capture/import helper. It discovers visible candidates, prepares/imports them as partial records, and queues enrichment, but does not own full job completion. Do not use it as the final business “抓取并写入飞书” path.
 - `scripts/enrichment_worker.py`: resumes queued `detail_time`, `lead_link`, `engagement`, `post_type`, and `article_material` tasks with local concurrency limits. Its `summary` stage no longer generates story summaries; it only verifies that a Codex-written Chinese summary has been applied, otherwise it leaves `requires_codex_chinese_summary`.
 - `scripts/enrich_article_summaries.py`: fetch article/landing material for summarization.
-- `scripts/export_summary_requests.py`: export SQLite rows and article material that need Codex-written Chinese summaries.
+- `scripts/export_summary_requests.py`: export SQLite rows and article material that need Codex-written Chinese summaries. It supports `--date`, `--account-url`, `--account-name`, and `--account-type`; account-job `next_commands` must keep these scopes so summary work does not mix unrelated accounts.
 - `scripts/apply_article_summaries.py`: apply Codex-written Chinese summaries and recompute `output_status`.
 - `scripts/audit_story_summaries.py`: audit invalid local summaries and optionally downgrade them to `needs_enrichment`.
 - `scripts/audit_fields.py`: audit missing/refetchable output fields, write `field_audit_*` markers, and queue refetch tasks when run with `--fix`.

@@ -543,7 +543,8 @@ def next_commands_for_status(
                 "command": command_text(command),
             }
         )
-    if run_status in {"coverage_incomplete", "incomplete_pending_tasks", "synced_ledger_incomplete"} or completion.get("open_task_count"):
+    has_auto_work = bool(completion.get("auto_open_task_count") or completion.get("has_auto_enrichment_work"))
+    if run_status in {"coverage_incomplete", "incomplete_pending_tasks", "synced_ledger_incomplete"} or has_auto_work:
         command = resume_command(base, primary_date, force_recover_running=True)
         command.extend(
             [
@@ -560,20 +561,27 @@ def next_commands_for_status(
         )
     if run_status == "needs_codex_summary" or completion.get("requires_codex_summary_count"):
         output = f"exports/summary_requests_{primary_date or 'current'}.json"
+        command = [
+            "python3",
+            "scripts/export_summary_requests.py",
+            "--config",
+            args.config,
+            "--output",
+            output,
+        ]
+        if primary_date:
+            command.extend(["--date", primary_date])
+        if args.account_name:
+            command.extend(["--account-name", args.account_name])
+        if args.account_url:
+            command.extend(["--account-url", args.account_url])
+        if args.account_type:
+            command.extend(["--account-type", args.account_type])
         commands.append(
             {
                 "reason": "needs_codex_summary",
                 "description": "导出需要 Codex 中文概要的文章材料。",
-                "command": command_text(
-                    [
-                        "python3",
-                        "scripts/export_summary_requests.py",
-                        "--config",
-                        args.config,
-                        "--output",
-                        output,
-                    ]
-                ),
+                "command": command_text(command),
             }
         )
     if run_status == "blocked_auth":
@@ -625,7 +633,7 @@ def summarize_job_status(
         return "needs_codex_summary"
     if completion.get("coverage_incomplete_count"):
         return "coverage_incomplete"
-    if completion.get("has_incomplete_enrichment"):
+    if completion.get("has_auto_enrichment_work") or completion.get("has_incomplete_enrichment"):
         return "incomplete_pending_tasks"
     if sync_result.get("ok") and not sync_result.get("skipped"):
         return "complete"

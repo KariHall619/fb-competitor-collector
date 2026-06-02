@@ -1240,6 +1240,135 @@ def assert_sync_status_marks_incomplete_ledger(tmp_path: Path) -> None:
     assert any("覆盖未完成" in action for action in completion["next_actions"])
 
 
+def assert_sync_status_promotes_summary_only_work(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from sync_status import enrichment_completion_summary
+    from store import connect, enqueue_enrichment_tasks_for_posts, row_for_post, upsert_post
+
+    conn = connect(tmp_path / "summary-only-status.sqlite")
+    article_material = {
+        "article_material": {
+            "ok": True,
+            "article_url": "https://story.example/summary",
+            "title": "Summary-only story",
+            "text_excerpt": "A complete article material payload exists and only needs a Chinese summary.",
+        }
+    }
+    post = normalize_post(
+        {
+            "account_name": "Example Page",
+            "account_url": "https://www.facebook.com/example",
+            "post_url": "https://www.facebook.com/example/posts/summary-only",
+            "posted_at": "2026年6月2日 12:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/summary",
+            "landing_url": "https://story.example/summary",
+            "lead_url_raw": "https://story.example/summary",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "likes": 20,
+            "comments": 3,
+            "shares": 1,
+            "post_type": "图文",
+            **article_material,
+        }
+    )
+    upsert_post(conn, post)
+    stored = row_for_post(conn, post)
+    assert stored is not None
+    enqueue_enrichment_tasks_for_posts(conn, [stored])
+    completion = enrichment_completion_summary(conn, [stored])
+    assert completion["requires_codex_summary_count"] == 1
+    assert completion["requires_codex_summary_urls"] == [stored["canonical_post_url"]]
+    assert completion["open_task_count"] == 1
+    assert completion["summary_open_task_count"] == 1
+    assert completion["auto_open_task_count"] == 0
+    assert completion["has_summary_only_work"] is True
+    assert completion["has_auto_enrichment_work"] is False
+    assert completion["missing_stage_counts"] == {"summary": 1}
+    assert any("导出 summary requests" in action for action in completion["next_actions"])
+    assert not any("继续运行 enrichment_worker" in action for action in completion["next_actions"])
+
+
+def assert_export_summary_requests_can_scope_account_job(tmp_path: Path) -> None:
+    config = tmp_path / "settings_summary_scope.yaml"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    db_path = tmp_path / "summary-scope.sqlite"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {db_path}"),
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, upsert_post
+
+    conn = connect(db_path)
+    material = {
+        "article_material": {
+            "ok": True,
+            "title": "Scoped story",
+            "text_excerpt": "A story with enough article material for a scoped summary request.",
+        }
+    }
+    raw_target = {
+        "account_name": "Target",
+        "account_url": "https://www.facebook.com/target",
+        "account_type": "competitor",
+        "post_url": "https://www.facebook.com/target/posts/summary-scope",
+        "posted_at": "2026年6月2日 12:00",
+        "time_confirmed": True,
+        "time_source": "dom_aria_label",
+        "article_url": "https://story.example/target",
+        "landing_url": "https://story.example/target",
+        "lead_url_raw": "https://story.example/target",
+        "lead_link_status": "qualified",
+        "lead_link_source": "comment",
+        "likes": 20,
+        "comments": 3,
+        "shares": 1,
+        "post_type": "图文",
+        **material,
+    }
+    raw_other = {
+        **raw_target,
+        "account_name": "Other",
+        "account_url": "https://www.facebook.com/other",
+        "post_url": "https://www.facebook.com/other/posts/summary-scope",
+        "article_url": "https://story.example/other",
+        "landing_url": "https://story.example/other",
+        "lead_url_raw": "https://story.example/other",
+    }
+    target = normalize_post(raw_target)
+    other = normalize_post(raw_other)
+    upsert_post(conn, target)
+    upsert_post(conn, other)
+    output = tmp_path / "summary_requests_scoped.json"
+    exported = run(
+        [
+            PYTHON,
+            "scripts/export_summary_requests.py",
+            "--config",
+            str(config),
+            "--output",
+            str(output),
+            "--date",
+            "260602",
+            "--account-url",
+            "https://www.facebook.com/target",
+            "--account-type",
+            "competitor",
+        ]
+    )
+    assert exported.returncode == 0, exported.stderr or exported.stdout
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["scope"]["enabled"] is True
+    assert payload["scope"]["source_post_count"] == 1
+    assert payload["count"] == 1
+    assert payload["requests"][0]["post_url"] == "https://facebook.com/target/posts/summary-scope"
+
+
 def assert_sync_feishu_strict_marks_ready_rows_synced(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import sync_feishu
@@ -3240,6 +3369,57 @@ def assert_run_account_job_next_commands_force_recover_running() -> None:
     assert "--force-recover-running" in pending["command"]
 
 
+def assert_run_account_job_summary_only_next_command_exports_requests() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/example",
+            "account_name": "Example Page",
+            "account_type": "competitor",
+            "sync": True,
+            "dry_run": False,
+            "max_snapshots": 20,
+            "max_resume_passes": 2,
+            "expected_post_count": 0,
+            "expected_labels": "",
+        },
+    )()
+    completion = {
+        "open_task_count": 1,
+        "summary_open_task_count": 1,
+        "auto_open_task_count": 0,
+        "requires_codex_summary_count": 1,
+        "has_summary_only_work": True,
+        "has_auto_enrichment_work": False,
+    }
+    status = run_account_job.summarize_job_status(
+        preflight={"ok": True},
+        discover_import=None,
+        worker_passes=[],
+        sync_result={"ok": True},
+        completion=completion,
+    )
+    commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260603"],
+        run_status=status,
+        completion=completion,
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert status == "needs_codex_summary"
+    assert [item["reason"] for item in commands] == ["needs_codex_summary"]
+    assert "export_summary_requests.py" in commands[0]["command"]
+    assert "--date 260603" in commands[0]["command"]
+    assert "--account-url https://www.facebook.com/example" in commands[0]["command"]
+    assert "--account-type competitor" in commands[0]["command"]
+    assert "--resume-only" not in commands[0]["command"]
+
+
 def assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path: Path) -> None:
     config = tmp_path / "settings_account_job_unknown_date.yaml"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
@@ -3960,6 +4140,8 @@ def main() -> int:
         assert_sqlite_upsert_preserves_enriched_fields(tmp_path)
         assert_field_audit_marks_refetchable_missing_fields(tmp_path)
         assert_sync_status_marks_incomplete_ledger(tmp_path)
+        assert_sync_status_promotes_summary_only_work(tmp_path)
+        assert_export_summary_requests_can_scope_account_job(tmp_path)
         assert_sync_feishu_strict_marks_ready_rows_synced(tmp_path)
         assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path)
         assert_strict_sync_completion_uses_full_candidate_scope(tmp_path)
@@ -3989,6 +4171,7 @@ def main() -> int:
         assert_run_account_job_recovers_scoped_running_tasks(tmp_path)
         assert_run_account_job_does_not_recover_fresh_running_tasks(tmp_path)
         assert_run_account_job_next_commands_force_recover_running()
+        assert_run_account_job_summary_only_next_command_exports_requests()
         assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path)
         assert_run_account_job_expected_coverage_marks_missing_posts()
         assert_run_account_job_blocks_auth_before_capture(tmp_path)
