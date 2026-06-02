@@ -210,28 +210,34 @@ function browserExpression(maxText = 1200) {
     const candidates = [];
     const candidateKeys = new Set();
     const pushCandidate = (candidate) => {
-      if (!candidate?.post_url) return;
+      if (!candidate?.post_url) return false;
       const key = [candidate.post_url, candidate.post_time_text || '', candidate.posted_at || ''].join('|');
-      if (candidateKeys.has(key)) return;
+      if (candidateKeys.has(key)) return false;
       candidateKeys.add(key);
       candidates.push(candidate);
+      return true;
     };
     for (const article of articles) {
-      pushCandidate(candidateFromNode(article));
       const anchors = nodeAnchors(article);
       const timeLinks = anchors.filter((a) => timeText(a.text) || timeText(a.aria));
       const postLinks = anchors.filter((a) => postHref(a.href));
+      let splitCount = 0;
       if (timeLinks.length > 1 || postLinks.length > 1) {
         for (const timeLink of timeLinks) {
           const block = nearestPostBlockForTimeLink(timeLink, article);
           if (!block) continue;
           const blockLinks = nodeAnchors(block).filter((a) => postHref(a.href));
-          pushCandidate(candidateFromNode(block, {
+          if (pushCandidate(candidateFromNode(block, {
             timeLink,
             postLink: bestPostLink(blockLinks),
             splitFromTime: true,
-          }));
+          }))) {
+            splitCount += 1;
+          }
         }
+      }
+      if (!splitCount) {
+        pushCandidate(candidateFromNode(article));
       }
     }
     const bodyText = document.body?.innerText || '';

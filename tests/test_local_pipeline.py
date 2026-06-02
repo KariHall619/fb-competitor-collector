@@ -324,13 +324,18 @@ global.document = {
 global.location = new URL('https://www.facebook.com/LessonsTaughtByLifepage');
 const result = eval(browserExpression(900));
 const urls = [...new Set(result.candidates.map((item) => item.post_url))];
-if (urls.length < 3) {
+if (urls.length !== 3 || result.candidates.length !== 3) {
   console.error(JSON.stringify(result, null, 2));
   process.exit(1);
 }
-if (!result.candidates.some((item) => item.source_split === 'time_anchor')) {
+if (!result.candidates.every((item) => item.source_split === 'time_anchor')) {
   console.error(JSON.stringify(result.candidates, null, 2));
   process.exit(2);
+}
+const first = result.candidates.find((item) => item.post_url.includes('/1001'));
+if (!first || first.story_summary.includes('A bride discovers') || first.story_summary.includes('family house')) {
+  console.error(JSON.stringify(result.candidates, null, 2));
+  process.exit(3);
 }
 """
     result = run(["node", "-e", script])
