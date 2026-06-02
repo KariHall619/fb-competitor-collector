@@ -111,6 +111,28 @@ def _field_gap_notes(field_gap_counts: dict[str, int]) -> list[str]:
     return notes
 
 
+def has_auto_enrichment_work(completion: dict[str, Any]) -> bool:
+    """Return True when a machine-runnable refetch/enrichment stage remains."""
+
+    return bool(
+        completion.get("auto_open_task_count")
+        or completion.get("coverage_incomplete_count")
+        or completion.get("has_auto_enrichment_work")
+    )
+
+
+def completion_run_status(completion: dict[str, Any], *, ledger_mode: bool = False) -> str:
+    """Map a completion summary to the next operational state."""
+
+    if has_auto_enrichment_work(completion):
+        return "synced_ledger_incomplete" if ledger_mode else "incomplete_pending_tasks"
+    if completion.get("has_summary_only_work") or completion.get("requires_codex_summary_count"):
+        return "needs_codex_summary"
+    if completion.get("has_incomplete_enrichment"):
+        return "synced_ledger_incomplete" if ledger_mode else "incomplete_pending_tasks"
+    return "complete"
+
+
 def _next_actions(
     *,
     post_count: int,
@@ -256,12 +278,7 @@ def annotate_sync_result(
         next_result.setdefault("run_status", sync_result.get("stage") or "sync_failed")
         return next_result
     if incomplete:
-        if completion.get("requires_codex_summary_count"):
-            next_result["run_status"] = "needs_codex_summary"
-        elif ledger_mode:
-            next_result["run_status"] = "synced_ledger_incomplete"
-        else:
-            next_result["run_status"] = "incomplete_pending_tasks"
+        next_result["run_status"] = completion_run_status(completion, ledger_mode=ledger_mode)
         next_result["message"] = (
             "已写入可审计台账行，但本次采集作业未完成；仍有补抓任务或缺失字段，"
             "需要继续运行可恢复作业入口。"

@@ -159,7 +159,7 @@ def article_material_fields(post: dict[str, Any], material: dict[str, Any]) -> d
 
 
 def run_article_task(config: dict[str, Any], post: dict[str, Any], conn_path: str) -> tuple[str, dict[str, Any]]:
-    url = post.get("landing_url") or post.get("article_url") or ""
+    url = post.get("article_url") or post.get("landing_url") or ""
     if not url:
         raise RuntimeError("missing article_url")
     conn = connect(conn_path)

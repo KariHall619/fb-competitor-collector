@@ -15,10 +15,31 @@ from config_loader import load_config
 from lark_io import ensure_user_identity
 from models import normalize_date
 from store import connect, query_posts
-from sync_status import enrichment_completion_summary
+from sync_status import completion_run_status, enrichment_completion_summary
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def capture_pipeline_run_status(discover_payload: dict, completion: dict) -> str:
+    coverage = discover_payload.get("coverage") if isinstance(discover_payload.get("coverage"), dict) else {}
+    if discover_payload.get("coverage_blocked") or coverage.get("coverage_blocked"):
+        return "coverage_incomplete"
+    if discover_payload.get("coverage_incomplete") or coverage.get("coverage_incomplete"):
+        return "coverage_incomplete"
+    if discover_payload.get("capture_complete") is False or coverage.get("capture_complete") is False:
+        return "coverage_incomplete"
+    if not completion.get("post_count"):
+        return "no_candidates"
+    return completion_run_status(completion, ledger_mode=False)
+
+
+def capture_pipeline_next_actions(run_status: str, completion: dict) -> list[str]:
+    if run_status == "coverage_incomplete":
+        return ["覆盖未完成：从账号主页顶部使用 run_account_job.py 重跑，必要时提高 --max-snapshots。"]
+    if run_status == "no_candidates":
+        return ["当前没有可入库候选；确认目标账号主页顶部帖子已加载后再运行 run_account_job.py。"]
+    return list(completion.get("next_actions") or [])
 
 
 def run_command(command: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
@@ -200,6 +221,7 @@ def main() -> int:
             account_type=args.account_type,
         )
         completion = enrichment_completion_summary(conn, scoped_posts)
+        run_status = capture_pipeline_run_status(discover_payload, completion)
         result = {
             "ok": True,
             "mode": "partial" if args.partial else "standard",
@@ -214,8 +236,9 @@ def main() -> int:
             "partial_review": prepared_payload.get("partial_review", 0),
             "needs_enrichment": prepared_payload.get("needs_enrichment", 0),
             "enrichment_completion": completion,
-            "complete": bool(completion.get("post_count")) and not completion.get("has_incomplete_enrichment"),
-            "run_status": "complete" if completion.get("post_count") and not completion.get("has_incomplete_enrichment") else "incomplete_pending_tasks",
+            "complete": run_status == "complete",
+            "run_status": run_status,
+            "next_actions": capture_pipeline_next_actions(run_status, completion),
             "timing_ms": {
                 "discover": int((time.monotonic() - discover_started) * 1000),
                 "prepare": int((time.monotonic() - prepare_started) * 1000),

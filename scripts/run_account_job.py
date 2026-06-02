@@ -25,7 +25,7 @@ from store import (
     task_counts_for_posts,
 )
 from sync_feishu import sync_posts
-from sync_status import enrichment_completion_summary
+from sync_status import completion_run_status, enrichment_completion_summary, has_auto_enrichment_work
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -543,7 +543,7 @@ def next_commands_for_status(
                 "command": command_text(command),
             }
         )
-    has_auto_work = bool(completion.get("auto_open_task_count") or completion.get("has_auto_enrichment_work"))
+    has_auto_work = has_auto_enrichment_work(completion)
     if run_status in {"coverage_incomplete", "incomplete_pending_tasks", "synced_ledger_incomplete"} or has_auto_work:
         command = resume_command(base, primary_date, force_recover_running=True)
         command.extend(
@@ -559,7 +559,7 @@ def next_commands_for_status(
                 "command": command_text(command),
             }
         )
-    if run_status == "needs_codex_summary" or completion.get("requires_codex_summary_count"):
+    if run_status == "needs_codex_summary" or (completion.get("requires_codex_summary_count") and not has_auto_work):
         output = f"exports/summary_requests_{primary_date or 'current'}.json"
         command = [
             "python3",
@@ -629,12 +629,11 @@ def summarize_job_status(
         return "human_intervention_required"
     if discover_has_incomplete_coverage(discover_import):
         return "coverage_incomplete"
-    if completion.get("requires_codex_summary_count"):
-        return "needs_codex_summary"
     if completion.get("coverage_incomplete_count"):
         return "coverage_incomplete"
-    if completion.get("has_auto_enrichment_work") or completion.get("has_incomplete_enrichment"):
-        return "incomplete_pending_tasks"
+    completion_status = completion_run_status(completion, ledger_mode=False)
+    if completion_status != "complete":
+        return completion_status
     if sync_result.get("ok") and not sync_result.get("skipped"):
         return "complete"
     if discover_import and discover_import.get("ok"):

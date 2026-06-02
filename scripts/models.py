@@ -282,10 +282,12 @@ def comment_lead_landing_url(lead_url_raw: Any, lead_link_source: Any) -> str:
 
 
 def has_qualified_comment_lead_link(post: dict[str, Any]) -> bool:
+    landing_url = post.get("landing_url") or post.get("article_url")
     return (
         post.get("lead_link_status") == "qualified"
         and post.get("lead_link_source") in COMMENT_LEAD_SOURCES
-        and bool(post.get("landing_url") or post.get("article_url"))
+        and bool(post.get("lead_url_raw"))
+        and is_external_landing_url(landing_url)
     )
 
 

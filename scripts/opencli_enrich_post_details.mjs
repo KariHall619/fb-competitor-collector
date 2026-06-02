@@ -862,6 +862,11 @@ function sameNormalizedUrl(left, right) {
   return Boolean(cleanLeft && cleanRight && cleanLeft === cleanRight);
 }
 
+function qualifiedLandingUrlFor(post) {
+  const landingUrl = cleanExternalUrl(post?.landing_url || post?.article_url || "");
+  return landingUrl && allowedLandingUrl(landingUrl) ? landingUrl : "";
+}
+
 async function resolveLandingUrl(href) {
   const cleaned = cleanExternalUrl(href);
   if (!cleaned) return "";
@@ -957,15 +962,14 @@ function hasQualifiedLeadLink(post) {
     post.lead_link_status === "qualified"
     && ["comment", "comment_reply"].includes(post.lead_link_source || "")
     && post.lead_url_raw
-    && (post.landing_url || post.article_url)
+    && qualifiedLandingUrlFor(post)
   );
 }
 
 async function resolvedExistingLeadLink(post) {
   if (!hasQualifiedLeadLink(post)) return null;
-  const current = post.landing_url || post.article_url || "";
-  const currentClean = cleanExternalUrl(current);
-  if (currentClean && allowedLandingUrl(currentClean)) {
+  const currentClean = qualifiedLandingUrlFor(post);
+  if (currentClean) {
     return {
       status: "qualified",
       lead_url_raw: post.lead_url_raw,
@@ -979,7 +983,7 @@ async function resolvedExistingLeadLink(post) {
     };
   }
   const resolved = await resolveLandingUrl(post.lead_url_raw);
-  const landingUrl = resolved || cleanExternalUrl(current);
+  const landingUrl = resolved || currentClean;
   if (!landingUrl) return null;
   return {
     status: "qualified",
@@ -1013,9 +1017,7 @@ function outputStatusFor(post) {
     && post.time_confirmed
     && !["relative_estimated", "relative_hour", "relative_label"].includes(post.time_source || "")
     && hasValidStorySummary(post)
-    && post.lead_link_status === "qualified"
-    && ["comment", "comment_reply"].includes(post.lead_link_source || "")
-    && (post.landing_url || post.article_url)
+    && hasQualifiedLeadLink(post)
   );
   return requiredOk ? "ready_for_output" : "needs_enrichment";
 }

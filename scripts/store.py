@@ -11,6 +11,7 @@ from typing import Any
 
 from field_audit import audit_fields_for_storage
 from field_audit import is_system_audit_marker
+from models import has_qualified_comment_lead_link
 from pipeline_status import crawl_status_for, missing_enrichment_stages, output_status_for
 from story_summary_policy import has_valid_story_summary
 
@@ -212,7 +213,6 @@ def utc_now() -> str:
 
 
 ESTIMATED_TIME_SOURCES = {"relative_hour", "relative_estimated", "relative_label"}
-COMMENT_LEAD_SOURCES = {"comment", "comment_reply"}
 PROTECTED_FINAL_STATUSES = {"ready_for_output", "output_synced"}
 
 
@@ -225,11 +225,7 @@ def has_confirmed_time_value(post: dict[str, Any]) -> bool:
 
 
 def has_qualified_lead_value(post: dict[str, Any]) -> bool:
-    return bool(
-        post.get("lead_link_status") == "qualified"
-        and post.get("lead_link_source") in COMMENT_LEAD_SOURCES
-        and (post.get("landing_url") or post.get("article_url"))
-    )
+    return has_qualified_comment_lead_link(post)
 
 
 def has_engagement_value(post: dict[str, Any]) -> bool:

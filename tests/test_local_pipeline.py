@@ -8,7 +8,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +21,19 @@ VALID_CN_SUMMARY = "这篇故事围绕家庭矛盾和财产冲突展开，主角
 
 def run(command: list[str], cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, cwd=cwd, text=True, capture_output=True, check=False)
+
+
+class QuietHTTPRequestHandler(SimpleHTTPRequestHandler):
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def start_static_http_server(directory: Path) -> tuple[ThreadingHTTPServer, str]:
+    handler = partial(QuietHTTPRequestHandler, directory=str(directory))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, f"http://127.0.0.1:{server.server_port}"
 
 
 def assert_url_canonicalization() -> None:
@@ -1292,6 +1308,66 @@ def assert_sync_status_promotes_summary_only_work(tmp_path: Path) -> None:
     assert not any("继续运行 enrichment_worker" in action for action in completion["next_actions"])
 
 
+def assert_sync_status_prioritizes_auto_work_over_summary(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import sync_feishu
+    from models import normalize_post
+    from sync_status import completion_run_status, enrichment_completion_summary
+    from store import connect, enqueue_enrichment_tasks_for_posts, row_for_post, upsert_post
+
+    conn = connect(tmp_path / "mixed-auto-summary-status.sqlite")
+    post = normalize_post(
+        {
+            "account_name": "Example Page",
+            "account_url": "https://www.facebook.com/example",
+            "post_url": "https://www.facebook.com/example/posts/mixed-auto-summary",
+            "posted_at": "2026年6月2日 12:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/mixed",
+            "landing_url": "https://story.example/mixed",
+            "lead_url_raw": "https://story.example/mixed",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "post_type": "图文",
+            "article_material": {
+                "ok": True,
+                "title": "Mixed story",
+                "text_excerpt": "The article material is ready, but engagement still needs an automatic detail refetch.",
+            },
+        }
+    )
+    upsert_post(conn, post)
+    stored = row_for_post(conn, post)
+    assert stored is not None
+    enqueue_enrichment_tasks_for_posts(conn, [stored])
+    completion = enrichment_completion_summary(conn, [stored])
+    assert completion["requires_codex_summary_count"] == 1
+    assert completion["has_summary_only_work"] is False
+    assert completion["has_auto_enrichment_work"] is True
+    assert completion["missing_stage_counts"]["engagement"] == 1
+    assert completion_run_status(completion, ledger_mode=False) == "incomplete_pending_tasks"
+    assert completion_run_status(completion, ledger_mode=True) == "synced_ledger_incomplete"
+
+    result = sync_feishu.sync_posts(
+        {
+            "feishu": {
+                "sheets": {"all_posts": "FB竞品帖子链接"},
+                "field_schema": {"output_headers": ["帖子链接", "是否采用"]},
+            }
+        },
+        [stored],
+        "all_posts",
+        "append",
+        True,
+        audit=True,
+        conn=conn,
+    )
+    assert result["ok"] is True
+    assert result["run_status"] == "synced_ledger_incomplete"
+    assert result["complete"] is False
+
+
 def assert_export_summary_requests_can_scope_account_job(tmp_path: Path) -> None:
     config = tmp_path / "settings_summary_scope.yaml"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
@@ -1611,6 +1687,51 @@ def assert_sqlite_upsert_preserves_enriched_fields(tmp_path: Path) -> None:
     assert stored["shares"] == 3
     assert stored["post_type"] == "图文"
     assert stored["adoption_status"] == "采用"
+
+
+def assert_sqlite_upsert_does_not_protect_internal_lead_links(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, row_for_post, upsert_post
+
+    conn = connect(tmp_path / "internal-lead-upsert.sqlite")
+    internal = normalize_post(
+        {
+            "account_name": "Story Hub",
+            "account_url": "https://www.facebook.com/storyhub",
+            "post_url": "https://www.facebook.com/storyhub/posts/internal-lead",
+            "posted_at": "2026年5月28日 10:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://www.facebook.com/storyhub/posts/internal-lead",
+            "landing_url": "https://www.facebook.com/storyhub/posts/internal-lead",
+            "lead_url_raw": "https://www.facebook.com/storyhub/posts/internal-lead",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "story_summary": VALID_CN_SUMMARY,
+            "summary_source": "article",
+        }
+    )
+    upsert_post(conn, internal)
+
+    external = normalize_post(
+        {
+            "account_name": "Story Hub",
+            "account_url": "https://www.facebook.com/storyhub",
+            "post_url": "https://www.facebook.com/storyhub/posts/internal-lead",
+            "article_url": "https://story.example/real",
+            "landing_url": "https://story.example/real",
+            "lead_url_raw": "https://story.example/real",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment_reply",
+        }
+    )
+    upsert_post(conn, external)
+    stored = row_for_post(conn, internal)
+    assert stored is not None
+    assert stored["landing_url"] == "https://story.example/real"
+    assert stored["article_url"] == "https://story.example/real"
+    assert stored["lead_link_source"] == "comment_reply"
 
 
 def assert_generic_photo_canonical_is_recomputed() -> None:
@@ -2093,6 +2214,91 @@ def assert_quality_gate_requires_comment_lead_source(tmp_path: Path) -> None:
     )
     assert sync.returncode == 1, sync.stdout
     assert "missing_qualified_comment_lead_link" in sync.stdout
+
+
+def assert_quality_gate_rejects_internal_landing_url(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from output_quality import output_quality_errors
+
+    sample = tmp_path / "internal_landing_url.json"
+    config = tmp_path / "settings_internal_landing_url.yaml"
+    raw_post = {
+        "post_url": "https://www.facebook.com/example/posts/internal-landing",
+        "posted_at": "2026年5月27日 10:00",
+        "time_confirmed": True,
+        "time_source": "dom_aria_label",
+        "article_url": "https://www.facebook.com/example/posts/not-a-story",
+        "landing_url": "https://www.facebook.com/example/posts/not-a-story",
+        "lead_url_raw": "https://www.facebook.com/example/posts/not-a-story",
+        "lead_link_status": "qualified",
+        "lead_link_source": "comment",
+        "article_summary": VALID_CN_SUMMARY,
+        "summary_source": "article",
+        "output_status": "ready_for_output",
+    }
+    normalized = normalize_post(raw_post)
+    assert normalized["output_status"] != "ready_for_output"
+    errors = output_quality_errors([{**normalized, "output_status": "ready_for_output"}])
+    assert errors
+    assert "missing_qualified_comment_lead_link" in errors[0]["errors"]
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [raw_post]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config_text = config.read_text(encoding="utf-8").replace(
+        "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'internal_landing_url.sqlite'}"
+    )
+    config.write_text(config_text, encoding="utf-8")
+    sync = run(
+        [
+            PYTHON,
+            "scripts/import_existing_result.py",
+            "--config",
+            str(config),
+            "--input",
+            str(sample),
+            "--sync",
+            "--strict-ready-only",
+            "--dry-run",
+        ]
+    )
+    assert sync.returncode == 1, sync.stdout
+    assert '"ready_for_output": 0' in sync.stdout
+    assert '"needs_enrichment_skipped": 1' in sync.stdout
+
+
+def assert_quality_gate_requires_raw_comment_lead_url(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from output_quality import output_quality_errors
+
+    normalized = normalize_post(
+        {
+            "post_url": "https://www.facebook.com/example/posts/missing-raw-lead",
+            "posted_at": "2026年5月27日 10:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://site.test/story",
+            "landing_url": "https://site.test/story",
+            "lead_url_raw": "",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "article_summary": VALID_CN_SUMMARY,
+            "summary_source": "article",
+            "output_status": "ready_for_output",
+        }
+    )
+    assert normalized["output_status"] != "ready_for_output"
+    errors = output_quality_errors([{**normalized, "output_status": "ready_for_output"}])
+    assert errors
+    assert "missing_qualified_comment_lead_link" in errors[0]["errors"]
 
 
 def assert_detail_enrichment_ignores_page_shell_ad_links() -> None:
@@ -2649,15 +2855,16 @@ const payload = {
   posts: [
     { post_url: 'https://facebook.com/example/posts/1', output_status: 'ready_for_output', posted_at: '2026年6月1日 12:00', time_confirmed: true, summary_source: 'article', story_summary: '这篇故事讲述家庭冲突升级后，主角发现问题并及时反击的反转剧情。', lead_link_status: 'qualified', lead_link_source: 'comment', lead_url_raw: 'https://site.test/a', landing_url: 'https://site.test/a' },
     { post_url: 'https://facebook.com/example/posts/2', output_status: 'needs_enrichment', posted_at: '2026年6月1日 13:00', time_confirmed: true, summary_source: 'pending_article_summary', lead_link_status: 'missing', engagement_confidence: 'anchored_missing_metrics' },
+    { post_url: 'https://facebook.com/example/posts/3', output_status: 'needs_enrichment', posted_at: '2026年6月1日 14:00', time_confirmed: true, summary_source: 'article', story_summary: '这篇故事讲述家庭冲突升级后，主角发现问题并及时反击的反转剧情。', lead_link_status: 'qualified', lead_link_source: 'comment', lead_url_raw: 'https://www.facebook.com/example/posts/3', landing_url: 'https://www.facebook.com/example/posts/3' },
   ],
   date_filtered_out: [{ post_url: 'https://facebook.com/example/posts/old' }],
 };
-const summary = buildCoverageSummary(payload, 3);
-if (summary.input_posts !== 3 || summary.after_target_date_filter !== 2 || summary.ready_for_output !== 1 || summary.needs_enrichment !== 1) {
+const summary = buildCoverageSummary(payload, 4);
+if (summary.input_posts !== 4 || summary.after_target_date_filter !== 3 || summary.ready_for_output !== 1 || summary.needs_enrichment !== 2) {
   console.error(JSON.stringify(summary, null, 2));
   process.exit(4);
 }
-if (summary.reason_counts.missing_qualified_comment_lead_link !== 1 || summary.reason_counts.engagement_unconfirmed !== 1) {
+if (summary.reason_counts.missing_qualified_comment_lead_link !== 2 || summary.reason_counts.engagement_unconfirmed !== 1) {
   console.error(JSON.stringify(summary, null, 2));
   process.exit(5);
 }
@@ -3420,6 +3627,94 @@ def assert_run_account_job_summary_only_next_command_exports_requests() -> None:
     assert "--resume-only" not in commands[0]["command"]
 
 
+def assert_run_account_job_prioritizes_auto_work_before_summary_export() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/example",
+            "account_name": "Example Page",
+            "account_type": "competitor",
+            "sync": True,
+            "dry_run": False,
+            "max_snapshots": 20,
+            "max_resume_passes": 2,
+            "expected_post_count": 0,
+            "expected_labels": "",
+        },
+    )()
+    completion = {
+        "open_task_count": 2,
+        "summary_open_task_count": 1,
+        "auto_open_task_count": 1,
+        "requires_codex_summary_count": 1,
+        "has_summary_only_work": False,
+        "has_auto_enrichment_work": True,
+        "has_incomplete_enrichment": True,
+    }
+    status = run_account_job.summarize_job_status(
+        preflight={"ok": True},
+        discover_import=None,
+        worker_passes=[],
+        sync_result={"ok": True},
+        completion=completion,
+    )
+    commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260603"],
+        run_status=status,
+        completion=completion,
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert status == "incomplete_pending_tasks"
+    assert [item["reason"] for item in commands] == ["pending_enrichment"]
+    assert "--resume-only" in commands[0]["command"]
+    assert "export_summary_requests.py" not in commands[0]["command"]
+
+
+def assert_run_capture_pipeline_uses_completion_status_helpers() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_capture_pipeline
+
+    assert run_capture_pipeline.capture_pipeline_run_status(
+        {"ok": True, "capture_complete": False, "coverage": {"coverage_incomplete": True}},
+        {"post_count": 2},
+    ) == "coverage_incomplete"
+    assert run_capture_pipeline.capture_pipeline_run_status(
+        {"ok": True, "capture_complete": True, "coverage": {}},
+        {"post_count": 0},
+    ) == "no_candidates"
+    assert run_capture_pipeline.capture_pipeline_run_status(
+        {"ok": True, "capture_complete": True, "coverage": {}},
+        {
+            "post_count": 1,
+            "has_auto_enrichment_work": True,
+            "auto_open_task_count": 1,
+            "has_incomplete_enrichment": True,
+            "requires_codex_summary_count": 1,
+        },
+    ) == "incomplete_pending_tasks"
+    assert run_capture_pipeline.capture_pipeline_run_status(
+        {"ok": True, "capture_complete": True, "coverage": {}},
+        {
+            "post_count": 1,
+            "has_auto_enrichment_work": False,
+            "auto_open_task_count": 0,
+            "has_summary_only_work": True,
+            "requires_codex_summary_count": 1,
+            "has_incomplete_enrichment": True,
+        },
+    ) == "needs_codex_summary"
+    assert run_capture_pipeline.capture_pipeline_run_status(
+        {"ok": True, "capture_complete": True, "coverage": {}},
+        {"post_count": 1, "has_incomplete_enrichment": False},
+    ) == "complete"
+
+
 def assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path: Path) -> None:
     config = tmp_path / "settings_account_job_unknown_date.yaml"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
@@ -3808,6 +4103,8 @@ def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
         """,
         encoding="utf-8",
     )
+    server, base_url = start_static_http_server(tmp_path)
+    article_url = f"{base_url}/{article.name}"
     raw.write_text(
         json.dumps(
             {
@@ -3819,9 +4116,9 @@ def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
                         "posted_at": "2026年5月28日 10:00",
                         "time_confirmed": True,
                         "time_source": "dom_aria_label",
-                        "article_url": article.as_uri(),
-                        "landing_url": article.as_uri(),
-                        "lead_url_raw": article.as_uri(),
+                        "article_url": article_url,
+                        "landing_url": article_url,
+                        "lead_url_raw": article_url,
                         "lead_link_status": "qualified",
                         "lead_link_source": "comment",
                     },
@@ -3832,9 +4129,9 @@ def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
                         "posted_at": "2026年5月28日 11:00",
                         "time_confirmed": True,
                         "time_source": "dom_aria_label",
-                        "article_url": article.as_uri(),
-                        "landing_url": article.as_uri(),
-                        "lead_url_raw": article.as_uri(),
+                        "article_url": article_url,
+                        "landing_url": article_url,
+                        "lead_url_raw": article_url,
                         "lead_link_status": "qualified",
                         "lead_link_source": "comment",
                     },
@@ -3888,7 +4185,7 @@ def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
     conn = connect(db_path)
     posts = all_posts(conn)
     assert all(post["output_status"] != "ready_for_output" for post in posts)
-    assert cached_article_material(conn, article.as_uri())["ok"] is True
+    assert cached_article_material(conn, article_url)["ok"] is True
     failed_summary_tasks = pending_enrichment_tasks(conn, stages=["summary"], limit=10)
     assert all("requires_codex_chinese_summary" in (task.get("last_error") or "") for task in failed_summary_tasks)
 
@@ -3910,7 +4207,7 @@ def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
 
     bad_summaries = tmp_path / "bad_summaries.json"
     bad_summaries.write_text(
-        json.dumps({article.as_uri(): "Worker cache story"}, ensure_ascii=False),
+        json.dumps({article_url: "Worker cache story"}, ensure_ascii=False),
         encoding="utf-8",
     )
     bad_apply = run(
@@ -3932,7 +4229,7 @@ def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
     good_summaries.write_text(
         json.dumps(
             {
-                article.as_uri(): "这篇故事围绕家庭资产控制展开，儿子试图冻结母亲信用卡并掌控公司，母亲发现异常后准备通过法律方式反击。"
+                article_url: "这篇故事围绕家庭资产控制展开，儿子试图冻结母亲信用卡并掌控公司，母亲发现异常后准备通过法律方式反击。"
             },
             ensure_ascii=False,
         ),
@@ -3953,7 +4250,11 @@ def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
     assert good_data["applied"] == 2
     conn = connect(db_path)
     posts = all_posts(conn)
+    assert all(post["summary_source"] == "article" for post in posts)
+    assert all(post["story_summary"] for post in posts)
     assert all(post["output_status"] == "ready_for_output" for post in posts)
+    server.shutdown()
+    server.server_close()
 
 
 def assert_story_summary_audit_downgrades_invalid_rows(tmp_path: Path) -> None:
@@ -4138,9 +4439,11 @@ def main() -> int:
         hot_after_many_data = json.loads(hot_after_many.stdout)
         assert hot_after_many_data["count"] == 1, hot_after_many.stdout
         assert_sqlite_upsert_preserves_enriched_fields(tmp_path)
+        assert_sqlite_upsert_does_not_protect_internal_lead_links(tmp_path)
         assert_field_audit_marks_refetchable_missing_fields(tmp_path)
         assert_sync_status_marks_incomplete_ledger(tmp_path)
         assert_sync_status_promotes_summary_only_work(tmp_path)
+        assert_sync_status_prioritizes_auto_work_over_summary(tmp_path)
         assert_export_summary_requests_can_scope_account_job(tmp_path)
         assert_sync_feishu_strict_marks_ready_rows_synced(tmp_path)
         assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path)
@@ -4150,6 +4453,8 @@ def main() -> int:
         assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path)
         assert_article_url_alone_does_not_qualify_lead_link(tmp_path)
         assert_filter_sync_applies_output_quality_gate(tmp_path)
+        assert_quality_gate_rejects_internal_landing_url(tmp_path)
+        assert_quality_gate_requires_raw_comment_lead_url(tmp_path)
         assert_comment_lead_link_overrides_ad_links(tmp_path)
         assert_prepare_capture_has_no_base_time_argument()
         assert_exact_time_verifier_summary_contract()
@@ -4172,6 +4477,8 @@ def main() -> int:
         assert_run_account_job_does_not_recover_fresh_running_tasks(tmp_path)
         assert_run_account_job_next_commands_force_recover_running()
         assert_run_account_job_summary_only_next_command_exports_requests()
+        assert_run_account_job_prioritizes_auto_work_before_summary_export()
+        assert_run_capture_pipeline_uses_completion_status_helpers()
         assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path)
         assert_run_account_job_expected_coverage_marks_missing_posts()
         assert_run_account_job_blocks_auth_before_capture(tmp_path)

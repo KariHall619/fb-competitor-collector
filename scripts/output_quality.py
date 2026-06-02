@@ -5,15 +5,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from models import COMMENT_LEAD_SOURCES, ESTIMATED_TIME_SOURCES
+from models import ESTIMATED_TIME_SOURCES, has_qualified_comment_lead_link
 from story_summary_policy import story_summary_errors
-
-def has_qualified_comment_lead_link(post: dict[str, Any]) -> bool:
-    return (
-        post.get("lead_link_status") == "qualified"
-        and post.get("lead_link_source") in COMMENT_LEAD_SOURCES
-        and bool(post.get("landing_url") or post.get("article_url"))
-    )
 
 
 def output_quality_errors(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
