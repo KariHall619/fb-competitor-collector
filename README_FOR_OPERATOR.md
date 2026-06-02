@@ -60,6 +60,8 @@ If the capture tab shows a login prompt, visitor preview, or only one preview po
 
 Low-disturbance capture is an optimization, not a quality tradeoff. Runtime reads first try direct `--tab` access and detail enrichment first reuses one detail tab to reduce visible Chrome tab churn. If those paths fail or collect less usable detail, the scripts fall back to the original select/new-tab flow for that post. Valid Facebook candidates still enter SQLite as `needs_enrichment` when fields are missing; the final-output quality gate only controls Feishu sync.
 
+Detail enrichment records only the tabs opened by automation and closes those detail tabs at the end of the batch, including blocked/error exits. It does not close the user's original Facebook homepage tab. Use `--keep-opened-tabs` only for debugging when the operator intentionally wants detail tabs left open for inspection.
+
 For "today's posts" on a Facebook page, always reload/open the account homepage from the top and collect posts in visible homepage time order until the current-day boundary is covered. Do not continue from a previously low scroll position: Facebook virtualizes the feed DOM, so continuing from the current low position can omit newer posts above it. When the business user provides visible labels such as `38m, 1h, 2h ... 17h`, treat that sequence as the coverage checklist and open each post detail/comment area to find the account's comment or reply lead link.
 
 ## OpenCLI Browser Bridge Troubleshooting

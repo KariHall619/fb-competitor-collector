@@ -222,6 +222,7 @@ Current latest passing commit before this file: `365608ba38d090f9b5f8f88e530baec
 - Do not replace these readiness waits with fixed sleeps unless OpenCLI/Facebook behavior changes and tests are updated. Fixed waits directly increase per-post latency.
 - `enrichment_worker.py` should keep grouping detail tasks by canonical post URL. Splitting `detail_time` and `lead_link` into separate page opens is a regression for the sub-two-minute-per-post target.
 - `opencli_enrich_post_details.mjs` writes `performance_summary`, including `average_ms`, `max_ms`, and `over_two_minute_posts`, so real capture runs can verify the per-post target without relaxing quality gates.
+- `opencli_enrich_post_details.mjs` tracks tabs opened by automation and closes those detail tabs once the batch finishes, including blocked/error exits. Do not close the user's original Facebook homepage tab; `--keep-opened-tabs` is for debugging only.
 
 ## Git/Workspace Notes
 

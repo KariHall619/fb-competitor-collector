@@ -12,6 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  createOpenedTabTracker,
   evaluateInSession,
   extractArgs,
   loadOpencliContext,
@@ -33,6 +34,7 @@ const TARGET_DATE = value("--target-date", "");
 const ALLOW_REAL_MOUSE_HOVER = has("--allow-real-mouse-hover");
 const SKIP_TIME = has("--skip-time");
 const SKIP_LEAD_LINK = has("--skip-lead-link");
+const KEEP_OPENED_TABS = has("--keep-opened-tabs");
 const configuredLeadLink = readLeadLinkConfig(CONFIG);
 const configuredPerformance = readPerformanceConfig(CONFIG);
 const COMMENT_EXPAND_ROUNDS = Number(value("--comment-expand-rounds", configuredLeadLink.commentExpandRounds));
@@ -217,6 +219,7 @@ async function openPostTab(baseContext, url) {
     throw new Error(result.stderr || result.stdout || `OpenCLI failed to open tab for ${url}`);
   }
   const tab = { page: payload.page, url, title: "" };
+  baseContext.openedTabTracker?.remember(tab, { role: "detail_page", url });
   const context = { ...baseContext, tab };
   const waitSecondsValue = Number(value("--open-tab-wait-seconds", String(baseContext.config?.performance?.open_tab_wait_seconds || 1.5)));
   await waitForDetailReady(context, waitSecondsValue, { minSeconds: 0.3, expectedUrl: url });
@@ -252,6 +255,7 @@ async function closePostTab(context) {
   await runOpencli(["browser", context.session, "tab", "close", context.tab.page], {
     command: context.opencliCommand,
   });
+  context.openedTabTracker?.forget(context.tab);
 }
 
 async function pageState(context) {
@@ -1071,27 +1075,30 @@ async function enrichPostInContext(post, context) {
 }
 
 async function enrichPostWithFreshTab(baseContext, post) {
-  let context = null;
-  try {
-    context = await openPostTab(baseContext, post.post_url);
-    return await enrichPostInContext(post, context);
-  } finally {
-    if (context) await closePostTab(context);
-  }
+  const context = await openPostTab(baseContext, post.post_url);
+  return await enrichPostInContext(post, context);
 }
 
 async function main() {
   const payload = JSON.parse(fs.readFileSync(INPUT, "utf8"));
   const posts = payload.posts || [];
   const inputPostCount = posts.length;
-  const baseContext = loadOpencliContext();
+  const rawContext = loadOpencliContext();
+  const openedTabTracker = createOpenedTabTracker({
+    opencliCommand: rawContext.opencliCommand,
+    session: rawContext.session,
+    closeEnabled: !KEEP_OPENED_TABS,
+  });
+  const baseContext = { ...rawContext, openedTabTracker };
 
   const enriched = [];
   const errors = [];
   let reusableContext = null;
   const lowDisturbance = { reused_detail_tab: 0, fresh_tab_fallback: 0, reusable_errors: 0 };
   let blockedResult = null;
-  for (const [index, post] of posts.entries()) {
+  let tabCleanup = null;
+  try {
+    for (const [index, post] of posts.entries()) {
     if (LIMIT && index >= LIMIT) break;
     if (!post.post_url) continue;
     const postStarted = Date.now();
@@ -1193,7 +1200,9 @@ async function main() {
     }
     if (blockedResult) break;
   }
-  if (reusableContext) await closePostTab(reusableContext);
+  } finally {
+    tabCleanup = await openedTabTracker.closeAll();
+  }
   if (TARGET_DATE) {
     const kept = [];
     const dateFilteredOut = [];
@@ -1226,6 +1235,7 @@ async function main() {
   }
   payload.coverage_summary = buildCoverageSummary(payload, inputPostCount);
   payload.low_disturbance = lowDisturbance;
+  payload.tab_cleanup = tabCleanup;
   fs.writeFileSync(OUTPUT, JSON.stringify(payload, null, 2), "utf8");
   outputJson({
     ok: !blockedResult,
@@ -1236,6 +1246,13 @@ async function main() {
     enriched: enriched.length,
     errors: errors.length,
     low_disturbance: lowDisturbance,
+    tab_cleanup: {
+      enabled: tabCleanup.enabled,
+      opened: tabCleanup.opened,
+      closed: tabCleanup.closed,
+      failed: tabCleanup.failed,
+      kept_open: tabCleanup.kept_open,
+    },
     output: OUTPUT,
   });
   if (blockedResult && globalThis.process) globalThis.process.exitCode = 1;

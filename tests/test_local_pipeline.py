@@ -457,6 +457,52 @@ def assert_opencli_runtime_keeps_current_bound_tab() -> None:
     assert '"tab", "select", tab' in script_text
     assert 'tab_access_mode: "select_fallback"' in script_text
     assert "select_fallback" in (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
+    assert "function createOpenedTabTracker" in script_text
+    assert '"tab", "close", tab.page' in script_text
+    assert "closeEnabled" in script_text
+    assert "tabs.reverse()" in script_text
+
+
+def assert_opencli_tab_tracker_closes_only_registered_tabs() -> None:
+    script = """
+import { createOpenedTabTracker } from './scripts/opencli_runtime.mjs';
+const calls = [];
+const tracker = createOpenedTabTracker({
+  opencliCommand: ['opencli'],
+  session: 'fb-competitor',
+  runCommand: async (args, options) => {
+    calls.push({ args, options });
+    return { ok: args.at(-1) !== 'keep-open', stdout: '', stderr: args.at(-1) === 'keep-open' ? 'close failed' : '' };
+  },
+});
+tracker.remember({ page: 'detail-a', url: 'https://www.facebook.com/a' }, { role: 'detail_page' });
+tracker.remember({ page: 'keep-open', url: 'https://www.facebook.com/b' }, { role: 'detail_page' });
+const summary = await tracker.closeAll();
+if (summary.opened !== 2 || summary.closed !== 1 || summary.failed !== 1 || summary.kept_open !== 1) {
+  console.error(JSON.stringify(summary, null, 2));
+  process.exit(2);
+}
+if (calls.length !== 2 || !calls.every((call) => call.args.slice(0, 4).join(' ') === 'browser fb-competitor tab close')) {
+  console.error(JSON.stringify(calls, null, 2));
+  process.exit(3);
+}
+const disabled = createOpenedTabTracker({
+  opencliCommand: ['opencli'],
+  session: 'fb-competitor',
+  closeEnabled: false,
+  runCommand: async () => {
+    throw new Error('disabled tracker should not close tabs');
+  },
+});
+disabled.remember({ page: 'debug-tab', url: 'https://www.facebook.com/debug' });
+const disabledSummary = await disabled.closeAll();
+if (disabledSummary.opened !== 1 || disabledSummary.closed !== 0 || disabledSummary.kept_open !== 1) {
+  console.error(JSON.stringify(disabledSummary, null, 2));
+  process.exit(4);
+}
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def assert_opencli_detail_enrichment_reuses_tab_with_fallback() -> None:
@@ -475,6 +521,11 @@ def assert_opencli_detail_enrichment_reuses_tab_with_fallback() -> None:
     assert 'resolution_source: "existing_landing_url"' in script_text
     assert "buildPerformanceSummary" in script_text
     assert "over_two_minute_posts" in script_text
+    assert "createOpenedTabTracker" in script_text
+    assert "openedTabTracker.closeAll()" in script_text
+    assert "finally" in script_text
+    assert "tab_cleanup" in script_text
+    assert "--keep-opened-tabs" in script_text
 
 
 def assert_opencli_detail_enrichment_blocks_for_human_login() -> None:
@@ -2075,6 +2126,7 @@ def main() -> int:
     assert_opencli_extract_helpers_dedupe_homepage_candidates()
     assert_opencli_extract_script_requires_human_intervention()
     assert_opencli_runtime_keeps_current_bound_tab()
+    assert_opencli_tab_tracker_closes_only_registered_tabs()
     assert_opencli_detail_enrichment_reuses_tab_with_fallback()
     assert_opencli_detail_enrichment_blocks_for_human_login()
     assert_feishu_writes_require_user_identity()

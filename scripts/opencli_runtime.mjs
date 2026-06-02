@@ -245,6 +245,82 @@ async function selectTab({ opencliCommand, session, tab }) {
   return await runOpencli(["browser", session, "tab", "select", tab], { command: opencliCommand });
 }
 
+function tabPageId(tab) {
+  if (!tab) return "";
+  if (typeof tab === "string") return tab;
+  return tab.page || tab.targetId || tab.id || "";
+}
+
+function createOpenedTabTracker({ opencliCommand, session, closeEnabled = true, runCommand = runOpencli } = {}) {
+  const openedTabs = new Map();
+
+  const remember = (tab, meta = {}) => {
+    const page = tabPageId(tab);
+    if (!page) return tab;
+    const nextMeta = {
+      page,
+      url: tab?.url || meta.url || "",
+      title: tab?.title || meta.title || "",
+      role: meta.role || "automation",
+      opened_at: new Date().toISOString(),
+    };
+    openedTabs.set(page, { ...(openedTabs.get(page) || {}), ...nextMeta });
+    return tab;
+  };
+
+  const forget = (tab) => {
+    const page = tabPageId(tab);
+    if (page) openedTabs.delete(page);
+  };
+
+  const snapshot = () => [...openedTabs.values()];
+
+  const closeAll = async (options = {}) => {
+    const command = options.command || opencliCommand;
+    const targetSession = options.session || session;
+    const tabs = snapshot();
+    const summary = {
+      enabled: Boolean(closeEnabled),
+      opened: tabs.length,
+      attempted: 0,
+      closed: 0,
+      failed: 0,
+      kept_open: 0,
+      tabs,
+      errors: [],
+    };
+    if (!closeEnabled) {
+      summary.kept_open = tabs.length;
+      return summary;
+    }
+    for (const tab of tabs.reverse()) {
+      summary.attempted += 1;
+      const result = await runCommand(["browser", targetSession, "tab", "close", tab.page], { command });
+      if (result.ok) {
+        summary.closed += 1;
+        openedTabs.delete(tab.page);
+      } else {
+        summary.failed += 1;
+        summary.errors.push({
+          page: tab.page,
+          url: tab.url,
+          stdout: String(result.stdout || "").trim(),
+          stderr: String(result.stderr || "").trim(),
+        });
+      }
+    }
+    summary.kept_open = openedTabs.size;
+    return summary;
+  };
+
+  return {
+    closeAll,
+    forget,
+    remember,
+    snapshot,
+  };
+}
+
 async function evaluateInSession({ opencliCommand, session, js, tab, allowSelectFallback = true }) {
   const args = ["browser", session, "eval", js];
   if (tab) args.push("--tab", tab);
@@ -312,6 +388,7 @@ function currentScriptName() {
 }
 
 export {
+  createOpenedTabTracker,
   currentScriptName,
   ensureFacebookTab,
   evaluateInSession,
