@@ -354,6 +354,8 @@ def main() -> int:
                 duration_ms = int((time.monotonic() - task_start) * 1000)
                 try:
                     _source, material = future.result()
+                    if not material.get("ok"):
+                        raise RuntimeError(material.get("error") or "article_material_fetch_failed")
                     fields = article_material_fields(post, material)
                     update_post_fields(conn, post, fields)
                     stored = row_for_post(conn, post) or post

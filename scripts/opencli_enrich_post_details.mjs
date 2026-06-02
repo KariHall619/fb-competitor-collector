@@ -157,6 +157,21 @@ function dateKeyFromPostedAt(postedAt) {
   return `${year.slice(2)}${month.padStart(2, "0")}${day.padStart(2, "0")}`;
 }
 
+function parseBool(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (value === null || value === undefined || value === "") return false;
+  return ["1", "true", "yes", "y", "on", "confirmed"].includes(String(value).trim().toLowerCase());
+}
+
+function hasConfirmedTime(post) {
+  return Boolean(
+    post?.posted_at
+    && parseBool(post?.time_confirmed)
+    && !["relative_estimated", "relative_hour", "relative_label"].includes(post?.time_source || "")
+  );
+}
+
 function appendSemicolonNote(existing, item) {
   const parts = String(existing || "").split("；").filter(Boolean);
   if (item && !parts.includes(item)) parts.push(item);
@@ -1013,9 +1028,7 @@ function hasValidStorySummary(post) {
 function outputStatusFor(post) {
   const requiredOk = Boolean(
     post.post_url
-    && post.posted_at
-    && post.time_confirmed
-    && !["relative_estimated", "relative_hour", "relative_label"].includes(post.time_source || "")
+    && hasConfirmedTime(post)
     && hasValidStorySummary(post)
     && hasQualifiedLeadLink(post)
   );
@@ -1028,8 +1041,8 @@ function enrichmentReasonCounts(posts) {
     counts[key] = (counts[key] || 0) + 1;
   };
   for (const post of posts || []) {
-    if (post.output_status === "ready_for_output") continue;
-    if (!post.posted_at || !post.time_confirmed) add("missing_confirmed_posted_at");
+    if (outputStatusFor(post) === "ready_for_output") continue;
+    if (!hasConfirmedTime(post)) add("missing_confirmed_posted_at");
     if (!hasValidStorySummary(post)) add("missing_article_summary");
     if (!hasQualifiedLeadLink(post)) add("missing_qualified_comment_lead_link");
     if (post.engagement_confidence && post.engagement_confidence !== "anchored") add("engagement_unconfirmed");
@@ -1039,7 +1052,7 @@ function enrichmentReasonCounts(posts) {
 
 function buildCoverageSummary(payload, inputCount) {
   const posts = payload.posts || [];
-  const readyForOutput = posts.filter((post) => post.output_status === "ready_for_output").length;
+  const readyForOutput = posts.filter((post) => outputStatusFor(post) === "ready_for_output").length;
   const needsEnrichment = posts.length - readyForOutput;
   return {
     input_posts: inputCount,
@@ -1074,7 +1087,7 @@ function buildPerformanceSummary(enriched) {
 function enrichmentScore(post) {
   let score = 0;
   if (post.posted_at) score += 1;
-  if (post.time_confirmed) score += 1;
+  if (parseBool(post.time_confirmed)) score += 1;
   if (post.engagement_data || post.reactions || post.comments || post.shares) score += 1;
   if (hasQualifiedLeadLink(post)) score += 2;
   if (post.landing_url || post.article_url) score += 1;
@@ -1083,7 +1096,7 @@ function enrichmentScore(post) {
 
 function shouldFallbackAfterReusable({ before, after, exactTime, leadLink }) {
   if (!after.post_url) return false;
-  if ((before.posted_at || before.time_confirmed) && !after.posted_at) return true;
+  if ((before.posted_at || parseBool(before.time_confirmed)) && !after.posted_at) return true;
   if (hasQualifiedLeadLink(before) && !hasQualifiedLeadLink(after)) return true;
   if (!SKIP_TIME && !before.posted_at && !exactTime.posted_at) return true;
   if (!SKIP_LEAD_LINK && !hasQualifiedLeadLink(before) && leadLink.status !== "qualified") return true;
@@ -1125,7 +1138,7 @@ async function enrichPostInContext(post, context) {
     time_source: post.time_source || "",
     skipped: SKIP_TIME,
   };
-  if (!SKIP_TIME && !(post.posted_at && post.time_confirmed)) {
+  if (!SKIP_TIME && !hasConfirmedTime(post)) {
     target = await findHeaderTime(context);
     exactTime = await readExactTimeFromDom(context, target);
     if (!exactTime.posted_at) exactTime = await readTooltipTimeWithSyntheticHover(context, target);
@@ -1414,4 +1427,6 @@ export {
   detailPostTypeBrowserExpression,
   enrichmentReasonCounts,
   leadLinkScanBrowserExpression,
+  outputStatusFor,
+  parseBool,
 };

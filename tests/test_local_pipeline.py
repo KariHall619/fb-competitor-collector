@@ -3085,6 +3085,44 @@ if (summary.reason_counts.missing_qualified_comment_lead_link !== 2 || summary.r
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_opencli_detail_enrichment_rejects_string_false_time() -> None:
+    js = """
+import { buildCoverageSummary, enrichmentReasonCounts, outputStatusFor, parseBool } from './scripts/opencli_enrich_post_details.mjs';
+
+if (parseBool('false') !== false) process.exit(1);
+if (parseBool('0') !== false) process.exit(2);
+if (parseBool('confirmed') !== true) process.exit(3);
+
+const dirtyReady = {
+  post_url: 'https://facebook.com/example/posts/string-false-time',
+  output_status: 'ready_for_output',
+  posted_at: '2026年6月1日 12:00',
+  time_confirmed: 'false',
+  time_source: 'dom_aria_label',
+  summary_source: 'article',
+  story_summary: '这篇故事讲述家庭冲突升级后，主角发现问题并及时反击的反转剧情。',
+  lead_link_status: 'qualified',
+  lead_link_source: 'comment',
+  lead_url_raw: 'https://site.test/a',
+  landing_url: 'https://site.test/a',
+};
+
+if (outputStatusFor(dirtyReady) === 'ready_for_output') process.exit(4);
+const counts = enrichmentReasonCounts([dirtyReady]);
+if (counts.missing_confirmed_posted_at !== 1) {
+  console.error(JSON.stringify(counts, null, 2));
+  process.exit(5);
+}
+const summary = buildCoverageSummary({ posts: [dirtyReady], date_filtered_out: [] }, 1);
+if (summary.ready_for_output !== 0 || summary.needs_enrichment !== 1) {
+  console.error(JSON.stringify(summary, null, 2));
+  process.exit(6);
+}
+"""
+    result = run(["node", "--input-type=module", "-e", js])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path: Path) -> None:
     raw = tmp_path / "photo_raw.json"
     prepared = tmp_path / "photo_prepared.json"
@@ -4490,6 +4528,68 @@ def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
     server.server_close()
 
 
+def assert_enrichment_worker_keeps_failed_article_material_open(tmp_path: Path) -> None:
+    config = tmp_path / "settings_article_fail.yaml"
+    db_path = tmp_path / "article-fail.sqlite"
+    raw = tmp_path / "article_fail.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {db_path}"),
+        encoding="utf-8",
+    )
+    raw.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Article Fail",
+                        "account_url": "https://www.facebook.com/articlefail",
+                        "post_url": "https://www.facebook.com/articlefail/posts/one",
+                        "posted_at": "2026年6月3日 10:00",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                        "article_url": "http://127.0.0.1:1/unreachable-article",
+                        "landing_url": "http://127.0.0.1:1/unreachable-article",
+                        "lead_url_raw": "http://127.0.0.1:1/unreachable-article",
+                        "lead_link_status": "qualified",
+                        "lead_link_source": "comment",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--no-sync"])
+    assert imported.returncode == 0, imported.stderr or imported.stdout
+    worker = run(
+        [
+            PYTHON,
+            "scripts/enrichment_worker.py",
+            "--config",
+            str(config),
+            "--stages",
+            "article_material",
+            "--limit",
+            "10",
+            "--article-concurrency",
+            "1",
+        ]
+    )
+    assert worker.returncode == 1, worker.stderr or worker.stdout
+    data = json.loads(worker.stdout)
+    assert data["completed"] == 0
+    assert data["failed"] == 1
+    assert data["task_counts"].get("article_material:failed") == 1
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from store import all_posts, connect
+    from story_summary_policy import article_material_for_post
+
+    conn = connect(db_path)
+    post = all_posts(conn)[0]
+    assert article_material_for_post(post) == {}
+
+
 def assert_story_summary_audit_downgrades_invalid_rows(tmp_path: Path) -> None:
     config = tmp_path / "settings.yaml"
     db_path = tmp_path / "audit.sqlite"
@@ -4696,6 +4796,7 @@ def main() -> int:
         assert_prepare_capture_has_no_base_time_argument()
         assert_exact_time_verifier_summary_contract()
         assert_opencli_detail_enrichment_supports_target_date_filter()
+        assert_opencli_detail_enrichment_rejects_string_false_time()
         assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path)
         assert_thirteen_incomplete_candidates_are_imported_for_enrichment(tmp_path)
         assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp_path)
@@ -4708,6 +4809,7 @@ def main() -> int:
         assert_enrichment_worker_scopes_tasks_to_account(tmp_path)
         assert_enrichment_worker_scope_includes_unknown_date_candidates(tmp_path)
         assert_enrichment_worker_article_cache_and_summary(tmp_path)
+        assert_enrichment_worker_keeps_failed_article_material_open(tmp_path)
         assert_story_summary_audit_downgrades_invalid_rows(tmp_path)
         assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path)
         assert_run_account_job_resume_status_reports_incomplete(tmp_path)
