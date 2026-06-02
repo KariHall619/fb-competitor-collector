@@ -208,27 +208,94 @@ def discover_and_import(
                 ]
             )
             if prepare.returncode != 0:
+                prepare_payload = parse_json_output(prepare)
+                prepare_payload["returncode"] = prepare.returncode
                 return {
                     "ok": False,
                     "stage": "prepare",
+                    "run_status": "prepare_failed",
+                    "complete": False,
+                    "message": "主页候选发现后标准化失败；本次未导入本地库，也未写入飞书。",
                     "target_date": target_date,
-                    "stdout": prepare.stdout,
-                    "stderr": prepare.stderr,
+                    "elapsed_ms": int((time.monotonic() - discover_started) * 1000),
+                    "discover": {
+                        "raw_candidate_count": discover_payload.get("raw_candidate_count", 0),
+                        "post_count": discover_payload.get("post_count", 0),
+                        "capture_complete": discover_payload.get("capture_complete", True),
+                        "coverage": discover_payload.get("coverage", {}),
+                        "coverage_blocked": discover_payload.get("coverage_blocked", False),
+                        "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
+                        "expected_coverage": (discover_payload.get("coverage") or {}).get("expected", {}),
+                    },
+                    "prepare": prepare_payload,
                     "returncode": prepare.returncode,
                 }
-            prepared_payload = json.loads(prepared_path.read_text(encoding="utf-8"))
+            try:
+                prepared_payload = json.loads(prepared_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                return {
+                    "ok": False,
+                    "stage": "prepare",
+                    "run_status": "prepare_failed",
+                    "complete": False,
+                    "message": "候选标准化命令返回成功，但输出文件不可读取；本次未导入本地库，也未写入飞书。",
+                    "target_date": target_date,
+                    "elapsed_ms": int((time.monotonic() - discover_started) * 1000),
+                    "discover": {
+                        "raw_candidate_count": discover_payload.get("raw_candidate_count", 0),
+                        "post_count": discover_payload.get("post_count", 0),
+                        "capture_complete": discover_payload.get("capture_complete", True),
+                        "coverage": discover_payload.get("coverage", {}),
+                        "coverage_blocked": discover_payload.get("coverage_blocked", False),
+                        "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
+                        "expected_coverage": (discover_payload.get("coverage") or {}).get("expected", {}),
+                    },
+                    "prepare": {
+                        "ok": False,
+                        "run_status": "prepare_failed",
+                        "stage": "output_load",
+                        "complete": False,
+                        "output_path": str(prepared_path),
+                        "error": str(exc),
+                    },
+                    "returncode": 1,
+                }
             prepared_counts[target_date] = int(prepared_payload.get("prepared") or 0)
             if prepared_counts[target_date]:
+                import_payload = import_prepared(
+                    args.config,
+                    prepared_path,
+                    account_name=args.account_name,
+                    account_url=args.account_url,
+                    account_type=args.account_type,
+                )
+                if import_payload.get("returncode") != 0 or import_payload.get("ok") is False:
+                    return {
+                        "ok": False,
+                        "stage": "import",
+                        "run_status": "import_failed",
+                        "complete": False,
+                        "message": "候选标准化后本地入库失败；本次采集作业未完成，不能把已有输出视为最终结果。",
+                        "target_date": target_date,
+                        "elapsed_ms": int((time.monotonic() - discover_started) * 1000),
+                        "discover": {
+                            "raw_candidate_count": discover_payload.get("raw_candidate_count", 0),
+                            "post_count": discover_payload.get("post_count", 0),
+                            "capture_complete": discover_payload.get("capture_complete", True),
+                            "coverage": discover_payload.get("coverage", {}),
+                            "coverage_blocked": discover_payload.get("coverage_blocked", False),
+                            "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
+                            "expected_coverage": (discover_payload.get("coverage") or {}).get("expected", {}),
+                        },
+                        "prepared_counts": prepared_counts,
+                        "prepared": prepared_counts[target_date],
+                        "import": import_payload,
+                        "returncode": import_payload.get("returncode") or 1,
+                    }
                 imports.append(
                     {
                         "target_date": target_date,
-                        "import": import_prepared(
-                            args.config,
-                            prepared_path,
-                            account_name=args.account_name,
-                            account_url=args.account_url,
-                            account_type=args.account_type,
-                        ),
+                        "import": import_payload,
                     }
                 )
 
@@ -439,6 +506,19 @@ def discover_blocked_before_import(discover_coverage: dict[str, Any]) -> bool:
     return "human_intervention_required" in reasons or "discover_failed_before_import" in reasons
 
 
+def sync_failed_status(sync_result: dict[str, Any]) -> str:
+    """Return the account-job status that should represent a sync failure."""
+
+    if sync_result.get("ok", True):
+        return ""
+    status = str(sync_result.get("run_status") or sync_result.get("stage") or "sync_failed")
+    if status == "blocked_auth":
+        return "blocked_auth"
+    if status in {"quality_gate", "audit_output_gate", "partial_gate"}:
+        return status
+    return "sync_failed"
+
+
 def next_commands_for_status(
     *,
     args: argparse.Namespace,
@@ -490,6 +570,22 @@ def next_commands_for_status(
             {
                 "reason": "no_local_work",
                 "description": "当前范围没有可续跑的本地候选；从账号主页顶部重新发现候选并继续补抓/同步。",
+                "command": command_text(full_capture_command(base, primary_date, args)),
+            }
+        )
+    if run_status == "prepare_failed":
+        commands.append(
+            {
+                "reason": "prepare_failed",
+                "description": "主页候选已发现但标准化失败；修复输入结构或标准化错误后，从账号主页顶部重新发现候选并继续补抓/同步。",
+                "command": command_text(full_capture_command(base, primary_date, args)),
+            }
+        )
+    if run_status == "import_failed":
+        commands.append(
+            {
+                "reason": "import_failed",
+                "description": "标准化候选已生成但本地入库失败；修复 SQLite/配置/导入错误后，重新运行同一账号采集命令。",
                 "command": command_text(full_capture_command(base, primary_date, args)),
             }
         )
@@ -551,6 +647,14 @@ def next_commands_for_status(
                 "command": command_text(command),
             }
         )
+    if run_status in {"sync_failed", "quality_gate", "audit_output_gate", "partial_gate"}:
+        commands.append(
+            {
+                "reason": run_status,
+                "description": "同步或输出门未完成；保留本地 SQLite 结果，修复对应问题后续跑同一账号同日期同步。",
+                "command": command_text(resume_command(base, primary_date, force_recover_running=True)),
+            }
+        )
     if run_status == "blocked_opencli":
         commands.append(
             {
@@ -609,7 +713,8 @@ def summarize_job_status(
 ) -> str:
     if not preflight.get("ok"):
         return "blocked_opencli"
-    if sync_result.get("run_status") == "blocked_auth":
+    sync_failed = sync_failed_status(sync_result)
+    if sync_failed == "blocked_auth":
         return "blocked_auth"
     if discover_import and needs_human_intervention(discover_import):
         return "human_intervention_required"
@@ -622,6 +727,8 @@ def summarize_job_status(
     completion_status = completion_run_status(completion, ledger_mode=False)
     if completion_status != "complete":
         return completion_status
+    if sync_failed:
+        return sync_failed
     if sync_result.get("ok") and not sync_result.get("skipped"):
         return "complete"
     if discover_import and discover_import.get("ok"):
@@ -784,7 +891,7 @@ def main() -> int:
             run_status = (
                 "human_intervention_required"
                 if needs_human_intervention(discover_import)
-                else discover_import.get("stage") or "discover_failed"
+                else discover_import.get("run_status") or discover_import.get("stage") or "discover_failed"
             )
             partial_result = {
                 "ok": False,

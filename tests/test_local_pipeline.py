@@ -4949,6 +4949,162 @@ print(json.dumps(payload, ensure_ascii=False))
     assert argv[argv.index("--min-snapshots") + 1] == "9"
 
 
+def assert_run_account_job_structures_prepare_and_import_failures(tmp_path: Path) -> None:
+    opencli_status = start_opencli_status_server()
+    try:
+        prepare_config = tmp_path / "settings_account_prepare_fail.yaml"
+        prepare_bin = tmp_path / "bin-account-prepare-fail"
+        prepare_opencli = tmp_path / "fake-opencli-account-prepare-fail"
+        prepare_db_path = tmp_path / "account-prepare-fail.sqlite"
+        shutil.copy(ROOT / "config" / "settings.yaml.example", prepare_config)
+        text = prepare_config.read_text(encoding="utf-8")
+        text = text.replace("opencli_path: auto", f"opencli_path: {prepare_opencli}")
+        text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
+        text = text.replace("database_path: data/posts.sqlite", f"database_path: {prepare_db_path}")
+        prepare_config.write_text(text, encoding="utf-8")
+        prepare_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
+        prepare_opencli.chmod(0o755)
+        prepare_bin.mkdir()
+        (prepare_bin / "node").write_text(
+            """#!/usr/bin/env python3
+import json
+payload = {
+  "ok": True,
+  "post_count": 1,
+  "raw_candidate_count": 1,
+  "capture_complete": True,
+  "coverage": {"capture_complete": True},
+  "posts": [
+    {
+      "post_url": "https://www.facebook.com/accountpreparefail/posts/one",
+      "post_time_text": "1h",
+      "crawled_at": "2026-06-03T12:00:00",
+      "raw_text": "candidate one"
+    }
+  ]
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+            encoding="utf-8",
+        )
+        (prepare_bin / "node").chmod(0o755)
+        (prepare_bin / "python3").write_text(
+            """#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
+if len(sys.argv) > 1 and sys.argv[1] == "scripts/prepare_capture_result.py":
+    output = sys.argv[sys.argv.index("--output") + 1]
+    with open(output, "w", encoding="utf-8") as handle:
+        handle.write("{not-json")
+    print(json.dumps({"ok": True, "prepared": 1}, ensure_ascii=False))
+    sys.exit(0)
+real_python = os.environ["REAL_PYTHON"]
+completed = subprocess.run([real_python, *sys.argv[1:]], text=True)
+sys.exit(completed.returncode)
+""",
+            encoding="utf-8",
+        )
+        (prepare_bin / "python3").chmod(0o755)
+        prepare_env = dict(os.environ)
+        prepare_env["PATH"] = f"{prepare_bin}:{prepare_env.get('PATH', '')}"
+        prepare_env["REAL_PYTHON"] = PYTHON
+
+        prepare_result = run(
+            [
+                PYTHON,
+                "scripts/run_account_job.py",
+                "--config",
+                str(prepare_config),
+                "--account-url",
+                "https://www.facebook.com/accountpreparefail",
+                "--account-name",
+                "Account Prepare Fail",
+                "--target-date",
+                "260603",
+                "--dry-run",
+            ],
+            env=prepare_env,
+        )
+        assert prepare_result.returncode == 1, prepare_result.stdout
+        prepare_data = json.loads(prepare_result.stdout)
+        assert prepare_data["run_status"] == "prepare_failed"
+        assert prepare_data["complete"] is False
+        assert prepare_data["discover_import"]["stage"] == "prepare"
+        assert prepare_data["discover_import"]["prepare"]["stage"] == "output_load"
+        assert prepare_data["discover_import"]["discover"]["post_count"] == 1
+        assert any(item["reason"] == "prepare_failed" for item in prepare_data["next_commands"])
+        assert "--resume-only" not in prepare_data["next_commands"][0]["command"]
+
+        import_config = tmp_path / "settings_account_import_fail.yaml"
+        import_bin = tmp_path / "bin-account-import-fail"
+        import_opencli = tmp_path / "fake-opencli-account-import-fail"
+        shutil.copy(ROOT / "config" / "settings.yaml.example", import_config)
+        text = import_config.read_text(encoding="utf-8")
+        text = text.replace("opencli_path: auto", f"opencli_path: {import_opencli}")
+        text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
+        text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path}")
+        import_config.write_text(text, encoding="utf-8")
+        import_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
+        import_opencli.chmod(0o755)
+        import_bin.mkdir()
+        (import_bin / "node").write_text(
+            """#!/usr/bin/env python3
+import json
+payload = {
+  "ok": True,
+  "post_count": 1,
+  "raw_candidate_count": 1,
+  "capture_complete": True,
+  "coverage": {"capture_complete": True},
+  "posts": [
+    {
+      "post_url": "https://www.facebook.com/accountimportfail/posts/one",
+      "post_time_text": "1h",
+      "crawled_at": "2026-06-03T12:00:00",
+      "raw_text": "candidate one"
+    }
+  ]
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+            encoding="utf-8",
+        )
+        (import_bin / "node").chmod(0o755)
+        import_env = dict(os.environ)
+        import_env["PATH"] = f"{import_bin}:{import_env.get('PATH', '')}"
+
+        import_result = run(
+            [
+                PYTHON,
+                "scripts/run_account_job.py",
+                "--config",
+                str(import_config),
+                "--account-url",
+                "https://www.facebook.com/accountimportfail",
+                "--account-name",
+                "Account Import Fail",
+                "--target-date",
+                "260603",
+                "--dry-run",
+            ],
+            env=import_env,
+        )
+        assert import_result.returncode == 1, import_result.stdout
+        import_data = json.loads(import_result.stdout)
+        assert import_data["run_status"] == "import_failed"
+        assert import_data["complete"] is False
+        assert import_data["discover_import"]["stage"] == "import"
+        assert import_data["discover_import"]["prepared"] == 1
+        assert import_data["discover_import"]["import"]["run_status"] == "import_failed"
+        assert any(item["reason"] == "import_failed" for item in import_data["next_commands"])
+        assert "--resume-only" not in import_data["next_commands"][0]["command"]
+    finally:
+        opencli_status.shutdown()
+        opencli_status.server_close()
+
+
 def assert_run_capture_pipeline_passes_snapshot_budget(tmp_path: Path) -> None:
     config = tmp_path / "settings_capture_snapshots.yaml"
     fake_bin = tmp_path / "bin-snapshots"
@@ -5447,6 +5603,65 @@ def assert_run_account_job_blocked_auth_resume_only_keeps_resume_command() -> No
     assert commands[0]["reason"] == "blocked_auth"
     assert "--resume-only" in commands[0]["command"]
     assert "--force-recover-running" in commands[0]["command"]
+
+
+def assert_run_account_job_promotes_sync_failure_status() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    completion = {
+        "post_count": 1,
+        "has_incomplete_enrichment": False,
+        "requires_codex_summary_count": 0,
+        "coverage_incomplete_count": 0,
+    }
+    status = run_account_job.summarize_job_status(
+        preflight={"ok": True},
+        discover_import=None,
+        worker_passes=[],
+        sync_result={"ok": False, "run_status": "sync_failed", "stage": "feishu_write"},
+        completion=completion,
+    )
+    assert status == "sync_failed"
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/syncfailed",
+            "account_name": "Sync Failed",
+            "account_type": "competitor",
+            "sync": True,
+            "dry_run": False,
+            "strict_ready_only": False,
+            "resume_only": False,
+            "max_snapshots": 20,
+            "min_snapshots": 6,
+            "max_resume_passes": 2,
+            "expected_post_count": 0,
+            "expected_labels": "",
+        },
+    )()
+    commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260602"],
+        run_status=status,
+        completion=completion,
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert commands[0]["reason"] == "sync_failed"
+    assert "--resume-only" in commands[0]["command"]
+    assert "--sync" in commands[0]["command"]
+
+    quality_status = run_account_job.summarize_job_status(
+        preflight={"ok": True},
+        discover_import=None,
+        worker_passes=[],
+        sync_result={"ok": False, "run_status": "quality_gate", "stage": "quality_gate"},
+        completion=completion,
+    )
+    assert quality_status == "quality_gate"
 
 
 def assert_run_account_job_blocked_opencli_resume_command_matches_context() -> None:
@@ -6167,7 +6382,9 @@ def main() -> int:
         assert_expected_coverage_marks_missing_posts()
         assert_run_account_job_expected_coverage_marks_missing_posts()
         assert_run_account_job_blocks_auth_before_capture(tmp_path)
+        assert_run_account_job_structures_prepare_and_import_failures(tmp_path)
         assert_run_account_job_blocked_auth_resume_only_keeps_resume_command()
+        assert_run_account_job_promotes_sync_failure_status()
         assert_run_account_job_blocked_opencli_resume_command_matches_context()
         assert_run_account_job_promotes_discover_coverage_status()
         assert_run_account_job_promotes_human_intervention_status()
