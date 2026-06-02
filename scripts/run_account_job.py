@@ -162,6 +162,8 @@ def discover_and_import(
                 str(args.max_text),
                 "--max-snapshots",
                 str(args.max_snapshots),
+                "--min-snapshots",
+                str(args.min_snapshots),
             ]
         )
         discover_payload = parse_json_output(discover)
@@ -414,6 +416,7 @@ def full_capture_command(
     args: argparse.Namespace,
     *,
     max_snapshots: int | None = None,
+    min_snapshots: int | None = None,
 ) -> list[Any]:
     command = list(base)
     if primary_date:
@@ -421,6 +424,9 @@ def full_capture_command(
     snapshot_budget = max_snapshots if max_snapshots is not None else getattr(args, "max_snapshots", None)
     if snapshot_budget:
         command.extend(["--max-snapshots", str(snapshot_budget)])
+    min_snapshot_budget = min_snapshots if min_snapshots is not None else getattr(args, "min_snapshots", None)
+    if min_snapshot_budget:
+        command.extend(["--min-snapshots", str(min_snapshot_budget)])
     if getattr(args, "expected_post_count", 0):
         command.extend(["--expected-post-count", str(args.expected_post_count)])
     if getattr(args, "expected_labels", ""):
@@ -467,6 +473,7 @@ def next_commands_for_status(
             primary_date,
             args,
             max_snapshots=max(int(args.max_snapshots or 0) + 12, 32),
+            min_snapshots=max(int(getattr(args, "min_snapshots", 0) or 0), 6),
         )
         expected = discover_coverage.get("expected") if isinstance(discover_coverage, dict) else {}
         expected_message = expected.get("message") if isinstance(expected, dict) else ""
@@ -487,7 +494,10 @@ def next_commands_for_status(
             }
         )
     has_auto_work = has_auto_enrichment_work(completion)
-    if run_status in {"coverage_incomplete", "incomplete_pending_tasks", "synced_ledger_incomplete"} or has_auto_work:
+    hard_blockers = {"blocked_opencli", "blocked_auth", "human_intervention_required"}
+    if run_status not in hard_blockers and (
+        run_status in {"coverage_incomplete", "incomplete_pending_tasks", "synced_ledger_incomplete"} or has_auto_work
+    ):
         command = resume_command(base, primary_date, force_recover_running=True)
         command.extend(
             [
@@ -549,6 +559,22 @@ def next_commands_for_status(
                 "command": command_text(["python3", "scripts/check_env.py", "--config", args.config, "--fix-opencli"]),
             }
         )
+        if getattr(args, "resume_only", False):
+            command = resume_command(base, primary_date, force_recover_running=True)
+            command.extend(
+                [
+                    "--max-resume-passes",
+                    str(max(int(args.max_resume_passes or 0), 2)),
+                ]
+            )
+            commands.append(
+                {
+                    "reason": "resume_after_opencli",
+                    "description": "OpenCLI Browser Bridge 恢复后，继续同账号同日期的 SQLite 补抓队列，不重新发现主页。",
+                    "command": command_text(command),
+                }
+            )
+            return commands[:4]
         commands.append(
             {
                 "reason": "rerun_full_capture",
@@ -632,7 +658,8 @@ def main() -> int:
         help="Immediately recover scoped running enrichment tasks from a known interrupted previous run.",
     )
     parser.add_argument("--max-text", type=int, default=1500)
-    parser.add_argument("--max-snapshots", type=int, default=20)
+    parser.add_argument("--max-snapshots", type=int, default=32)
+    parser.add_argument("--min-snapshots", type=int, default=6)
     parser.add_argument("--expected-post-count", type=int, default=0)
     parser.add_argument("--expected-labels", default="", help="Comma-separated visible relative-time labels from the operator checklist.")
     parser.add_argument(

@@ -4078,6 +4078,11 @@ exit 1
     assert "detail_time:failed" not in data["task_counts"]
     assert "worker_passes" not in data
     assert any(item["reason"] == "blocked_opencli" for item in data["next_commands"])
+    assert any(item["reason"] == "resume_after_opencli" for item in data["next_commands"])
+    resume = next(item for item in data["next_commands"] if item["reason"] == "resume_after_opencli")
+    assert "--resume-only" in resume["command"]
+    assert "--force-recover-running" in resume["command"]
+    assert not any(item["reason"] == "rerun_full_capture" for item in data["next_commands"])
 
 
 def assert_run_account_job_recovers_scoped_running_tasks(tmp_path: Path) -> None:
@@ -4233,6 +4238,7 @@ def assert_run_account_job_next_commands_force_recover_running() -> None:
             "sync": True,
             "dry_run": False,
             "max_snapshots": 20,
+            "min_snapshots": 6,
             "max_resume_passes": 2,
             "expected_post_count": 0,
             "expected_labels": "",
@@ -4265,6 +4271,7 @@ def assert_run_account_job_summary_only_next_command_exports_requests() -> None:
             "sync": True,
             "dry_run": False,
             "max_snapshots": 20,
+            "min_snapshots": 6,
             "max_resume_passes": 2,
             "expected_post_count": 0,
             "expected_labels": "",
@@ -4316,6 +4323,7 @@ def assert_run_account_job_prioritizes_auto_work_before_summary_export() -> None
             "sync": True,
             "dry_run": False,
             "max_snapshots": 20,
+            "min_snapshots": 6,
             "max_resume_passes": 2,
             "expected_post_count": 0,
             "expected_labels": "",
@@ -4572,6 +4580,84 @@ print(json.dumps(payload, ensure_ascii=False))
     assert data["expected_coverage"]["missing_labels"] == ["10h"]
     assert data["coverage"]["expected_coverage_failed"] is True
     assert any("覆盖未完成" in action for action in data["next_actions"])
+
+
+def assert_run_account_job_passes_snapshot_budget(tmp_path: Path) -> None:
+    config = tmp_path / "settings_account_job_snapshots.yaml"
+    fake_bin = tmp_path / "bin-account-snapshots"
+    fake_opencli = tmp_path / "fake-opencli-account-snapshots"
+    args_file = tmp_path / "account-node-argv.json"
+    db_path = tmp_path / "account-snapshots.sqlite"
+    opencli_status = start_opencli_status_server()
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
+    config.write_text(text, encoding="utf-8")
+    fake_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
+    fake_opencli.chmod(0o755)
+    fake_bin.mkdir()
+    (fake_bin / "node").write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+pathlib.Path(r"{args_file}").write_text(json.dumps(sys.argv), encoding="utf-8")
+payload = {{
+  "ok": True,
+  "post_count": 1,
+  "raw_candidate_count": 1,
+  "capture_complete": True,
+  "coverage": {{"capture_complete": True}},
+  "posts": [
+    {{
+      "post_url": "https://www.facebook.com/accountsnapshot/posts/one",
+      "post_time_text": "1h",
+      "crawled_at": "2026-06-03T12:00:00",
+      "raw_text": "candidate one"
+    }}
+  ]
+}}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    (fake_bin / "node").chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+
+    try:
+        result = run(
+            [
+                PYTHON,
+                "scripts/run_account_job.py",
+                "--config",
+                str(config),
+                "--account-url",
+                "https://www.facebook.com/accountsnapshot",
+                "--account-name",
+                "Account Snapshot",
+                "--target-date",
+                "260603",
+                "--dry-run",
+                "--status-only",
+                "--max-snapshots",
+                "44",
+                "--min-snapshots",
+                "9",
+            ],
+            env=env,
+        )
+    finally:
+        opencli_status.shutdown()
+        opencli_status.server_close()
+    assert result.returncode == 0, result.stdout or result.stderr
+    argv = json.loads(args_file.read_text(encoding="utf-8"))
+    assert "--max-snapshots" in argv
+    assert argv[argv.index("--max-snapshots") + 1] == "44"
+    assert "--min-snapshots" in argv
+    assert argv[argv.index("--min-snapshots") + 1] == "9"
 
 
 def assert_run_capture_pipeline_passes_snapshot_budget(tmp_path: Path) -> None:
@@ -5044,6 +5130,7 @@ def assert_run_account_job_blocked_auth_resume_only_keeps_resume_command() -> No
             "strict_ready_only": False,
             "resume_only": True,
             "max_snapshots": 20,
+            "min_snapshots": 6,
             "max_resume_passes": 2,
             "expected_post_count": 0,
             "expected_labels": "",
@@ -5059,6 +5146,48 @@ def assert_run_account_job_blocked_auth_resume_only_keeps_resume_command() -> No
     assert commands[0]["reason"] == "blocked_auth"
     assert "--resume-only" in commands[0]["command"]
     assert "--force-recover-running" in commands[0]["command"]
+
+
+def assert_run_account_job_blocked_opencli_resume_command_matches_context() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    base_attrs = {
+        "config": "config/settings.yaml",
+        "account_url": "https://www.facebook.com/opencliblocked",
+        "account_name": "OpenCLI Blocked",
+        "account_type": "competitor",
+        "sync": True,
+        "dry_run": False,
+        "strict_ready_only": False,
+        "max_snapshots": 20,
+        "min_snapshots": 6,
+        "max_resume_passes": 2,
+        "expected_post_count": 0,
+        "expected_labels": "",
+    }
+    resume_args = type("Args", (), {**base_attrs, "resume_only": True})()
+    resume_commands = run_account_job.next_commands_for_status(
+        args=resume_args,
+        target_dates=["260602"],
+        run_status="blocked_opencli",
+        completion={"post_count": 1, "has_auto_enrichment_work": True, "auto_open_task_count": 1},
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert [item["reason"] for item in resume_commands] == ["blocked_opencli", "resume_after_opencli"]
+    assert "--resume-only" in resume_commands[1]["command"]
+    assert "--force-recover-running" in resume_commands[1]["command"]
+
+    capture_args = type("Args", (), {**base_attrs, "resume_only": False})()
+    capture_commands = run_account_job.next_commands_for_status(
+        args=capture_args,
+        target_dates=["260602"],
+        run_status="blocked_opencli",
+        completion={"post_count": 0, "has_auto_enrichment_work": False},
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert [item["reason"] for item in capture_commands] == ["blocked_opencli", "rerun_full_capture"]
+    assert "--resume-only" not in capture_commands[1]["command"]
 
 
 def assert_run_account_job_promotes_discover_coverage_status() -> None:
@@ -5104,6 +5233,7 @@ def assert_run_account_job_promotes_discover_coverage_status() -> None:
                 "sync": True,
                 "dry_run": False,
                 "max_snapshots": 20,
+                "min_snapshots": 6,
                 "max_resume_passes": 2,
                 "expected_post_count": 13,
                 "expected_labels": "38m,1h,2h",
@@ -5122,6 +5252,7 @@ def assert_run_account_job_promotes_discover_coverage_status() -> None:
     assert summary["stop_reason"] == "max_snapshots"
     assert next_commands[0]["reason"] == "coverage_incomplete"
     assert "--max-snapshots 32" in next_commands[0]["command"]
+    assert "--min-snapshots 6" in next_commands[0]["command"]
     assert "--expected-post-count 13" in next_commands[0]["command"]
     assert "--expected-labels" in next_commands[0]["command"]
     assert "38m,1h,2h" in next_commands[0]["command"]
@@ -5142,6 +5273,7 @@ def assert_run_account_job_promotes_human_intervention_status() -> None:
             "sync": True,
             "dry_run": False,
             "max_snapshots": 20,
+            "min_snapshots": 6,
             "max_resume_passes": 2,
             "expected_post_count": 0,
             "expected_labels": "",
@@ -5721,6 +5853,7 @@ def main() -> int:
         assert_run_capture_pipeline_blocks_auth_before_opencli(tmp_path)
         assert_run_capture_pipeline_reports_opencli_blocker(tmp_path)
         assert_run_capture_pipeline_applies_expected_coverage(tmp_path)
+        assert_run_account_job_passes_snapshot_budget(tmp_path)
         assert_run_capture_pipeline_passes_snapshot_budget(tmp_path)
         assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path)
         assert_run_capture_pipeline_structures_prepare_and_import_failures(tmp_path)
@@ -5729,6 +5862,7 @@ def main() -> int:
         assert_run_account_job_expected_coverage_marks_missing_posts()
         assert_run_account_job_blocks_auth_before_capture(tmp_path)
         assert_run_account_job_blocked_auth_resume_only_keeps_resume_command()
+        assert_run_account_job_blocked_opencli_resume_command_matches_context()
         assert_run_account_job_promotes_discover_coverage_status()
         assert_run_account_job_promotes_human_intervention_status()
         assert_enrichment_worker_reports_human_intervention_batch(tmp_path)
