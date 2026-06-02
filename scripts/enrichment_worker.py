@@ -24,6 +24,7 @@ from store import (
     enqueue_enrichment_tasks,
     mark_task_done,
     mark_task_failed,
+    mark_task_pending,
     mark_task_running,
     pending_enrichment_tasks,
     pending_enrichment_tasks_for_posts,
@@ -41,6 +42,7 @@ from value_utils import parse_bool
 
 ROOT = Path(__file__).resolve().parents[1]
 DETAIL_STAGES = {"detail_time", "lead_link", "engagement", "post_type"}
+RETRY_LATER_STATUSES = {"opencli_session_busy"}
 
 
 def split_stages(value: str) -> list[str]:
@@ -113,6 +115,15 @@ def run_detail_batch(
                     "human_intervention_required": True,
                     "status": "human_intervention_required",
                     "reason": payload.get("blocked_reason") or payload.get("reason") or payload.get("status") or "facebook_login_blocked",
+                    "payload": payload,
+                    "error": result.stderr or result.stdout or f"exit={result.returncode}",
+                }
+            if payload.get("action_required") == "retry_later" or payload.get("status") in RETRY_LATER_STATUSES:
+                return {
+                    "ok": False,
+                    "retry_later": True,
+                    "status": payload.get("status") or "retry_later",
+                    "reason": payload.get("message") or payload.get("status") or "retry_later",
                     "payload": payload,
                     "error": result.stderr or result.stdout or f"exit={result.returncode}",
                 }
@@ -295,6 +306,8 @@ def main() -> int:
     started = time.monotonic()
     completed = 0
     failed = 0
+    retry_later = 0
+    retry_later_reasons: list[str] = []
     human_intervention_required = False
     human_intervention_reasons: list[str] = []
 
@@ -311,6 +324,7 @@ def main() -> int:
             stage_set = set().union(*(unit["stages"] for unit in batch_units))
             batch_start = time.monotonic()
             batch_succeeded = False
+            batch_retry_later = False
             try:
                 result = run_detail_batch(args.config, config, batch, stage_set, args.target_date)
                 if not result.get("ok"):
@@ -319,6 +333,11 @@ def main() -> int:
                         reason = str(result.get("reason") or "facebook_login_blocked")
                         if reason not in human_intervention_reasons:
                             human_intervention_reasons.append(reason)
+                    if result.get("retry_later"):
+                        batch_retry_later = True
+                        reason = str(result.get("reason") or result.get("status") or "retry_later")
+                        if reason not in retry_later_reasons:
+                            retry_later_reasons.append(reason)
                     raise RuntimeError(result.get("error") or "detail enrichment failed")
                 apply_detail_results(conn, batch, result.get("posts", []))
                 batch_succeeded = True
@@ -334,6 +353,9 @@ def main() -> int:
                     if batch_succeeded and detail_stage_satisfied(stored, task["stage"]):
                         mark_task_done(conn, task["id"], duration_ms=duration_ms)
                         completed += 1
+                    elif batch_retry_later:
+                        mark_task_pending(conn, task["id"], reason=batch_error or "retry_later", retry_seconds=0)
+                        retry_later += 1
                     else:
                         mark_task_failed(conn, task["id"], batch_error or f"{task['stage']} still missing", duration_ms=duration_ms)
                         failed += 1
@@ -386,11 +408,16 @@ def main() -> int:
 
     result = {
         "ok": failed == 0,
-        "run_status": "human_intervention_required" if human_intervention_required else ("complete" if failed == 0 else "failed"),
+        "run_status": "human_intervention_required"
+        if human_intervention_required
+        else ("incomplete_pending_tasks" if retry_later and failed == 0 else ("complete" if failed == 0 else "failed")),
         "human_intervention_required": human_intervention_required,
         "human_intervention_reasons": human_intervention_reasons,
+        "retry_later": bool(retry_later),
+        "retry_later_reasons": retry_later_reasons,
         "input_tasks": len(tasks),
         "completed": completed,
+        "requeued": retry_later,
         "failed": failed,
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "scope": {

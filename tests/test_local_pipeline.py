@@ -4024,6 +4024,93 @@ def assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path: Path) -> None
     assert len(batches[0]) == 1
 
 
+def assert_enrichment_worker_requeues_opencli_session_busy(tmp_path: Path) -> None:
+    config = tmp_path / "settings_worker_session_busy.yaml"
+    db_path = tmp_path / "worker-session-busy.sqlite"
+    fake_bin = tmp_path / "bin-session-busy"
+    fake_node = fake_bin / "node"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {db_path}"),
+        encoding="utf-8",
+    )
+    sample = tmp_path / "session_busy_posts.json"
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Busy Page",
+                        "account_url": "https://www.facebook.com/busypage",
+                        "post_url": "https://www.facebook.com/busypage/posts/one",
+                        "relative_time_text": "1h",
+                        "story_summary": "Visible homepage candidate.",
+                        "crawled_at": "2026-06-03T12:00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
+    assert imported.returncode == 0, imported.stdout
+    fake_bin.mkdir()
+    fake_node.write_text(
+        """#!/usr/bin/env python3
+import json
+print(json.dumps({
+  "ok": False,
+  "status": "opencli_session_busy",
+  "action_required": "retry_later",
+  "message": "detail navigation already running"
+}, ensure_ascii=False))
+raise SystemExit(73)
+""",
+        encoding="utf-8",
+    )
+    fake_node.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    worker = run(
+        [
+            PYTHON,
+            "scripts/enrichment_worker.py",
+            "--config",
+            str(config),
+            "--stages",
+            "detail_time",
+            "--account-url",
+            "https://www.facebook.com/busypage",
+            "--account-type",
+            "competitor",
+            "--date",
+            "260603",
+            "--limit",
+            "10",
+        ],
+        env=env,
+    )
+    assert worker.returncode == 0, worker.stdout
+    data = json.loads(worker.stdout)
+    assert data["run_status"] == "incomplete_pending_tasks"
+    assert data["retry_later"] is True
+    assert data["requeued"] == 1
+    assert data["failed"] == 0
+    assert data["task_counts"].get("detail_time:pending") == 1
+    assert "detail_time:failed" not in data["task_counts"]
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from store import connect
+
+    conn = connect(db_path)
+    task = conn.execute("SELECT status, attempts, next_run_at, locked_at FROM enrichment_tasks WHERE stage = 'detail_time'").fetchone()
+    assert task["status"] == "pending"
+    assert task["attempts"] == 0
+    assert task["next_run_at"]
+    assert task["locked_at"] is None
+
+
 def assert_enrichment_worker_lead_stage_requires_external_landing_url() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import enrichment_worker
@@ -6663,6 +6750,7 @@ def main() -> int:
         assert_article_material_extractor(tmp_path)
         assert_partial_review_status_and_task_queue(tmp_path)
         assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path)
+        assert_enrichment_worker_requeues_opencli_session_busy(tmp_path)
         assert_enrichment_worker_lead_stage_requires_external_landing_url()
         assert_stale_running_enrichment_tasks_are_recovered(tmp_path)
         assert_enqueue_does_not_steal_active_running_tasks(tmp_path)

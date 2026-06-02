@@ -657,6 +657,29 @@ def mark_task_failed(
     conn.commit()
 
 
+def mark_task_pending(
+    conn: sqlite3.Connection,
+    task_id: int,
+    *,
+    reason: str = "",
+    retry_seconds: int = 0,
+) -> None:
+    next_run_at = (datetime.utcnow() + timedelta(seconds=max(0, retry_seconds))).isoformat(timespec="seconds")
+    conn.execute(
+        """
+        UPDATE enrichment_tasks
+        SET status = 'pending',
+            last_error = ?,
+            next_run_at = ?,
+            locked_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (reason[:1000], next_run_at, task_id),
+    )
+    conn.commit()
+
+
 def task_counts(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute(
         "SELECT stage, status, COUNT(*) AS count FROM enrichment_tasks GROUP BY stage, status"
