@@ -88,6 +88,7 @@ def main() -> int:
     parser.add_argument("--mode", choices=["append", "overwrite"], default="append")
     parser.add_argument("--partial", action="store_true", help="Write partial_review preview rows instead of formal ready rows.")
     parser.add_argument("--audit", action="store_true", help="Write auditable candidates with missing-field markers.")
+    parser.add_argument("--strict-ready-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -100,7 +101,7 @@ def main() -> int:
         args.mode,
         args.dry_run,
         partial=args.partial,
-        audit=args.audit,
+        audit=args.audit or not args.strict_ready_only,
     )
     print(result)
     return 0 if result.get("ok") else 1

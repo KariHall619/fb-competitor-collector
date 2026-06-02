@@ -13,8 +13,8 @@ This file is the first-stop project memory for future agents working in this rep
   4. Candidate detail enrichment reuses one detail tab when possible, with the original fresh-tab flow as fallback, to confirm exact `posted_at`, expand comments/replies, and capture the account-owned lead link.
   5. The lead link resolves to an external `landing_url`.
   6. Article material is fetched from the landing page, and the Chinese `story_summary` must be based on that material.
-  7. Only `ready_for_output` rows sync to Feishu through normal `--sync`; incomplete candidates stay in SQLite as `needs_enrichment`.
-  8. Audit/debug writes for incomplete candidates require an explicit audit route such as `--sync-audit` or `sync_feishu.py --audit`.
+  7. Normal `--sync` upserts all auditable candidates to the formal Feishu table by post URL and marks missing/suspicious fields in `是否采用` as `待补抓：...`.
+  8. Use `--strict-ready-only` only when the operator explicitly wants the legacy ready-only gate.
 
 ## Important User Feedback Already Incorporated
 
@@ -110,9 +110,9 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 - `scripts/apply_article_summaries.py`: apply Codex-written Chinese summaries and recompute `output_status`.
 - `scripts/audit_story_summaries.py`: audit invalid local summaries and optionally downgrade them to `needs_enrichment`.
 - `scripts/audit_fields.py`: audit missing/refetchable output fields, write `field_audit_*` markers, and queue refetch tasks when run with `--fix`.
-- `scripts/import_existing_result.py`: import JSON/CSV into SQLite and optionally sync ready rows; use `--sync-audit` only for explicit audit/debug output.
-- `scripts/filter_posts.py`: filter local SQLite records and optionally sync ready rows; use `--sync-audit` only for explicit audit/debug output.
-- `scripts/sync_feishu.py`: sync local ready rows to Feishu; use `--audit` only for explicit audit/debug output.
+- `scripts/import_existing_result.py`: import JSON/CSV into SQLite and optionally upsert auditable candidates; use `--strict-ready-only` for ready-only sync.
+- `scripts/filter_posts.py`: filter local SQLite records and optionally upsert auditable candidates; use `--strict-ready-only` for ready-only sync.
+- `scripts/sync_feishu.py`: sync local records to Feishu using candidate upsert by default; use `--strict-ready-only` for ready-only sync.
 - `scripts/output_quality.py`: final output gate.
 - `scripts/store.py`: SQLite schema/upsert/query logic.
 
@@ -182,17 +182,16 @@ Resume queued enrichment:
 python3 scripts/enrichment_worker.py --config config/settings.yaml --stages detail_time,lead_link,engagement,post_type,article_material --limit 50
 ```
 
-Sync only ready rows:
+Sync candidates to the formal table and mark missing fields:
 
 ```bash
-python3 scripts/import_existing_result.py --config config/settings.yaml --input exports/ready.json --sync --dry-run
+python3 scripts/import_existing_result.py --config config/settings.yaml --input exports/prepared.json --sync --dry-run
 ```
 
-Audit/write incomplete candidates explicitly:
+Strict ready-only sync:
 
 ```bash
-python3 scripts/import_existing_result.py --config config/settings.yaml --input exports/prepared.json --sync-audit --dry-run
-python3 scripts/sync_feishu.py --config config/settings.yaml --audit --dry-run
+python3 scripts/import_existing_result.py --config config/settings.yaml --input exports/ready.json --sync --strict-ready-only --dry-run
 ```
 
 ## Current Runtime Notes From Last Check

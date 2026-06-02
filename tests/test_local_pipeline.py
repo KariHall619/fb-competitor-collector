@@ -878,7 +878,7 @@ def assert_feishu_upsert_merges_rows_without_overwriting_manual_adoption() -> No
     assert merge_upsert_row(existing_marker, incoming_ready, headers) == ["https://facebook.com/post/2", "新概要", ""]
 
 
-def assert_sync_feishu_defaults_to_formal_ready_gate() -> None:
+def assert_sync_feishu_audit_and_strict_modes() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import sync_feishu
 
@@ -895,17 +895,17 @@ def assert_sync_feishu_defaults_to_formal_ready_gate() -> None:
             "field_audit_reasons": '["lead_link"]',
         }
     ]
-    formal = sync_feishu.sync_posts(config, incomplete, "all_posts", "append", True)
-    assert formal["ok"] is False
-    assert formal["stage"] == "quality_gate"
-    assert formal["ready_for_output"] == 0
-    assert formal["needs_enrichment_skipped"] == 1
-
     audit = sync_feishu.sync_posts(config, incomplete, "all_posts", "append", True, audit=True)
     assert audit["ok"] is True
     assert audit["dry_run"] is True
     assert audit["audit_output"] is True
     assert audit["output_candidates"] == 1
+
+    strict = sync_feishu.sync_posts(config, incomplete, "all_posts", "append", True, audit=False)
+    assert strict["ok"] is False
+    assert strict["stage"] == "quality_gate"
+    assert strict["ready_for_output"] == 0
+    assert strict["needs_enrichment_skipped"] == 1
 
 
 def assert_sqlite_upsert_preserves_enriched_fields(tmp_path: Path) -> None:
@@ -1122,9 +1122,9 @@ def assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path: Path) -> 
         ]
     )
     assert sync.returncode == 0, sync.stdout
-    assert '"ready_for_output": 1' in sync.stdout, sync.stdout
-    assert '"needs_enrichment_skipped": 1' in sync.stdout, sync.stdout
-    assert '"rows": 1' in sync.stdout, sync.stdout
+    assert '"audit_output": true' in sync.stdout, sync.stdout
+    assert '"output_candidates": 2' in sync.stdout, sync.stdout
+    assert '"rows": 2' in sync.stdout, sync.stdout
 
     audit = run(
         [
@@ -1185,9 +1185,26 @@ def assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_p
             "--dry-run",
         ]
     )
-    assert sync.returncode == 1, sync.stdout
-    assert '"ready_for_output": 0' in sync.stdout
-    assert '"needs_enrichment_skipped": 1' in sync.stdout
+    assert sync.returncode == 0, sync.stdout
+    assert '"audit_output": true' in sync.stdout
+    assert '"output_candidates": 1' in sync.stdout
+
+    strict = run(
+        [
+            PYTHON,
+            "scripts/import_existing_result.py",
+            "--config",
+            str(config),
+            "--input",
+            str(sample),
+            "--sync",
+            "--strict-ready-only",
+            "--dry-run",
+        ]
+    )
+    assert strict.returncode == 1, strict.stdout
+    assert '"ready_for_output": 0' in strict.stdout
+    assert '"needs_enrichment_skipped": 1' in strict.stdout
 
     audit = run(
         [
@@ -1275,6 +1292,7 @@ def assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path: Path) ->
             "--input",
             str(sample),
             "--sync",
+            "--strict-ready-only",
             "--dry-run",
         ]
     )
@@ -1320,6 +1338,7 @@ def assert_article_url_alone_does_not_qualify_lead_link(tmp_path: Path) -> None:
             "--input",
             str(sample),
             "--sync",
+            "--strict-ready-only",
             "--dry-run",
         ]
     )
@@ -1366,6 +1385,7 @@ def assert_filter_sync_applies_output_quality_gate(tmp_path: Path) -> None:
             "--date",
             "260527",
             "--sync",
+            "--strict-ready-only",
             "--dry-run",
         ]
     )
@@ -1412,6 +1432,7 @@ def assert_quality_gate_requires_comment_lead_source(tmp_path: Path) -> None:
             "--input",
             str(sample),
             "--sync",
+            "--strict-ready-only",
             "--dry-run",
         ]
     )
@@ -2056,9 +2077,9 @@ def assert_thirteen_incomplete_candidates_are_imported_for_enrichment(tmp_path: 
     assert data["inserted"] == 13, imported.stdout
 
     sync = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--sync", "--dry-run"])
-    assert sync.returncode == 1, sync.stdout
-    assert '"ready_for_output": 0' in sync.stdout
-    assert '"needs_enrichment_skipped": 13' in sync.stdout
+    assert sync.returncode == 0, sync.stdout
+    assert '"audit_output": true' in sync.stdout
+    assert '"output_candidates": 13' in sync.stdout
 
     audit = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--sync-audit", "--dry-run"])
     assert audit.returncode == 0, audit.stdout
@@ -2504,7 +2525,7 @@ def assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path: Path) -> 
         ),
         encoding="utf-8",
     )
-    formal = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--sync", "--dry-run"])
+    formal = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--sync", "--strict-ready-only", "--dry-run"])
     assert formal.returncode == 1, formal.stdout
     assert '"ready_for_output": 0' in formal.stdout
 
@@ -2528,7 +2549,7 @@ def main() -> int:
     assert_field_schema_controls_output_rows()
     assert_audit_marker_is_written_to_adoption_status()
     assert_feishu_upsert_merges_rows_without_overwriting_manual_adoption()
-    assert_sync_feishu_defaults_to_formal_ready_gate()
+    assert_sync_feishu_audit_and_strict_modes()
     assert_generic_photo_canonical_is_recomputed()
     assert_mobile_dom_extractor_can_see_story_links()
     assert_dom_extractor_does_not_treat_story_clock_as_post_time()

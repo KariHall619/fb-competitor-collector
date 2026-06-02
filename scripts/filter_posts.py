@@ -30,6 +30,7 @@ def main() -> int:
     parser.add_argument("--sync", action="store_true")
     parser.add_argument("--sync-audit", action="store_true", help="Write auditable candidates with missing-field markers.")
     parser.add_argument("--sync-partial", action="store_true")
+    parser.add_argument("--strict-ready-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -100,7 +101,7 @@ def main() -> int:
         print(json.dumps({"feishu_sync": result}, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 1
 
-    if args.sync_audit:
+    if (args.sync or args.sync_audit) and not args.strict_ready_only:
         headers = configured_output_headers(config)
         output_posts, skipped_posts = audit_output_candidates(posts)
         if not output_posts:
@@ -135,7 +136,7 @@ def main() -> int:
         print(json.dumps({"feishu_sync": result}, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 1
 
-    if args.sync:
+    if args.sync and args.strict_ready_only:
         headers = configured_output_headers(config)
         ready_posts, skipped_posts = ready_for_output(posts)
         errors = output_quality_errors(ready_posts)
