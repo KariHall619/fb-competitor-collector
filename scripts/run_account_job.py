@@ -455,6 +455,10 @@ def discover_coverage_summary(discover_import: dict[str, Any] | None) -> dict[st
         return {"source": "unknown", "complete": False, "incomplete": True, "reasons": ["missing_discover_report"]}
     coverage = discover.get("coverage") if isinstance(discover.get("coverage"), dict) else {}
     reasons: list[str] = []
+    if needs_human_intervention(discover_import):
+        reasons.append("human_intervention_required")
+    if discover_import.get("ok") is False:
+        reasons.append("discover_failed_before_import")
     if discover.get("coverage_blocked") or coverage.get("coverage_blocked"):
         reasons.append("coverage_blocked")
     if discover.get("coverage_incomplete") or coverage.get("coverage_incomplete"):
@@ -498,6 +502,31 @@ def resume_command(base: list[Any], primary_date: str, *, force_recover_running:
     return command
 
 
+def full_capture_command(
+    base: list[Any],
+    primary_date: str,
+    args: argparse.Namespace,
+    *,
+    max_snapshots: int | None = None,
+) -> list[Any]:
+    command = list(base)
+    if primary_date:
+        command.extend(["--target-date", primary_date])
+    snapshot_budget = max_snapshots if max_snapshots is not None else getattr(args, "max_snapshots", None)
+    if snapshot_budget:
+        command.extend(["--max-snapshots", str(snapshot_budget)])
+    if getattr(args, "expected_post_count", 0):
+        command.extend(["--expected-post-count", str(args.expected_post_count)])
+    if getattr(args, "expected_labels", ""):
+        command.extend(["--expected-labels", args.expected_labels])
+    return command
+
+
+def discover_blocked_before_import(discover_coverage: dict[str, Any]) -> bool:
+    reasons = set(discover_coverage.get("reasons") or [])
+    return "human_intervention_required" in reasons or "discover_failed_before_import" in reasons
+
+
 def next_commands_for_status(
     *,
     args: argparse.Namespace,
@@ -522,17 +551,17 @@ def next_commands_for_status(
         base.append("--sync")
     if args.dry_run:
         base.append("--dry-run")
+    if getattr(args, "strict_ready_only", False):
+        base.append("--strict-ready-only")
     commands: list[dict[str, Any]] = []
     primary_date = target_dates[-1] if target_dates else ""
     if run_status == "coverage_incomplete":
-        command = list(base)
-        if primary_date:
-            command.extend(["--target-date", primary_date])
-        command.extend(["--max-snapshots", str(max(int(args.max_snapshots or 0) + 12, 32))])
-        if args.expected_post_count:
-            command.extend(["--expected-post-count", str(args.expected_post_count)])
-        if args.expected_labels:
-            command.extend(["--expected-labels", args.expected_labels])
+        command = full_capture_command(
+            base,
+            primary_date,
+            args,
+            max_snapshots=max(int(args.max_snapshots or 0) + 12, 32),
+        )
         expected = discover_coverage.get("expected") if isinstance(discover_coverage, dict) else {}
         expected_message = expected.get("message") if isinstance(expected, dict) else ""
         commands.append(
@@ -541,6 +570,14 @@ def next_commands_for_status(
                 "description": "从账号主页顶部重跑采集，提高快照预算，并保留人工期望覆盖检查。"
                 + (f" 当前缺口：{expected_message}" if expected_message else ""),
                 "command": command_text(command),
+            }
+        )
+    if run_status == "no_work":
+        commands.append(
+            {
+                "reason": "no_local_work",
+                "description": "当前范围没有可续跑的本地候选；从账号主页顶部重新发现候选并继续补抓/同步。",
+                "command": command_text(full_capture_command(base, primary_date, args)),
             }
         )
     has_auto_work = has_auto_enrichment_work(completion)
@@ -585,11 +622,17 @@ def next_commands_for_status(
             }
         )
     if run_status == "blocked_auth":
+        if getattr(args, "resume_only", False):
+            command = resume_command(base, primary_date, force_recover_running=True)
+            description = "完成飞书用户授权后，继续同账号同日期的本地补抓/同步队列。"
+        else:
+            command = full_capture_command(base, primary_date, args)
+            description = "完成飞书用户授权后，重新从账号主页顶部发现候选，再继续补抓和同步。"
         commands.append(
             {
                 "reason": "blocked_auth",
-                "description": "完成飞书用户授权后，重新运行同一账号作业。",
-                "command": command_text(resume_command(base, primary_date, force_recover_running=True)),
+                "description": description,
+                "command": command_text(command),
             }
         )
     if run_status == "blocked_opencli":
@@ -600,12 +643,25 @@ def next_commands_for_status(
                 "command": command_text(["python3", "scripts/check_env.py", "--config", args.config, "--fix-opencli"]),
             }
         )
+        commands.append(
+            {
+                "reason": "rerun_full_capture",
+                "description": "OpenCLI Browser Bridge 恢复后，从账号主页顶部重新发现候选并继续补抓/同步。",
+                "command": command_text(full_capture_command(base, primary_date, args)),
+            }
+        )
     if run_status == "human_intervention_required":
+        if discover_blocked_before_import(discover_coverage) and not getattr(args, "resume_only", False):
+            command = full_capture_command(base, primary_date, args)
+            description = "登录/Profile/主页可见性恢复后，从账号主页顶部重新发现候选并继续补抓/同步。"
+        else:
+            command = resume_command(base, primary_date, force_recover_running=True)
+            description = "先在正常 Chrome 里确认 Facebook 已登录、账号主页帖子列表可见，再从本地 SQLite 续跑剩余补抓和同步。"
         commands.append(
             {
                 "reason": "human_intervention_required",
-                "description": "先在正常 Chrome 里确认 Facebook 已登录、账号主页帖子列表可见，再从本地 SQLite 续跑剩余补抓和同步。",
-                "command": command_text(resume_command(base, primary_date, force_recover_running=True)),
+                "description": description,
+                "command": command_text(command),
             }
         )
     return commands[:4]

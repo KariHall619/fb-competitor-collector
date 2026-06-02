@@ -3123,6 +3123,53 @@ if (summary.ready_for_output !== 0 || summary.needs_enrichment !== 1) {
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_opencli_detail_enrichment_rejects_copied_article_summary() -> None:
+    js = """
+import { buildCoverageSummary, enrichmentReasonCounts, hasValidStorySummary, outputStatusFor } from './scripts/opencli_enrich_post_details.mjs';
+
+const copiedSummary = {
+  post_url: 'https://facebook.com/example/posts/copied-summary',
+  output_status: 'ready_for_output',
+  posted_at: '2026年6月1日 12:00',
+  time_confirmed: true,
+  time_source: 'dom_aria_label',
+  summary_source: 'article',
+  story_summary: '母亲发现儿子冻结信用卡并控制公司资产后准备反击',
+  article_material: {
+    ok: true,
+    title: '母亲发现儿子冻结信用卡并控制公司资产后准备反击',
+    text_excerpt: '母亲发现儿子冻结信用卡并控制公司资产后准备反击，随后通过法律方式处理家庭资产问题。',
+  },
+  lead_link_status: 'qualified',
+  lead_link_source: 'comment',
+  lead_url_raw: 'https://site.test/a',
+  landing_url: 'https://site.test/a',
+};
+
+if (hasValidStorySummary(copiedSummary)) process.exit(1);
+if (outputStatusFor(copiedSummary) === 'ready_for_output') process.exit(2);
+const counts = enrichmentReasonCounts([copiedSummary]);
+if (counts.missing_article_summary !== 1) {
+  console.error(JSON.stringify(counts, null, 2));
+  process.exit(3);
+}
+const summary = buildCoverageSummary({ posts: [copiedSummary], date_filtered_out: [] }, 1);
+if (summary.ready_for_output !== 0 || summary.needs_enrichment !== 1) {
+  console.error(JSON.stringify(summary, null, 2));
+  process.exit(4);
+}
+
+const rawPayloadCopied = {
+  ...copiedSummary,
+  article_material: undefined,
+  raw_payload: JSON.stringify({ article_material: copiedSummary.article_material }),
+};
+if (hasValidStorySummary(rawPayloadCopied)) process.exit(5);
+"""
+    result = run(["node", "--input-type=module", "-e", js])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path: Path) -> None:
     raw = tmp_path / "photo_raw.json"
     prepared = tmp_path / "photo_prepared.json"
@@ -4162,10 +4209,46 @@ exit 0
     assert data["complete"] is False
     assert data["feishu_auth_preflight"]["ok"] is False
     assert any(item["reason"] == "blocked_auth" for item in data["next_commands"])
-    assert "--resume-only" in data["next_commands"][0]["command"]
-    assert "--force-recover-running" in data["next_commands"][0]["command"]
+    assert "--resume-only" not in data["next_commands"][0]["command"]
+    assert "--force-recover-running" not in data["next_commands"][0]["command"]
+    assert "--target-date 260602" in data["next_commands"][0]["command"]
+    assert "--sync" in data["next_commands"][0]["command"]
     assert "opencli_preflight" not in data
     assert not opencli_called.exists()
+
+
+def assert_run_account_job_blocked_auth_resume_only_keeps_resume_command() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/authblocked",
+            "account_name": "Auth Blocked",
+            "account_type": "competitor",
+            "sync": True,
+            "dry_run": False,
+            "strict_ready_only": False,
+            "resume_only": True,
+            "max_snapshots": 20,
+            "max_resume_passes": 2,
+            "expected_post_count": 0,
+            "expected_labels": "",
+        },
+    )()
+    commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260602"],
+        run_status="blocked_auth",
+        completion={"post_count": 1, "has_incomplete_enrichment": True},
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert commands[0]["reason"] == "blocked_auth"
+    assert "--resume-only" in commands[0]["command"]
+    assert "--force-recover-running" in commands[0]["command"]
 
 
 def assert_run_account_job_promotes_discover_coverage_status() -> None:
@@ -4285,8 +4368,9 @@ def assert_run_account_job_promotes_human_intervention_status() -> None:
     )
     assert status == "human_intervention_required"
     assert commands[0]["reason"] == "human_intervention_required"
-    assert "--resume-only" in commands[0]["command"]
-    assert "--force-recover-running" in commands[0]["command"]
+    assert "--resume-only" not in commands[0]["command"]
+    assert "--force-recover-running" not in commands[0]["command"]
+    assert "--target-date 260602" in commands[0]["command"]
     assert "check_env.py" not in commands[0]["command"]
 
     worker_status = run_account_job.summarize_job_status(
@@ -4797,6 +4881,7 @@ def main() -> int:
         assert_exact_time_verifier_summary_contract()
         assert_opencli_detail_enrichment_supports_target_date_filter()
         assert_opencli_detail_enrichment_rejects_string_false_time()
+        assert_opencli_detail_enrichment_rejects_copied_article_summary()
         assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path)
         assert_thirteen_incomplete_candidates_are_imported_for_enrichment(tmp_path)
         assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp_path)
@@ -4822,6 +4907,7 @@ def main() -> int:
         assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path)
         assert_run_account_job_expected_coverage_marks_missing_posts()
         assert_run_account_job_blocks_auth_before_capture(tmp_path)
+        assert_run_account_job_blocked_auth_resume_only_keeps_resume_command()
         assert_run_account_job_promotes_discover_coverage_status()
         assert_run_account_job_promotes_human_intervention_status()
         assert_enrichment_worker_reports_human_intervention_batch(tmp_path)

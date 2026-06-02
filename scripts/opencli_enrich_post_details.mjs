@@ -1019,10 +1019,87 @@ function shouldReplaceLeadLink(post, leadLink) {
     || sameNormalizedUrl(post.landing_url || post.article_url, leadLink.landing_url);
 }
 
+function rawPayloadForPost(post) {
+  if (!post?.raw_payload) return {};
+  if (typeof post.raw_payload === "object") return post.raw_payload;
+  try {
+    const parsed = JSON.parse(String(post.raw_payload));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function articleMaterialForPost(post) {
+  if (post?.article_material && typeof post.article_material === "object") return post.article_material;
+  const payload = rawPayloadForPost(post);
+  return payload.article_material && typeof payload.article_material === "object" ? payload.article_material : {};
+}
+
+function compactStoryText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function similarityRatio(left, right) {
+  const a = String(left || "");
+  const b = String(right || "");
+  if (!a && !b) return 1;
+  if (!a || !b) return 0;
+  const previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  const current = Array.from({ length: b.length + 1 }, () => 0);
+  for (let i = 1; i <= a.length; i += 1) {
+    current[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      current[j] = Math.min(
+        previous[j] + 1,
+        current[j - 1] + 1,
+        previous[j - 1] + cost
+      );
+    }
+    for (let j = 0; j <= b.length; j += 1) previous[j] = current[j];
+  }
+  const distance = previous[b.length];
+  return 1 - distance / Math.max(a.length, b.length);
+}
+
+function articleSourceTexts(post) {
+  const material = articleMaterialForPost(post);
+  const values = [];
+  for (const key of ["title", "meta_description", "text_excerpt"]) {
+    if (material[key]) values.push(String(material[key]).trim());
+  }
+  if (Array.isArray(material.paragraphs)) {
+    values.push(...material.paragraphs.slice(0, 5).map((item) => String(item || "").trim()).filter(Boolean));
+  }
+  return values.filter(Boolean);
+}
+
+function copiedArticleMaterial(summary, sourceTexts) {
+  const summaryCompact = compactStoryText(summary);
+  if (!summaryCompact) return false;
+  for (const source of sourceTexts || []) {
+    const sourceCompact = compactStoryText(source);
+    if (!sourceCompact) continue;
+    if (summaryCompact === sourceCompact) return true;
+    if (summaryCompact.length >= 24 && sourceCompact.includes(summaryCompact)) return true;
+    if (summaryCompact.length >= 24 && similarityRatio(summaryCompact, sourceCompact) >= 0.92) return true;
+  }
+  return false;
+}
+
 function hasValidStorySummary(post) {
   const text = String(post.story_summary || "");
   const chineseChars = (text.match(/[\u4e00-\u9fff]/g) || []).length;
-  return post.summary_source === "article" && chineseChars >= 8 && text.trim().length >= 12;
+  return Boolean(
+    post.summary_source === "article"
+    && chineseChars >= 8
+    && text.trim().length >= 12
+    && !copiedArticleMaterial(text, articleSourceTexts(post))
+  );
 }
 
 function outputStatusFor(post) {
@@ -1426,6 +1503,7 @@ export {
   detailEngagementBrowserExpression,
   detailPostTypeBrowserExpression,
   enrichmentReasonCounts,
+  hasValidStorySummary,
   leadLinkScanBrowserExpression,
   outputStatusFor,
   parseBool,
