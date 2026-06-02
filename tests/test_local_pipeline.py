@@ -4296,6 +4296,10 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
     assert data["quality_summary"]["final_usable_count"] == 0
     assert data["quality_summary"]["final_usable_rate"] == 0.0
     assert data["quality_summary"]["open_task_count"] > 0
+    assert data["quality_summary"]["open_task_stage_counts"]["detail_time"] == 1
+    assert data["quality_summary"]["missing_stage_counts"]["detail_time"] == 1
+    assert data["quality_summary"]["stage_pressure"][0]["stage"] == "detail_time"
+    assert any("精确时间" in note for note in data["quality_summary"]["stage_pressure_notes"])
     assert data["quality_summary"]["top_field_gaps"]
     assert data["quality_summary"]["feishu_sync"]["enabled"] is True
     assert data["quality_summary"]["feishu_sync"]["run_status"] == "synced_ledger_incomplete"
@@ -4417,6 +4421,12 @@ def assert_run_account_job_quality_threshold_failure_has_recovery_command() -> N
             "max_resume_passes": 2,
             "expected_post_count": 0,
             "expected_labels": "",
+            "require_coverage_complete": True,
+            "min_ledger_usable_rate": 1.0,
+            "min_final_usable_rate": 0.9,
+            "min_completion_rate": 0.8,
+            "min_expected_post_coverage_rate": 0.7,
+            "min_expected_label_coverage_rate": 0.6,
         },
     )()
     commands = run_account_job.next_commands_for_status(
@@ -4430,6 +4440,12 @@ def assert_run_account_job_quality_threshold_failure_has_recovery_command() -> N
     assert "--resume-only" in commands[0]["command"]
     assert "--status-only" in commands[0]["command"]
     assert "--force-recover-running" in commands[0]["command"]
+    assert "--require-coverage-complete" in commands[0]["command"]
+    assert "--min-ledger-usable-rate 1.0" in commands[0]["command"]
+    assert "--min-final-usable-rate 0.9" in commands[0]["command"]
+    assert "--min-completion-rate 0.8" in commands[0]["command"]
+    assert "--min-expected-post-coverage-rate 0.7" in commands[0]["command"]
+    assert "--min-expected-label-coverage-rate 0.6" in commands[0]["command"]
 
 
 def assert_run_account_job_resume_blocks_opencli_before_detail_tasks(tmp_path: Path) -> None:

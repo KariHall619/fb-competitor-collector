@@ -35,6 +35,24 @@ ENRICHMENT_STAGES = "detail_time,lead_link,engagement,post_type,article_material
 HUMAN_INTERVENTION_STATUSES = {"human_intervention_required", "login_required", "visitor_preview", "facebook_tab_missing"}
 DEFAULT_RESUME_STALE_RUNNING_SECONDS = 1800
 OPENCLI_REQUIRED_STAGES = {"detail_time", "lead_link", "engagement", "post_type"}
+STAGE_LABELS = {
+    "detail_time": "精确时间",
+    "lead_link": "引流链接",
+    "engagement": "互动数据",
+    "post_type": "帖子类型",
+    "article_material": "文章素材",
+    "summary": "文章概要",
+    "coverage": "覆盖不足",
+}
+STAGE_ORDER = {
+    "coverage": 0,
+    "detail_time": 1,
+    "lead_link": 2,
+    "engagement": 3,
+    "post_type": 4,
+    "article_material": 5,
+    "summary": 6,
+}
 
 
 def run_command(command: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
@@ -478,6 +496,22 @@ def resume_command(base: list[Any], primary_date: str, *, force_recover_running:
     return command
 
 
+def append_quality_threshold_args(command: list[Any], args: argparse.Namespace) -> None:
+    if getattr(args, "require_coverage_complete", False):
+        command.append("--require-coverage-complete")
+    rate_args = [
+        ("min_ledger_usable_rate", "--min-ledger-usable-rate"),
+        ("min_final_usable_rate", "--min-final-usable-rate"),
+        ("min_completion_rate", "--min-completion-rate"),
+        ("min_expected_post_coverage_rate", "--min-expected-post-coverage-rate"),
+        ("min_expected_label_coverage_rate", "--min-expected-label-coverage-rate"),
+    ]
+    for attr, flag in rate_args:
+        value = _rate_threshold(getattr(args, attr, 0.0))
+        if value > 0.0:
+            command.extend([flag, str(value)])
+
+
 def full_capture_command(
     base: list[Any],
     primary_date: str,
@@ -546,6 +580,7 @@ def next_commands_for_status(
         base.append("--dry-run")
     if getattr(args, "strict_ready_only", False):
         base.append("--strict-ready-only")
+    append_quality_threshold_args(base, args)
     commands: list[dict[str, Any]] = []
     primary_date = target_dates[-1] if target_dates else ""
     if run_status == "coverage_incomplete":
@@ -776,6 +811,56 @@ def _sync_skipped(sync_result: dict[str, Any]) -> bool:
     return str(sync_result.get("stage") or "") == "sync_disabled" or str(sync_result.get("run_status") or "") == "not_synced"
 
 
+def _count_dict(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for key, count in value.items():
+        stage = str(key or "").strip()
+        if not stage:
+            continue
+        number = _int_metric(count)
+        if number > 0:
+            counts[stage] = number
+    return dict(sorted(counts.items(), key=lambda item: (STAGE_ORDER.get(item[0], 99), item[0])))
+
+
+def _stage_pressure(open_counts: dict[str, int], missing_counts: dict[str, int]) -> list[dict[str, Any]]:
+    pressure: list[dict[str, Any]] = []
+    stages = sorted(set(open_counts) | set(missing_counts), key=lambda stage: (STAGE_ORDER.get(stage, 99), stage))
+    for stage in stages:
+        open_task_count = open_counts.get(stage, 0)
+        missing_post_count = missing_counts.get(stage, 0)
+        pressure.append(
+            {
+                "stage": stage,
+                "label": STAGE_LABELS.get(stage, stage),
+                "open_task_count": open_task_count,
+                "missing_post_count": missing_post_count,
+                "total_pressure": open_task_count + missing_post_count,
+                "requires_opencli": stage in OPENCLI_REQUIRED_STAGES,
+                "requires_codex": stage == "summary",
+            }
+        )
+    return pressure
+
+
+def _stage_pressure_notes(stage_pressure: list[dict[str, Any]]) -> list[str]:
+    notes: list[str] = []
+    for item in stage_pressure[:6]:
+        parts: list[str] = []
+        missing_post_count = _int_metric(item.get("missing_post_count"))
+        open_task_count = _int_metric(item.get("open_task_count"))
+        if missing_post_count:
+            parts.append(f"缺 {missing_post_count} 条")
+        if open_task_count:
+            parts.append(f"待跑 {open_task_count} 个任务")
+        if not parts:
+            continue
+        notes.append(f"{item.get('label') or item.get('stage')}：" + "，".join(parts))
+    return notes
+
+
 def _rate_threshold(value: Any) -> float:
     try:
         number = float(value or 0.0)
@@ -887,6 +972,9 @@ def account_job_quality_summary(
         }
     )
     expected_coverage = discover_coverage.get("expected") if isinstance(discover_coverage.get("expected"), dict) else {}
+    open_task_stage_counts = _count_dict(completion.get("open_task_stage_counts"))
+    missing_stage_counts = _count_dict(completion.get("missing_stage_counts"))
+    stage_pressure = _stage_pressure(open_task_stage_counts, missing_stage_counts)
     sync_enabled = bool(sync_result) and not _sync_skipped(sync_result)
     next_actions: list[str] = []
     for source in (sync_result.get("next_actions"), completion.get("next_actions")):
@@ -923,6 +1011,10 @@ def account_job_quality_summary(
         "open_task_count": _int_metric(completion.get("open_task_count")),
         "auto_open_task_count": _int_metric(completion.get("auto_open_task_count")),
         "requires_codex_summary_count": _int_metric(completion.get("requires_codex_summary_count")),
+        "open_task_stage_counts": open_task_stage_counts,
+        "missing_stage_counts": missing_stage_counts,
+        "stage_pressure": stage_pressure,
+        "stage_pressure_notes": _stage_pressure_notes(stage_pressure),
         "top_field_gaps": completion.get("top_field_gaps") if isinstance(completion.get("top_field_gaps"), list) else [],
         "field_gap_notes": completion.get("field_gap_notes") if isinstance(completion.get("field_gap_notes"), list) else [],
         "feishu_sync": {
