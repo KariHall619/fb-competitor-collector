@@ -20,6 +20,7 @@ from sync_status import blocked_auth_result, completion_run_status, enrichment_c
 
 
 ROOT = Path(__file__).resolve().parents[1]
+HUMAN_INTERVENTION_STATUSES = {"human_intervention_required", "login_required", "visitor_preview", "facebook_tab_missing"}
 
 
 def capture_pipeline_run_status(discover_payload: dict, completion: dict) -> str:
@@ -35,6 +36,19 @@ def capture_pipeline_run_status(discover_payload: dict, completion: dict) -> str
     return completion_run_status(completion, ledger_mode=False)
 
 
+def needs_human_intervention(payload: dict | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("human_intervention_required") or payload.get("action_required") == "human_intervention_required":
+        return True
+    if str(payload.get("status") or payload.get("run_status") or "") in HUMAN_INTERVENTION_STATUSES:
+        return True
+    nested = payload.get("result")
+    if isinstance(nested, dict) and needs_human_intervention(nested):
+        return True
+    return False
+
+
 def capture_pipeline_next_actions(run_status: str, completion: dict) -> list[str]:
     if run_status == "coverage_incomplete":
         return ["覆盖未完成：从账号主页顶部使用 run_account_job.py 重跑，必要时提高 --max-snapshots。"]
@@ -46,6 +60,12 @@ def capture_pipeline_next_actions(run_status: str, completion: dict) -> list[str
         return ["完成飞书用户授权或等待自动刷新恢复后，重新运行同一命令；本次未开始 Facebook 采集。"]
     if run_status == "discover_failed":
         return ["Facebook 主页发现阶段失败；确认目标账号主页已在正常 Chrome 打开并已登录，再用 run_account_job.py 从主页顶部重跑。"]
+    if run_status == "human_intervention_required":
+        return ["Facebook 登录态、Chrome Profile、访客预览或页面可见性异常；先在正常 Chrome 打开目标主页并确认真实帖子可见，再从主页顶部重跑 run_account_job.py。"]
+    if run_status == "prepare_failed":
+        return ["主页候选已发现但标准化失败；保留错误输出，修复 prepare_capture_result.py 或输入结构后从账号主页顶部重跑 run_account_job.py。"]
+    if run_status == "import_failed":
+        return ["标准化候选已生成但本地入库失败；修复导入错误后重新运行同一账号采集命令，已发现候选不得手动当作完成。"]
     return list(completion.get("next_actions") or [])
 
 
@@ -71,6 +91,8 @@ def main() -> int:
     parser.add_argument("--sync-partial", action="store_true", help="Dry-run/write partial preview through import script.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--max-text", default="1500")
+    parser.add_argument("--max-snapshots", type=int, default=32)
+    parser.add_argument("--min-snapshots", type=int, default=6)
     parser.add_argument("--expected-post-count", type=int, default=0)
     parser.add_argument("--expected-labels", default="", help="Comma-separated visible relative-time labels from the operator checklist.")
     args = parser.parse_args()
@@ -133,21 +155,27 @@ def main() -> int:
                 args.account_url,
                 "--max-text",
                 args.max_text,
+                "--max-snapshots",
+                str(args.max_snapshots),
+                "--min-snapshots",
+                str(args.min_snapshots),
             ]
         )
         discover_payload = parse_stdout_json(discover)
         if discover.returncode != 0 or not discover_payload.get("ok"):
+            run_status = "human_intervention_required" if needs_human_intervention(discover_payload) else "discover_failed"
             print(
                 json.dumps(
                     {
                         "ok": False,
-                        "stage": "discover",
-                        "run_status": "discover_failed",
+                        "stage": run_status if run_status == "human_intervention_required" else "discover",
+                        "run_status": run_status,
                         "complete": False,
+                        "human_intervention_required": run_status == "human_intervention_required",
                         "elapsed_ms": int((time.monotonic() - started) * 1000),
                         "discover_elapsed_ms": int((time.monotonic() - discover_started) * 1000),
                         "result": discover_payload,
-                        "next_actions": capture_pipeline_next_actions("discover_failed", {}),
+                        "next_actions": capture_pipeline_next_actions(run_status, {}),
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -186,8 +214,22 @@ def main() -> int:
                     {
                         "ok": False,
                         "stage": "prepare",
+                        "run_status": "prepare_failed",
+                        "complete": False,
+                        "message": "主页候选发现后标准化失败；本次未导入本地库，也未写入飞书。",
+                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                        "discover": {
+                            "raw_candidate_count": discover_payload.get("raw_candidate_count", 0),
+                            "post_count": discover_payload.get("post_count", 0),
+                            "capture_complete": discover_payload.get("capture_complete", True),
+                            "coverage": discover_payload.get("coverage", {}),
+                            "coverage_blocked": discover_payload.get("coverage_blocked", False),
+                            "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
+                        },
                         "stdout": prepare.stdout,
                         "stderr": prepare.stderr,
+                        "returncode": prepare.returncode,
+                        "next_actions": capture_pipeline_next_actions("prepare_failed", {}),
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -223,8 +265,17 @@ def main() -> int:
                     {
                         "ok": False,
                         "stage": "import",
+                        "run_status": "import_failed",
+                        "complete": False,
+                        "message": "候选标准化后本地入库失败；本次未完成采集作业，不能把已有输出视为最终结果。",
+                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                        "prepared": json.loads(prepared_path.read_text(encoding="utf-8")).get("prepared", 0)
+                        if prepared_path.exists()
+                        else 0,
                         "stdout": imported.stdout,
                         "stderr": imported.stderr,
+                        "returncode": imported.returncode,
+                        "next_actions": capture_pipeline_next_actions("import_failed", {}),
                     },
                     ensure_ascii=False,
                     indent=2,

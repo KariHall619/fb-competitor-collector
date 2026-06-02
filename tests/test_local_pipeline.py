@@ -1335,6 +1335,13 @@ def assert_sync_feishu_audit_and_strict_modes() -> None:
     assert audit["audit_output"] is True
     assert audit["output_candidates"] == 1
     assert audit["keys"] == ["https://facebook.com/example/posts/incomplete"]
+    assert audit["audit_missing_field_counts"] == {
+        "article_summary": 1,
+        "exact_time": 1,
+        "lead_link": 1,
+    }
+    assert audit["audit_missing_field_summary"][0]["label"] == "文章概要"
+    assert "文章概要：1 条" in audit["audit_missing_field_notes"]
 
     strict = sync_feishu.sync_posts(config, incomplete, "all_posts", "append", True, audit=False)
     assert strict["ok"] is False
@@ -1939,8 +1946,13 @@ def assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path: Path) -> Non
     )
     sync = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--sync", "--dry-run"])
     assert sync.returncode == 0, sync.stdout
-    assert '"audit_output": true' in sync.stdout
-    assert '"output_candidates": 1' in sync.stdout
+    sync_data = json.loads(sync.stdout)
+    assert sync_data["feishu_sync"]["audit_output"] is True
+    assert sync_data["feishu_sync"]["output_candidates"] == 1
+    assert sync_data["feishu_sync"]["audit_missing_field_counts"]["exact_time"] == 1
+    assert sync_data["feishu_sync"]["audit_missing_field_counts"]["lead_link"] == 1
+    assert sync_data["feishu_sync"]["audit_missing_field_counts"]["article_summary"] == 1
+    assert "精确时间：1 条" in sync_data["feishu_sync"]["audit_missing_field_notes"]
     assert '"rows": 1' in sync.stdout
 
     strict = run(
@@ -2496,6 +2508,57 @@ def assert_filter_sync_applies_output_quality_gate(tmp_path: Path) -> None:
     assert filtered_data["feishu_sync"]["run_status"] == "quality_gate"
     assert filtered_data["feishu_sync"]["complete"] is False
     assert filtered_data["feishu_sync"]["enrichment_completion"]["post_count"] == 1
+
+
+def assert_filter_sync_reports_audit_missing_field_counts(tmp_path: Path) -> None:
+    sample = tmp_path / "filter_audit_gaps.json"
+    config = tmp_path / "settings_filter_audit_gaps.yaml"
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Filter Gap Page",
+                        "account_url": "https://www.facebook.com/filtergap",
+                        "post_url": "https://www.facebook.com/filtergap/posts/gap",
+                        "relative_time_text": "1h",
+                        "story_summary": "Visible candidate from homepage.",
+                        "crawled_at": "2026-05-27T12:00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config_text = config.read_text(encoding="utf-8").replace(
+        "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'filter_audit_gaps.sqlite'}"
+    )
+    config.write_text(config_text, encoding="utf-8")
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
+    assert imported.returncode == 0, imported.stdout
+    filtered = run(
+        [
+            PYTHON,
+            "scripts/filter_posts.py",
+            "--config",
+            str(config),
+            "--date",
+            "260527",
+            "--sync",
+            "--dry-run",
+        ]
+    )
+    assert filtered.returncode == 0, filtered.stdout
+    filtered_data = json.loads(filtered.stdout)
+    sync = filtered_data["feishu_sync"]
+    assert sync["audit_output"] is True
+    assert sync["output_candidates"] == 1
+    assert sync["audit_missing_field_counts"]["exact_time"] == 1
+    assert sync["audit_missing_field_counts"]["lead_link"] == 1
+    assert sync["audit_missing_field_counts"]["article_summary"] == 1
+    assert "引流链接：1 条" in sync["audit_missing_field_notes"]
 
 
 def assert_quality_gate_requires_comment_lead_source(tmp_path: Path) -> None:
@@ -4335,6 +4398,255 @@ print(json.dumps(payload, ensure_ascii=False))
     assert any("覆盖未完成" in action for action in data["next_actions"])
 
 
+def assert_run_capture_pipeline_passes_snapshot_budget(tmp_path: Path) -> None:
+    config = tmp_path / "settings_capture_snapshots.yaml"
+    fake_bin = tmp_path / "bin-snapshots"
+    fake_opencli = tmp_path / "fake-opencli-snapshots"
+    args_file = tmp_path / "node-argv.json"
+    db_path = tmp_path / "capture-snapshots.sqlite"
+    opencli_status = start_opencli_status_server()
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
+    config.write_text(text, encoding="utf-8")
+    fake_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
+    fake_opencli.chmod(0o755)
+    fake_bin.mkdir()
+    (fake_bin / "node").write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+pathlib.Path(r"{args_file}").write_text(json.dumps(sys.argv), encoding="utf-8")
+payload = {{
+  "ok": True,
+  "post_count": 1,
+  "raw_candidate_count": 1,
+  "capture_complete": True,
+  "coverage": {{"capture_complete": True}},
+  "posts": [
+    {{
+      "post_url": "https://www.facebook.com/snapshotpage/posts/one",
+      "post_time_text": "1h",
+      "crawled_at": "2026-06-03T12:00:00",
+      "raw_text": "candidate one"
+    }}
+  ]
+}}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    (fake_bin / "node").chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+
+    try:
+        result = run(
+            [
+                PYTHON,
+                "scripts/run_capture_pipeline.py",
+                "--config",
+                str(config),
+                "--account-url",
+                "https://www.facebook.com/snapshotpage",
+                "--account-name",
+                "Snapshot Page",
+                "--target-date",
+                "260603",
+                "--max-snapshots",
+                "44",
+                "--min-snapshots",
+                "9",
+            ],
+            env=env,
+        )
+    finally:
+        opencli_status.shutdown()
+        opencli_status.server_close()
+    assert result.returncode == 0, result.stdout or result.stderr
+    argv = json.loads(args_file.read_text(encoding="utf-8"))
+    assert "--max-snapshots" in argv
+    assert argv[argv.index("--max-snapshots") + 1] == "44"
+    assert "--min-snapshots" in argv
+    assert argv[argv.index("--min-snapshots") + 1] == "9"
+
+
+def assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path: Path) -> None:
+    config = tmp_path / "settings_capture_login.yaml"
+    fake_bin = tmp_path / "bin-login"
+    fake_opencli = tmp_path / "fake-opencli-login"
+    db_path = tmp_path / "capture-login.sqlite"
+    opencli_status = start_opencli_status_server()
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
+    config.write_text(text, encoding="utf-8")
+    fake_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
+    fake_opencli.chmod(0o755)
+    fake_bin.mkdir()
+    (fake_bin / "node").write_text(
+        """#!/usr/bin/env python3
+import json
+payload = {
+  "ok": False,
+  "status": "login_required",
+  "action_required": "human_intervention_required",
+  "message": "Facebook login required"
+}
+print(json.dumps(payload, ensure_ascii=False))
+raise SystemExit(3)
+""",
+        encoding="utf-8",
+    )
+    (fake_bin / "node").chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+
+    try:
+        result = run(
+            [
+                PYTHON,
+                "scripts/run_capture_pipeline.py",
+                "--config",
+                str(config),
+                "--account-url",
+                "https://www.facebook.com/loginblocked",
+                "--target-date",
+                "260603",
+            ],
+            env=env,
+        )
+    finally:
+        opencli_status.shutdown()
+        opencli_status.server_close()
+    assert result.returncode != 0, result.stdout
+    data = json.loads(result.stdout)
+    assert data["stage"] == "human_intervention_required"
+    assert data["run_status"] == "human_intervention_required"
+    assert data["complete"] is False
+    assert data["human_intervention_required"] is True
+    assert any("登录态" in action or "Chrome Profile" in action for action in data["next_actions"])
+
+
+def assert_run_capture_pipeline_structures_prepare_and_import_failures(tmp_path: Path) -> None:
+    opencli_status = start_opencli_status_server()
+    try:
+        prepare_config = tmp_path / "settings_capture_prepare_fail.yaml"
+        prepare_bin = tmp_path / "bin-prepare-fail"
+        prepare_opencli = tmp_path / "fake-opencli-prepare-fail"
+        shutil.copy(ROOT / "config" / "settings.yaml.example", prepare_config)
+        text = prepare_config.read_text(encoding="utf-8")
+        text = text.replace("opencli_path: auto", f"opencli_path: {prepare_opencli}")
+        text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
+        text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'prepare-fail.sqlite'}")
+        prepare_config.write_text(text, encoding="utf-8")
+        prepare_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
+        prepare_opencli.chmod(0o755)
+        prepare_bin.mkdir()
+        (prepare_bin / "node").write_text(
+            """#!/usr/bin/env python3
+import json
+payload = {
+  "ok": True,
+  "post_count": 1,
+  "raw_candidate_count": 1,
+  "capture_complete": True,
+  "coverage": {"capture_complete": True},
+  "posts": {"bad": "shape"}
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+            encoding="utf-8",
+        )
+        (prepare_bin / "node").chmod(0o755)
+        prepare_env = dict(os.environ)
+        prepare_env["PATH"] = f"{prepare_bin}:{prepare_env.get('PATH', '')}"
+        prepare_result = run(
+            [
+                PYTHON,
+                "scripts/run_capture_pipeline.py",
+                "--config",
+                str(prepare_config),
+                "--account-url",
+                "https://www.facebook.com/preparefail",
+                "--target-date",
+                "260603",
+            ],
+            env=prepare_env,
+        )
+        assert prepare_result.returncode != 0, prepare_result.stdout
+        prepare_data = json.loads(prepare_result.stdout)
+        assert prepare_data["run_status"] == "prepare_failed"
+        assert prepare_data["complete"] is False
+        assert prepare_data["discover"]["post_count"] == 1
+        assert any("标准化失败" in action for action in prepare_data["next_actions"])
+
+        import_config = tmp_path / "settings_capture_import_fail.yaml"
+        import_bin = tmp_path / "bin-import-fail"
+        import_opencli = tmp_path / "fake-opencli-import-fail"
+        shutil.copy(ROOT / "config" / "settings.yaml.example", import_config)
+        text = import_config.read_text(encoding="utf-8")
+        text = text.replace("opencli_path: auto", f"opencli_path: {import_opencli}")
+        text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
+        text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path}")
+        import_config.write_text(text, encoding="utf-8")
+        import_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
+        import_opencli.chmod(0o755)
+        import_bin.mkdir()
+        (import_bin / "node").write_text(
+            """#!/usr/bin/env python3
+import json
+payload = {
+  "ok": True,
+  "post_count": 1,
+  "raw_candidate_count": 1,
+  "capture_complete": True,
+  "coverage": {"capture_complete": True},
+  "posts": [
+    {
+      "post_url": "https://www.facebook.com/importfail/posts/one",
+      "post_time_text": "1h",
+      "crawled_at": "2026-06-03T12:00:00",
+      "raw_text": "candidate one"
+    }
+  ]
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+            encoding="utf-8",
+        )
+        (import_bin / "node").chmod(0o755)
+        import_env = dict(os.environ)
+        import_env["PATH"] = f"{import_bin}:{import_env.get('PATH', '')}"
+        import_result = run(
+            [
+                PYTHON,
+                "scripts/run_capture_pipeline.py",
+                "--config",
+                str(import_config),
+                "--account-url",
+                "https://www.facebook.com/importfail",
+                "--target-date",
+                "260603",
+            ],
+            env=import_env,
+        )
+        assert import_result.returncode != 0, import_result.stdout
+        import_data = json.loads(import_result.stdout)
+        assert import_data["run_status"] == "import_failed"
+        assert import_data["complete"] is False
+        assert import_data["prepared"] == 1
+        assert any("本地入库失败" in action for action in import_data["next_actions"])
+    finally:
+        opencli_status.shutdown()
+        opencli_status.server_close()
+
+
 def assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path: Path) -> None:
     config = tmp_path / "settings_account_job_unknown_date.yaml"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
@@ -5197,6 +5509,7 @@ def main() -> int:
         assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path)
         assert_article_url_alone_does_not_qualify_lead_link(tmp_path)
         assert_filter_sync_applies_output_quality_gate(tmp_path)
+        assert_filter_sync_reports_audit_missing_field_counts(tmp_path)
         assert_quality_gate_rejects_internal_landing_url(tmp_path)
         assert_quality_gate_requires_raw_comment_lead_url(tmp_path)
         assert_comment_lead_link_overrides_ad_links(tmp_path)
@@ -5230,6 +5543,9 @@ def main() -> int:
         assert_run_capture_pipeline_blocks_auth_before_opencli(tmp_path)
         assert_run_capture_pipeline_reports_opencli_blocker(tmp_path)
         assert_run_capture_pipeline_applies_expected_coverage(tmp_path)
+        assert_run_capture_pipeline_passes_snapshot_budget(tmp_path)
+        assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path)
+        assert_run_capture_pipeline_structures_prepare_and_import_failures(tmp_path)
         assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path)
         assert_expected_coverage_marks_missing_posts()
         assert_run_account_job_expected_coverage_marks_missing_posts()

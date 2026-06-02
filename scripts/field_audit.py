@@ -163,6 +163,35 @@ def audit_marker_for_reasons(reasons: list[str]) -> str:
     return f"{SYSTEM_MARKER_PREFIX}{'、'.join(labels)}" if labels else ""
 
 
+def audit_reason_counts(posts: list[dict[str, Any]], config: dict[str, Any] | None = None) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for post in posts:
+        reasons = parse_reasons(post.get("field_audit_reasons"))
+        if not reasons:
+            reasons = audit_post_fields(post, config).get("field_audit_reasons", [])
+        for reason in reasons:
+            counts[reason] = counts.get(reason, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def audit_reason_summary(posts: list[dict[str, Any]], config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for reason, count in audit_reason_counts(posts, config).items():
+        summary.append(
+            {
+                "reason": reason,
+                "label": REASON_LABELS.get(reason, reason),
+                "count": count,
+                "stage": REASON_STAGES.get(reason, "coverage" if reason == "coverage" else ""),
+            }
+        )
+    return summary
+
+
+def audit_reason_notes(posts: list[dict[str, Any]], config: dict[str, Any] | None = None, *, limit: int = 5) -> list[str]:
+    return [f"{item['label']}：{item['count']} 条" for item in audit_reason_summary(posts, config)[:limit]]
+
+
 def is_system_audit_marker(value: Any) -> bool:
     return str(value or "").strip().startswith(SYSTEM_MARKER_PREFIX)
 

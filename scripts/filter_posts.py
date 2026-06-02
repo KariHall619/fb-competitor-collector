@@ -9,6 +9,7 @@ from typing import Any
 
 from config_loader import deep_get, load_config
 from field_schema import configured_output_headers, output_row_for_headers
+from field_audit import audit_reason_counts, audit_reason_notes, audit_reason_summary
 from lark_io import ensure_user_identity, write_rows
 from models import normalize_date
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review, ready_for_output
@@ -169,6 +170,9 @@ def main() -> int:
         result["output_candidates"] = len(output_posts)
         result["skipped"] = len(skipped_posts)
         result["audit_output"] = True
+        result["audit_missing_field_counts"] = audit_reason_counts(output_posts, config)
+        result["audit_missing_field_summary"] = audit_reason_summary(output_posts, config)
+        result["audit_missing_field_notes"] = audit_reason_notes(output_posts, config)
         result = annotate_sync_result(
             result,
             enrichment_completion_summary(conn, posts),

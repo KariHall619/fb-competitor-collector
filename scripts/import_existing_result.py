@@ -12,6 +12,7 @@ from typing import Any
 
 from config_loader import load_config
 from field_schema import configured_output_headers, output_row_for_headers
+from field_audit import audit_reason_counts, audit_reason_notes, audit_reason_summary
 from models import normalize_post
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review
 from store import connect, enqueue_enrichment_tasks_for_posts, mark_output_synced, upsert_posts
@@ -204,6 +205,9 @@ def main() -> int:
         sync_result["output_candidates"] = len(output_posts)
         sync_result["skipped"] = len(skipped_posts)
         sync_result["audit_output"] = True
+        sync_result["audit_missing_field_counts"] = audit_reason_counts(output_posts, config)
+        sync_result["audit_missing_field_summary"] = audit_reason_summary(output_posts, config)
+        sync_result["audit_missing_field_notes"] = audit_reason_notes(output_posts, config)
         sync_result = annotate_sync_result(
             sync_result,
             enrichment_completion_summary(conn, sync_candidates),

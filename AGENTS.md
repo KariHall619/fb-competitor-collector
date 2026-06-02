@@ -111,7 +111,7 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 - `scripts/prepare_capture_result.py`: normalize raw homepage capture and keep incomplete candidates as `needs_enrichment`.
 - `scripts/run_account_job.py`: preferred resumable business entrypoint for account capture, scoped enrichment, and formal ledger sync. It supports `--resume-only`, `--force-recover-running`, `--status-only`, `--last-hours 24`, `--sync`, `--dry-run`, `--expected-post-count`, `--expected-labels`, and `--resume-stale-running-seconds`; it emits `run_status` such as `complete`, `coverage_incomplete`, `incomplete_pending_tasks`, `needs_codex_summary`, `human_intervention_required`, `blocked_opencli`, or `blocked_auth`, plus `next_commands` for the first recovery action.
 - `scripts/opencli_enrich_post_details.mjs`: open detail pages, confirm exact time, expand comments/replies, resolve lead links, apply target-date filtering.
-- `scripts/run_capture_pipeline.py`: lower-level fast partial capture/import helper. It discovers visible candidates, prepares/imports them as partial records, and queues enrichment, but does not own full job completion. Do not use it as the final business “抓取并写入飞书” path.
+- `scripts/run_capture_pipeline.py`: lower-level fast partial capture/import helper. It discovers visible candidates, prepares/imports them as partial records, and queues enrichment, but does not own full job completion. It supports `--max-snapshots`, `--min-snapshots`, `--expected-post-count`, and `--expected-labels`, and failure branches must emit `run_status`, `complete=false`, and `next_actions`. Do not use it as the final business “抓取并写入飞书” path.
 - `scripts/enrichment_worker.py`: resumes queued `detail_time`, `lead_link`, `engagement`, `post_type`, and `article_material` tasks with local concurrency limits. Its `summary` stage no longer generates story summaries; it only verifies that a Codex-written Chinese summary has been applied, otherwise it leaves `requires_codex_chinese_summary`.
 - `scripts/enrich_article_summaries.py`: fetch article/landing material for summarization.
 - `scripts/export_summary_requests.py`: export SQLite rows and article material that need Codex-written Chinese summaries. It supports `--date`, `--account-url`, `--account-name`, and `--account-type`; account-job `next_commands` must keep these scopes so summary work does not mix unrelated accounts.
@@ -205,7 +205,7 @@ python3 scripts/import_existing_result.py --config config/settings.yaml --input 
 Fast partial capture/import:
 
 ```bash
-python3 scripts/run_capture_pipeline.py --config config/settings.yaml --account-url <facebook-account-url> --target-date YYMMDD --partial
+python3 scripts/run_capture_pipeline.py --config config/settings.yaml --account-url <facebook-account-url> --target-date YYMMDD --partial --max-snapshots 32
 ```
 
 Use this only as a lower-level partial/import helper; for business output, prefer `run_account_job.py` so pending enrichment and coverage state are reported in the final run summary.

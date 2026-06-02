@@ -9,6 +9,7 @@ from typing import Any
 
 from config_loader import load_config
 from field_schema import configured_output_headers, output_row_for_headers
+from field_audit import audit_reason_counts, audit_reason_notes, audit_reason_summary
 from lark_io import ensure_user_identity, write_rows
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review, ready_for_output
 from store import all_posts, connect, mark_output_synced
@@ -83,6 +84,9 @@ def sync_posts(
         result["output_candidates"] = len(output_posts)
         result["skipped"] = len(skipped_posts)
         result["audit_output"] = True
+        result["audit_missing_field_counts"] = audit_reason_counts(output_posts, config)
+        result["audit_missing_field_summary"] = audit_reason_summary(output_posts, config)
+        result["audit_missing_field_notes"] = audit_reason_notes(output_posts, config)
         if conn is not None:
             return annotate_sync_result(
                 result,
