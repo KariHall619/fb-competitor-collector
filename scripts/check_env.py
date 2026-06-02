@@ -188,12 +188,16 @@ def check_opencli(
     command_list = opencli_command if isinstance(opencli_command, list) else [opencli_command]
     command = check_invocation(command_list)
     if not command.get("exists"):
+        status = "opencli_missing"
         return {
             "ok": False,
-            "status": "opencli_missing",
+            "status": status,
             "command": command,
             "daemon_status": read_opencli_daemon_status(daemon_port),
             "message": "OpenCLI 未安装或不在 PATH；请安装 @jackwener/opencli 后重试。",
+            "blocking_issue": status,
+            "operator_action_required": True,
+            "next_actions": opencli_next_actions(status),
         }
 
     recovery_steps: list[dict[str, Any]] = []
