@@ -1698,6 +1698,10 @@ def assert_sync_status_marks_incomplete_ledger(tmp_path: Path) -> None:
     assert result["ok"] is True
     assert result["run_status"] == "synced_ledger_incomplete"
     assert result["complete"] is False
+    blocker_codes = [item["code"] for item in result["completion_blockers"]]
+    assert "coverage_incomplete" in blocker_codes
+    assert "field_gaps" in blocker_codes
+    assert "ledger_not_final" in blocker_codes
     completion = result["enrichment_completion"]
     assert completion["post_count"] == 1
     assert completion["ledger_candidate_count"] == 1
@@ -2225,6 +2229,7 @@ def assert_strict_sync_completion_uses_full_candidate_scope(tmp_path: Path) -> N
     assert data["feishu_sync"]["ready_for_output"] == 1
     assert data["feishu_sync"]["complete"] is False
     assert data["feishu_sync"]["run_status"] == "incomplete_pending_tasks"
+    assert "field_gaps" in [item["code"] for item in data["feishu_sync"]["completion_blockers"]]
     assert completion["post_count"] == 2
     assert completion["ready_or_synced_posts"] == 1
     assert completion["final_usable_rate"] == 0.5
@@ -2917,6 +2922,7 @@ def assert_filter_sync_applies_output_quality_gate(tmp_path: Path) -> None:
     assert filtered_data["feishu_sync"]["stage"] == "quality_gate"
     assert filtered_data["feishu_sync"]["run_status"] == "quality_gate"
     assert filtered_data["feishu_sync"]["complete"] is False
+    assert filtered_data["feishu_sync"]["completion_blockers"][0]["code"] == "quality_gate"
     assert filtered_data["feishu_sync"]["enrichment_completion"]["post_count"] == 1
 
 
@@ -2969,6 +2975,9 @@ def assert_filter_sync_reports_audit_missing_field_counts(tmp_path: Path) -> Non
     assert sync["audit_missing_field_counts"]["lead_link"] == 1
     assert sync["audit_missing_field_counts"]["article_summary"] == 1
     assert "引流链接：1 条" in sync["audit_missing_field_notes"]
+    blocker_codes = [item["code"] for item in sync["completion_blockers"]]
+    assert "field_gaps" in blocker_codes
+    assert "ledger_not_final" in blocker_codes
 
 
 def assert_quality_gate_requires_comment_lead_source(tmp_path: Path) -> None:

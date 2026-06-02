@@ -149,6 +149,147 @@ def completion_run_status(completion: dict[str, Any], *, ledger_mode: bool = Fal
     return "complete"
 
 
+def sync_completion_blockers(
+    sync_result: dict[str, Any],
+    completion: dict[str, Any],
+    *,
+    ledger_mode: bool,
+) -> list[dict[str, Any]]:
+    """Return ordered blockers for direct import/filter/sync callers."""
+
+    blockers: list[dict[str, Any]] = []
+
+    def add(
+        code: str,
+        *,
+        label: str,
+        severity: str,
+        priority: int,
+        message: str,
+        next_action: str,
+        metrics: dict[str, Any] | None = None,
+        recoverable: bool = True,
+    ) -> None:
+        blockers.append(
+            {
+                "code": code,
+                "label": label,
+                "severity": severity,
+                "priority": priority,
+                "recoverable": recoverable,
+                "message": message,
+                "next_action": next_action,
+                "metrics": metrics or {},
+            }
+        )
+
+    if not sync_result.get("ok"):
+        stage = str(sync_result.get("stage") or sync_result.get("run_status") or "sync_failed")
+        add(
+            stage,
+            label={
+                "quality_gate": "严格质量门未通过",
+                "audit_output_gate": "无台账候选",
+                "partial_gate": "无预览候选",
+                "blocked_auth": "飞书授权阻塞",
+                "feishu_auth_preflight": "飞书授权阻塞",
+            }.get(stage, "飞书同步未完成"),
+            severity="sync",
+            priority=0,
+            message=str(sync_result.get("message") or "同步或输出门未完成，本地 SQLite 结果仍可续跑。"),
+            next_action=(sync_result.get("next_actions") or _failed_sync_next_actions(sync_result))[0],
+            metrics={
+                key: sync_result[key]
+                for key in ("stage", "run_status", "ready_for_output", "output_candidates", "partial_review", "skipped")
+                if key in sync_result
+            },
+        )
+
+    if completion.get("coverage_health") == "incomplete" or completion.get("coverage_incomplete_count"):
+        add(
+            "coverage_incomplete",
+            label="覆盖不足",
+            severity="coverage",
+            priority=10,
+            message="本地记录标记了覆盖不足；台账可见不代表本次账号窗口已抓全。",
+            next_action="从账号主页顶部重跑采集，必要时提高 --max-snapshots 并带上 expected count/labels。",
+            metrics={
+                "coverage_incomplete_count": completion.get("coverage_incomplete_count", 0),
+                "coverage_incomplete_urls": completion.get("coverage_incomplete_urls", []),
+            },
+        )
+
+    for stage, count in (completion.get("open_task_stage_counts") or {}).items():
+        if stage not in AUTO_ENRICHMENT_STAGES or int(count or 0) <= 0:
+            continue
+        add(
+            f"stage_{stage}",
+            label=f"{stage} 待补抓",
+            severity="auto_enrichment",
+            priority=20,
+            message=f"{stage} 仍有待跑补抓任务，阻止最终完整可用。",
+            next_action="继续运行同账号补抓队列，优先处理 detail_time, lead_link, engagement, post_type, article_material。",
+            metrics={"stage": stage, "open_task_count": int(count or 0)},
+        )
+
+    for stage, count in (completion.get("missing_stage_counts") or {}).items():
+        if stage not in AUTO_ENRICHMENT_STAGES or int(count or 0) <= 0:
+            continue
+        code = f"stage_{stage}"
+        if any(item["code"] == code for item in blockers):
+            continue
+        add(
+            code,
+            label=f"{stage} 缺失",
+            severity="auto_enrichment",
+            priority=21,
+            message=f"{stage} 字段仍缺失，最终完整可用率未达标。",
+            next_action="重新入队并运行同账号补抓队列。",
+            metrics={"stage": stage, "missing_post_count": int(count or 0)},
+        )
+
+    if completion.get("requires_codex_summary_count") or (completion.get("missing_stage_counts") or {}).get("summary"):
+        add(
+            "codex_summary_required",
+            label="需要 Codex 中文概要",
+            severity="codex_required",
+            priority=40,
+            message="仍缺基于文章材料的中文概要。",
+            next_action="导出 scoped summary requests，写入中文概要后运行 apply_article_summaries。",
+            metrics={"requires_codex_summary_count": completion.get("requires_codex_summary_count", 0)},
+        )
+
+    top_field_gaps = completion.get("top_field_gaps") if isinstance(completion.get("top_field_gaps"), list) else []
+    if top_field_gaps and completion.get("final_usable_rate", 0.0) < 1.0:
+        add(
+            "field_gaps",
+            label="最终可用字段缺口",
+            severity="quality_gap",
+            priority=50,
+            message="存在最终输出字段缺口，台账写入不等于最终可用。",
+            next_action="按 top_field_gaps 补齐精确时间、引流链接、文章概要、互动数据或帖子类型。",
+            metrics={"top_field_gaps": top_field_gaps[:5]},
+        )
+
+    if ledger_mode and completion.get("ledger_candidate_count") and completion.get("final_usable_rate", 0.0) < 1.0:
+        add(
+            "ledger_not_final",
+            label="台账已写但未最终可用",
+            severity="ledger_state",
+            priority=60,
+            message="普通同步允许台账行先入表，但最终完整可用率仍未达标。",
+            next_action="继续补抓 completion_blockers 中列出的字段，后续按帖子链接 upsert 更新同一行。",
+            metrics={
+                "ledger_candidate_count": completion.get("ledger_candidate_count", 0),
+                "ledger_usable_rate": completion.get("ledger_usable_rate", 0.0),
+                "final_usable_rate": completion.get("final_usable_rate", 0.0),
+            },
+        )
+
+    blockers.sort(key=lambda item: (item["priority"], item["code"]))
+    return blockers[:10]
+
+
 def _next_actions(
     *,
     post_count: int,
@@ -293,6 +434,7 @@ def annotate_sync_result(
     if not sync_result.get("ok"):
         next_result.setdefault("run_status", sync_result.get("stage") or "sync_failed")
         next_result.setdefault("next_actions", completion.get("next_actions") or _failed_sync_next_actions(next_result))
+        next_result["completion_blockers"] = sync_completion_blockers(next_result, completion, ledger_mode=ledger_mode)
         return next_result
     if incomplete:
         next_result["run_status"] = completion_run_status(completion, ledger_mode=ledger_mode)
@@ -304,6 +446,7 @@ def annotate_sync_result(
     else:
         next_result["run_status"] = "complete"
         next_result.setdefault("next_actions", completion.get("next_actions", []))
+    next_result["completion_blockers"] = sync_completion_blockers(next_result, completion, ledger_mode=ledger_mode)
     return next_result
 
 
@@ -320,6 +463,7 @@ def annotate_sync_failure(sync_result: dict[str, Any]) -> dict[str, Any]:
     stage = str(next_result.get("stage") or "")
     next_result["run_status"] = stage if stage in {"quality_gate", "audit_output_gate", "partial_gate"} else "sync_failed"
     next_result.setdefault("next_actions", _failed_sync_next_actions(next_result))
+    next_result["completion_blockers"] = sync_completion_blockers(next_result, {}, ledger_mode=False)
     return next_result
 
 

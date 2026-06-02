@@ -137,7 +137,7 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 - `scripts/audit_fields.py`: audit missing/refetchable output fields, write `field_audit_*` markers, and queue refetch tasks when run with `--fix`.
 - `scripts/import_existing_result.py`: import JSON/CSV into SQLite and optionally upsert auditable candidates; it reports `enrichment_tasks.stage_counts` / `open_stage_counts` so callers can see which补抓 stages block final usable rows. Use `--strict-ready-only` for ready-only sync.
 - `scripts/filter_posts.py`: filter local SQLite records and optionally upsert auditable candidates; use `--strict-ready-only` for ready-only sync.
-- `scripts/sync_feishu.py`: sync local records to Feishu using candidate upsert by default; use `--strict-ready-only` for ready-only sync.
+- `scripts/sync_feishu.py`: sync local records to Feishu using candidate upsert by default; use `--strict-ready-only` for ready-only sync. Direct sync results from import/filter/sync paths include `completion_blockers`; `ok=true` with `run_status=synced_ledger_incomplete` means ledger rows were written but final usable rows still need补抓.
 - `scripts/output_quality.py`: final output gate.
 - `scripts/store.py`: SQLite schema/upsert/query logic.
 

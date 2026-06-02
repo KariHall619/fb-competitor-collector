@@ -62,7 +62,7 @@ Map common requests as follows:
 - “把结果同步到飞书”
   - Confirm `feishu.output_spreadsheet_url` is configured.
   - Prefer the emitted `next_commands` or `scripts/run_account_job.py --resume-only --force-recover-running --sync` for account-scoped capture results so pending enrichment is reported.
-  - Direct `import_existing_result.py --sync`, `filter_posts.py --sync`, and `sync_feishu.py` can still upsert ledger rows, but their `run_status` / `enrichment_completion` must be reported if incomplete.
+  - Direct `import_existing_result.py --sync`, `filter_posts.py --sync`, and `sync_feishu.py` can still upsert ledger rows, but their `run_status`, `completion_blockers`, and `enrichment_completion` must be reported if incomplete.
 
 - “筛选 5 月 21 日的竞品帖子”
   - Use `python3 scripts/filter_posts.py --config config/settings.yaml --date YYMMDD --account-type competitor`.
