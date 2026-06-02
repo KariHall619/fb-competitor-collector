@@ -94,6 +94,24 @@ def version_ok(text: str) -> bool:
     return major > OPENCLI_MIN_MAJOR or (major == OPENCLI_MIN_MAJOR and minor >= OPENCLI_MIN_MINOR)
 
 
+def opencli_next_actions(status: str) -> list[str]:
+    if status == "ready":
+        return ["保持目标 Facebook 账号主页在正常 Chrome 中打开且帖子列表可见，然后运行 run_account_job.py。"]
+    if status == "opencli_missing":
+        return ["安装或修复 @jackwener/opencli，然后重新运行 python3 scripts/check_env.py --config config/settings.yaml --fix-opencli。"]
+    if status == "opencli_version_too_old":
+        return ["升级 @jackwener/opencli 到 1.8.0 或更新版本，再重新运行环境检查。"]
+    if status == "daemon_not_running":
+        return ["运行 python3 scripts/check_env.py --config config/settings.yaml --fix-opencli 自动启动 OpenCLI daemon。"]
+    if status == "browser_bridge_not_connected":
+        return [
+            "在业务 Chrome profile 中安装并启用 OpenCLI Browser Bridge 扩展。",
+            "打开 chrome://extensions/，确认扩展已启用且允许访问 Facebook 页面。",
+            "保持目标 Facebook 账号主页标签页打开并已登录，然后重新运行 python3 scripts/check_env.py --config config/settings.yaml --fix-opencli。",
+        ]
+    return ["修复 OpenCLI 命令或 daemon 后，重新运行 python3 scripts/check_env.py --config config/settings.yaml --fix-opencli。"]
+
+
 def run_cli(path: str, args: list[str]) -> dict[str, Any]:
     command = check_command(path)
     if not command.get("exists"):
@@ -215,6 +233,9 @@ def check_opencli(
         "ok": ready,
         "status": status,
         "message": message,
+        "blocking_issue": "" if ready else status,
+        "operator_action_required": not ready,
+        "next_actions": opencli_next_actions(status),
         "command": command,
         "daemon_port": daemon_port,
         "daemon_status": daemon_status,
@@ -228,10 +249,15 @@ def recommended_capture_route(report: dict[str, Any]) -> dict[str, str]:
         return {
             "route": "opencli_browser_bridge",
             "message": "优先通过 OpenCLI Browser Bridge 读取业务人员当前 Chrome 已打开且肉眼可见的 Facebook 标签页，再导入/去重/同步飞书。",
+            "blocked": False,
+            "next_actions": report["opencli_browser_bridge"].get("next_actions", []),
         }
     return {
         "route": "blocked_until_opencli_ready",
         "message": "OpenCLI Browser Bridge 未就绪，已停止实时采集；请先安装/启用 OpenCLI Chrome 扩展并确认 opencli doctor 通过。",
+        "blocked": True,
+        "blocking_issue": report["opencli_browser_bridge"].get("blocking_issue") or report["opencli_browser_bridge"].get("status", "opencli_not_ready"),
+        "next_actions": report["opencli_browser_bridge"].get("next_actions", []),
     }
 
 

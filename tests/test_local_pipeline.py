@@ -863,8 +863,24 @@ def assert_check_env_prefers_opencli_route() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from check_env import recommended_capture_route
 
-    assert recommended_capture_route({"opencli_browser_bridge": {"ok": True}})["route"] == "opencli_browser_bridge"
-    assert recommended_capture_route({"opencli_browser_bridge": {"ok": False}})["route"] == "blocked_until_opencli_ready"
+    ready = recommended_capture_route({"opencli_browser_bridge": {"ok": True, "next_actions": ["run account job"]}})
+    assert ready["route"] == "opencli_browser_bridge"
+    assert ready["blocked"] is False
+    assert ready["next_actions"] == ["run account job"]
+    blocked = recommended_capture_route(
+        {
+            "opencli_browser_bridge": {
+                "ok": False,
+                "status": "browser_bridge_not_connected",
+                "blocking_issue": "browser_bridge_not_connected",
+                "next_actions": ["install extension"],
+            }
+        }
+    )
+    assert blocked["route"] == "blocked_until_opencli_ready"
+    assert blocked["blocked"] is True
+    assert blocked["blocking_issue"] == "browser_bridge_not_connected"
+    assert blocked["next_actions"] == ["install extension"]
 
 
 def assert_check_env_reports_opencli_route_status() -> None:
@@ -876,6 +892,9 @@ def assert_check_env_reports_opencli_route_status() -> None:
     missing = check_env.check_opencli(["/definitely/missing/opencli"], daemon_port=9)
     assert missing["status"] == "opencli_missing"
     assert missing["ok"] is False
+    assert missing["operator_action_required"] is True
+    assert missing["blocking_issue"] == "opencli_missing"
+    assert missing["next_actions"]
     original_read = check_env.read_opencli_daemon_status
     original_run = check_env.run_opencli_command
     original_check = check_env.check_invocation
@@ -902,6 +921,16 @@ def assert_check_env_reports_opencli_route_status() -> None:
         assert fixed["auto_fix_attempted"] is True
         assert fixed["auto_fix_steps"][0]["step"] == "opencli_doctor"
         assert calls and calls[0][1] == ["doctor"]
+
+        check_env.read_opencli_daemon_status = lambda _port: {
+            "ok": True,
+            "status": {"ok": True, "extensionConnected": False},
+        }
+        bridge_blocked = check_env.check_opencli(["opencli"], daemon_port=19825, auto_fix=False)
+        assert bridge_blocked["status"] == "browser_bridge_not_connected"
+        assert bridge_blocked["operator_action_required"] is True
+        assert bridge_blocked["blocking_issue"] == "browser_bridge_not_connected"
+        assert any("chrome://extensions" in action for action in bridge_blocked["next_actions"])
     finally:
         check_env.read_opencli_daemon_status = original_read
         check_env.run_opencli_command = original_run
@@ -3902,6 +3931,31 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
     assert any(item["reason"] == "pending_enrichment" for item in data["next_commands"])
     assert "--resume-only" in data["next_commands"][0]["command"]
     assert "--force-recover-running" in data["next_commands"][0]["command"]
+
+    strict_job = run(
+        [
+            PYTHON,
+            "scripts/run_account_job.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/resumepage",
+            "--account-name",
+            "Resume Page",
+            "--target-date",
+            "260602",
+            "--resume-only",
+            "--status-only",
+            "--sync",
+            "--dry-run",
+            "--fail-on-incomplete",
+        ]
+    )
+    assert strict_job.returncode == 2, strict_job.stdout
+    strict_data = json.loads(strict_job.stdout)
+    assert strict_data["run_status"] == "incomplete_pending_tasks"
+    assert strict_data["complete"] is False
+    assert strict_data["exit_status_reason"] == "incomplete_run_status"
 
 
 def assert_run_account_job_recovers_scoped_running_tasks(tmp_path: Path) -> None:

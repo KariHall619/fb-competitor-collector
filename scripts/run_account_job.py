@@ -627,6 +627,11 @@ def main() -> int:
     parser.add_argument("--max-snapshots", type=int, default=20)
     parser.add_argument("--expected-post-count", type=int, default=0)
     parser.add_argument("--expected-labels", default="", help="Comma-separated visible relative-time labels from the operator checklist.")
+    parser.add_argument(
+        "--fail-on-incomplete",
+        action="store_true",
+        help="Return a nonzero exit code when run_status is not complete, even if ledger sync itself succeeded.",
+    )
     args = parser.parse_args()
 
     started = time.monotonic()
@@ -853,7 +858,11 @@ def main() -> int:
         completion=completion,
         discover_coverage=result["discover_coverage"],
     )
+    if args.fail_on_incomplete and run_status != "complete" and sync_result.get("ok", True):
+        result["exit_status_reason"] = "incomplete_run_status"
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if args.fail_on_incomplete and run_status != "complete":
+        return 2
     return 0 if sync_result.get("ok", True) else 1
 
 

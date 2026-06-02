@@ -52,6 +52,7 @@ Map common requests as follows:
   - If the user says they can see a known checklist such as “13 条” or `38m,1h,2h...`, pass `--expected-post-count` and/or `--expected-labels` into `run_account_job.py`; do not call the run complete when the expected coverage is missing.
   - If extraction reports `capture_blocked`, `login_required`, or `visitor_preview`, stop immediately and ask for human intervention.
   - If the run is interrupted by token refresh, OpenCLI recovery, or Codex context changes, use the emitted `next_commands` first, or run the same `run_account_job.py` command again with `--resume-only --force-recover-running` when appropriate. Do not manually write ledger rows and call the job finished while enrichment is still pending.
+  - For automation or Codex-driven chaining, add `--fail-on-incomplete` so a non-`complete` `run_status` returns a nonzero exit code instead of being mistaken for a finished job.
 
 - “把这份抓取结果导入内容库”
   - Use `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --no-sync`.
@@ -87,6 +88,7 @@ Run all commands from the skill root.
 | Capture with visible checklist | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --sync --expected-post-count 13 --expected-labels "38m,1h,2h"` |
 | Resume interrupted account job | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --resume-only --force-recover-running --sync` |
 | Status-only account check | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --resume-only --status-only --sync --dry-run` |
+| Automation hard completion gate | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --resume-only --status-only --sync --dry-run --fail-on-incomplete` |
 | Fast partial capture/import | `python3 scripts/run_capture_pipeline.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --partial` as a lower-level helper only |
 | Resume enrichment queue | `python3 scripts/enrichment_worker.py --config config/settings.yaml --stages detail_time,lead_link,engagement,post_type,article_material --account-url <url> --date YYMMDD --limit 50` |
 | Audit missing fields and queue refetch | `python3 scripts/audit_fields.py --config config/settings.yaml --fix` |
@@ -159,6 +161,7 @@ Rules:
 - For scale-out runs, first import visible candidates as `partial_review`, then resume queued enrichment stages in SQLite. Normal formal `--sync` upserts auditable candidates by post URL and fills missing-field reasons in `是否采用`; use `--strict-ready-only` only when the operator explicitly wants the legacy ready-only gate.
 - For business capture-and-write requests, prefer `run_account_job.py` over manual stage stitching. The job result must be interpreted by `run_status`: `complete` means the scoped job finished; `synced_ledger_incomplete`, `incomplete_pending_tasks`, `coverage_incomplete`, or `needs_codex_summary` means Feishu may have ledger rows but the capture job is not done.
 - `run_account_job.py` includes `next_commands`; when a run is incomplete or blocked, use those commands as the first recovery path instead of manually stitching later stages.
+- `run_account_job.py --fail-on-incomplete` preserves the same JSON payload but exits nonzero for any non-`complete` `run_status`; use it when a shell/automation caller might otherwise treat ledger sync success as end-to-end completion.
 - If a real-write Feishu auth check, OpenCLI readiness check, or homepage login/profile blocker stops the job before homepage discovery/import, the recovery command must rerun the full account job from the homepage top, not `--resume-only`; otherwise no new posts will be discovered after the operator fixes the blocker.
 - `run_account_job.py --resume-only` recovers scoped stale `running` enrichment tasks before worker passes. The default stale window is conservative at 30 minutes to avoid duplicate detail navigation; use the generated `--force-recover-running` resume command after a known Codex/terminal interruption when scoped candidates or running tasks already exist.
 - Use `--sync-partial --dry-run` only for business preview output that must not affect the formal table.

@@ -109,7 +109,7 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 - `scripts/fb_dom_extractors.js`: page DOM candidate extraction.
 - `scripts/fb_time_extractors.js`: exact Facebook time parsing and timestamp-target helpers.
 - `scripts/prepare_capture_result.py`: normalize raw homepage capture and keep incomplete candidates as `needs_enrichment`.
-- `scripts/run_account_job.py`: preferred resumable business entrypoint for account capture, scoped enrichment, and formal ledger sync. It supports `--resume-only`, `--force-recover-running`, `--status-only`, `--last-hours 24`, `--sync`, `--dry-run`, `--expected-post-count`, `--expected-labels`, and `--resume-stale-running-seconds`; it emits `run_status` such as `complete`, `coverage_incomplete`, `incomplete_pending_tasks`, `needs_codex_summary`, `human_intervention_required`, `blocked_opencli`, or `blocked_auth`, plus `next_commands` for the first recovery action.
+- `scripts/run_account_job.py`: preferred resumable business entrypoint for account capture, scoped enrichment, and formal ledger sync. It supports `--resume-only`, `--force-recover-running`, `--status-only`, `--last-hours 24`, `--sync`, `--dry-run`, `--expected-post-count`, `--expected-labels`, `--resume-stale-running-seconds`, and `--fail-on-incomplete`; it emits `run_status` such as `complete`, `coverage_incomplete`, `incomplete_pending_tasks`, `needs_codex_summary`, `human_intervention_required`, `blocked_opencli`, or `blocked_auth`, plus `next_commands` for the first recovery action. Use `--fail-on-incomplete` for automation or Codex chaining that must treat non-`complete` job states as a hard failure even when ledger sync itself succeeded.
 - `scripts/opencli_enrich_post_details.mjs`: open detail pages, confirm exact time, expand comments/replies, resolve lead links, apply target-date filtering.
 - `scripts/run_capture_pipeline.py`: lower-level fast partial capture/import helper. It discovers visible candidates, prepares/imports them as partial records, and queues enrichment, but does not own full job completion. It supports `--max-snapshots`, `--min-snapshots`, `--expected-post-count`, and `--expected-labels`, and failure branches must emit `run_status`, `complete=false`, and `next_actions`. Do not use it as the final business “抓取并写入飞书” path.
 - `scripts/enrichment_worker.py`: resumes queued `detail_time`, `lead_link`, `engagement`, `post_type`, and `article_material` tasks with local concurrency limits. Its `summary` stage no longer generates story summaries; it only verifies that a Codex-written Chinese summary has been applied, otherwise it leaves `requires_codex_chinese_summary`.
@@ -154,6 +154,12 @@ Resume after Codex interruption, token refresh, or partial run:
 
 ```bash
 python3 scripts/run_account_job.py --config config/settings.yaml --account-url <facebook-account-url> --account-name "<account-name>" --target-date YYMMDD --resume-only --force-recover-running --sync
+```
+
+Automation hard gate, fail the shell command unless the scoped job is fully complete:
+
+```bash
+python3 scripts/run_account_job.py --config config/settings.yaml --account-url <facebook-account-url> --account-name "<account-name>" --target-date YYMMDD --resume-only --status-only --sync --dry-run --fail-on-incomplete
 ```
 
 Status-only check without opening Facebook detail pages:
