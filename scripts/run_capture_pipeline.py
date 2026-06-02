@@ -12,10 +12,11 @@ from pathlib import Path
 
 from check_env import check_opencli
 from config_loader import load_config
+from coverage_expectations import apply_expected_coverage, split_expected_labels
 from lark_io import ensure_user_identity
 from models import normalize_date
 from store import connect, query_posts
-from sync_status import completion_run_status, enrichment_completion_summary
+from sync_status import blocked_auth_result, completion_run_status, enrichment_completion_summary
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +40,12 @@ def capture_pipeline_next_actions(run_status: str, completion: dict) -> list[str
         return ["覆盖未完成：从账号主页顶部使用 run_account_job.py 重跑，必要时提高 --max-snapshots。"]
     if run_status == "no_candidates":
         return ["当前没有可入库候选；确认目标账号主页顶部帖子已加载后再运行 run_account_job.py。"]
+    if run_status == "blocked_opencli":
+        return ["先运行 python3 scripts/check_env.py --config config/settings.yaml --fix-opencli；Browser Bridge 恢复后从账号主页顶部重跑 run_account_job.py。"]
+    if run_status == "blocked_auth":
+        return ["完成飞书用户授权或等待自动刷新恢复后，重新运行同一命令；本次未开始 Facebook 采集。"]
+    if run_status == "discover_failed":
+        return ["Facebook 主页发现阶段失败；确认目标账号主页已在正常 Chrome 打开并已登录，再用 run_account_job.py 从主页顶部重跑。"]
     return list(completion.get("next_actions") or [])
 
 
@@ -64,9 +71,29 @@ def main() -> int:
     parser.add_argument("--sync-partial", action="store_true", help="Dry-run/write partial preview through import script.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--max-text", default="1500")
+    parser.add_argument("--expected-post-count", type=int, default=0)
+    parser.add_argument("--expected-labels", default="", help="Comma-separated visible relative-time labels from the operator checklist.")
     args = parser.parse_args()
 
     config = load_config(args.config)
+    if args.sync_partial and not args.dry_run:
+        try:
+            ensure_user_identity(config)
+        except RuntimeError as exc:
+            print(
+                json.dumps(
+                    {
+                        **blocked_auth_result(
+                            "飞书真实写入前置检查失败；已在 Facebook 采集前停止。",
+                            str(exc),
+                        ),
+                        "next_actions": capture_pipeline_next_actions("blocked_auth", {}),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
     opencli_preflight = check_opencli(
         config.get("opencli_command") or [config.get("opencli_path", "opencli")],
         daemon_port=int(config.get("opencli_daemon_port", 19825) or 19825),
@@ -78,31 +105,17 @@ def main() -> int:
                 {
                     "ok": False,
                     "stage": "opencli_preflight",
+                    "run_status": "blocked_opencli",
+                    "complete": False,
                     "message": "OpenCLI Browser Bridge 未就绪；已在 Facebook 采集前停止。",
                     "opencli_browser_bridge": opencli_preflight,
+                    "next_actions": capture_pipeline_next_actions("blocked_opencli", {}),
                 },
                 ensure_ascii=False,
                 indent=2,
             )
         )
         return 1
-    if args.sync_partial and not args.dry_run:
-        try:
-            ensure_user_identity(config)
-        except RuntimeError as exc:
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "stage": "feishu_auth_preflight",
-                        "message": "飞书真实写入前置检查失败；已在 Facebook 采集前停止。",
-                        "error": str(exc),
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-            return 1
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="fb-capture-pipeline-") as temp_dir:
         temp = Path(temp_dir)
@@ -129,15 +142,23 @@ def main() -> int:
                     {
                         "ok": False,
                         "stage": "discover",
+                        "run_status": "discover_failed",
+                        "complete": False,
                         "elapsed_ms": int((time.monotonic() - started) * 1000),
                         "discover_elapsed_ms": int((time.monotonic() - discover_started) * 1000),
                         "result": discover_payload,
+                        "next_actions": capture_pipeline_next_actions("discover_failed", {}),
                     },
                     ensure_ascii=False,
                     indent=2,
                 )
             )
             return discover.returncode or 1
+        discover_payload = apply_expected_coverage(
+            discover_payload,
+            expected_post_count=int(args.expected_post_count or 0),
+            expected_labels=split_expected_labels(args.expected_labels),
+        )
         raw_path.write_text(json.dumps(discover_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
         prepare_started = time.monotonic()
@@ -230,6 +251,7 @@ def main() -> int:
             "post_count": discover_payload.get("post_count", 0),
             "capture_complete": discover_payload.get("capture_complete", True),
             "coverage": discover_payload.get("coverage", {}),
+            "expected_coverage": (discover_payload.get("coverage") or {}).get("expected", {}),
             "prepared": prepared_payload.get("prepared", 0),
             "coverage_note": prepared_payload.get("coverage_note", ""),
             "ready_for_output": prepared_payload.get("ready_for_output", 0),

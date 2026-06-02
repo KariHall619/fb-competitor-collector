@@ -19,8 +19,8 @@ PYTHON = sys.executable
 VALID_CN_SUMMARY = "这篇故事围绕家庭矛盾和财产冲突展开，主角发现亲人试图夺走资产后及时反击，形成适合短剧改编的反转剧情。"
 
 
-def run(command: list[str], cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=cwd, text=True, capture_output=True, check=False)
+def run(command: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, cwd=cwd, env=env, text=True, capture_output=True, check=False)
 
 
 class QuietHTTPRequestHandler(SimpleHTTPRequestHandler):
@@ -4112,6 +4112,184 @@ def assert_run_capture_pipeline_uses_completion_status_helpers() -> None:
         {"ok": True, "capture_complete": True, "coverage": {}},
         {"post_count": 1, "has_incomplete_enrichment": False},
     ) == "complete"
+    assert "--fix-opencli" in run_capture_pipeline.capture_pipeline_next_actions("blocked_opencli", {})[0]
+    assert "飞书用户授权" in run_capture_pipeline.capture_pipeline_next_actions("blocked_auth", {})[0]
+
+
+def assert_run_capture_pipeline_blocks_auth_before_opencli(tmp_path: Path) -> None:
+    config = tmp_path / "settings_capture_auth.yaml"
+    fake_lark = tmp_path / "fake-lark-cli"
+    fake_opencli = tmp_path / "fake-opencli"
+    opencli_called = tmp_path / "opencli-called"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'capture-auth.sqlite'}")
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/bin/sh
+if [ "$1" = "config" ]; then
+  echo "$2: user"
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo '{"identity":"bot","tokenStatus":"valid"}'
+  exit 0
+fi
+echo '{}'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_opencli.write_text(
+        f"""#!/bin/sh
+touch {opencli_called}
+echo '1.8.1'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    fake_opencli.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_capture_pipeline.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/authblocked",
+            "--target-date",
+            "260603",
+            "--sync-partial",
+        ]
+    )
+    assert result.returncode == 1, result.stdout
+    data = json.loads(result.stdout)
+    assert data["stage"] == "feishu_auth_preflight"
+    assert data["run_status"] == "blocked_auth"
+    assert data["complete"] is False
+    assert any("飞书用户授权" in action for action in data["next_actions"])
+    assert not opencli_called.exists()
+
+
+def assert_run_capture_pipeline_reports_opencli_blocker(tmp_path: Path) -> None:
+    config = tmp_path / "settings_capture_opencli.yaml"
+    fake_opencli = tmp_path / "fake-opencli"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'capture-opencli.sqlite'}")
+    config.write_text(text, encoding="utf-8")
+    fake_opencli.write_text(
+        """#!/bin/sh
+echo 'opencli unavailable' >&2
+exit 1
+""",
+        encoding="utf-8",
+    )
+    fake_opencli.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_capture_pipeline.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/opencliblocked",
+            "--target-date",
+            "260603",
+        ]
+    )
+    assert result.returncode == 1, result.stdout
+    data = json.loads(result.stdout)
+    assert data["stage"] == "opencli_preflight"
+    assert data["run_status"] == "blocked_opencli"
+    assert data["complete"] is False
+    assert any("--fix-opencli" in action for action in data["next_actions"])
+
+
+def assert_run_capture_pipeline_applies_expected_coverage(tmp_path: Path) -> None:
+    config = tmp_path / "settings_capture_expected.yaml"
+    fake_bin = tmp_path / "bin"
+    fake_opencli = tmp_path / "fake-opencli"
+    db_path = tmp_path / "capture-expected.sqlite"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
+    config.write_text(text, encoding="utf-8")
+    fake_opencli.write_text(
+        """#!/bin/sh
+echo '1.8.1'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_opencli.chmod(0o755)
+    fake_bin.mkdir()
+    (fake_bin / "node").write_text(
+        """#!/usr/bin/env python3
+import json
+payload = {
+  "ok": True,
+  "post_count": 9,
+  "raw_candidate_count": 9,
+  "capture_complete": True,
+  "coverage": {"capture_complete": True},
+  "snapshots": [
+    {"visible_time_texts": ["38m", "1h", "2h", "3h"]},
+    {"visible_time_texts": ["4h", "5h", "6h", "7h", "8h"]}
+  ],
+  "posts": [
+    {
+      "post_url": f"https://www.facebook.com/expectedpage/posts/item-{index}",
+      "post_time_text": f"{index + 1}h",
+      "crawled_at": "2026-06-03T12:00:00",
+      "raw_text": f"candidate {index}"
+    }
+    for index in range(9)
+  ]
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    (fake_bin / "node").chmod(0o755)
+    env = {"PATH": f"{fake_bin}:{ROOT}:{tmp_path}"}
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_capture_pipeline.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/expectedpage",
+            "--account-name",
+            "Expected Page",
+            "--target-date",
+            "260603",
+            "--expected-post-count",
+            "13",
+            "--expected-labels",
+            "38m,1h,2h,10h",
+        ],
+        env=env,
+    )
+    assert result.returncode == 0, result.stdout
+    data = json.loads(result.stdout)
+    assert data["run_status"] == "coverage_incomplete"
+    assert data["complete"] is False
+    assert data["prepared"] == 9
+    assert data["enrichment_completion"]["post_count"] == 9
+    assert data["expected_coverage"]["missing_post_count"] == 4
+    assert data["expected_coverage"]["missing_labels"] == ["10h"]
+    assert data["coverage"]["expected_coverage_failed"] is True
+    assert any("覆盖未完成" in action for action in data["next_actions"])
 
 
 def assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path: Path) -> None:
@@ -4193,9 +4371,9 @@ def assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path: Path
     assert data["feishu_sync"]["output_candidates"] == 2
 
 
-def assert_run_account_job_expected_coverage_marks_missing_posts() -> None:
+def assert_expected_coverage_marks_missing_posts() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
-    import run_account_job
+    import coverage_expectations
 
     payload = {
         "ok": True,
@@ -4207,10 +4385,10 @@ def assert_run_account_job_expected_coverage_marks_missing_posts() -> None:
         ],
         "posts": [{"post_time_text": "9h"}],
     }
-    checked = run_account_job.apply_expected_coverage(
+    checked = coverage_expectations.apply_expected_coverage(
         payload,
         expected_post_count=13,
-        expected_labels=["38m", "1h", "2h", "10h", "11h"],
+        expected_labels=coverage_expectations.split_expected_labels("38m,1h,2h,10h,11h"),
     )
     expected = checked["coverage"]["expected"]
     assert checked["coverage_incomplete"] is True
@@ -4228,8 +4406,28 @@ def assert_run_account_job_expected_coverage_marks_missing_posts() -> None:
     assert "期望至少 13 条" in expected["message"]
     assert "10h" in checked["coverage"]["message"]
 
-    clean = run_account_job.apply_expected_coverage(payload, expected_post_count=0, expected_labels=[])
+    clean = coverage_expectations.apply_expected_coverage(payload, expected_post_count=0, expected_labels=[])
     assert clean == payload
+
+
+def assert_run_account_job_expected_coverage_marks_missing_posts() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    payload = {
+        "ok": True,
+        "post_count": 9,
+        "coverage": {"capture_complete": True},
+        "snapshots": [{"visible_time_texts": ["38m", "1h", "2h"]}],
+    }
+    checked = run_account_job.apply_expected_coverage(
+        payload,
+        expected_post_count=13,
+        expected_labels=["38m", "1h", "10h"],
+    )
+    assert checked["coverage_incomplete"] is True
+    assert checked["coverage"]["expected"]["missing_post_count"] == 4
+    assert checked["coverage"]["expected"]["missing_labels"] == ["10h"]
 
 
 def assert_run_account_job_blocks_auth_before_capture(tmp_path: Path) -> None:
@@ -4986,7 +5184,11 @@ def main() -> int:
         assert_run_account_job_summary_only_next_command_exports_requests()
         assert_run_account_job_prioritizes_auto_work_before_summary_export()
         assert_run_capture_pipeline_uses_completion_status_helpers()
+        assert_run_capture_pipeline_blocks_auth_before_opencli(tmp_path)
+        assert_run_capture_pipeline_reports_opencli_blocker(tmp_path)
+        assert_run_capture_pipeline_applies_expected_coverage(tmp_path)
         assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path)
+        assert_expected_coverage_marks_missing_posts()
         assert_run_account_job_expected_coverage_marks_missing_posts()
         assert_run_account_job_blocks_auth_before_capture(tmp_path)
         assert_run_account_job_blocked_auth_resume_only_keeps_resume_command()
