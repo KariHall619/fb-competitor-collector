@@ -338,8 +338,7 @@ def upsert_posts(conn: sqlite3.Connection, posts: list[dict[str, Any]]) -> dict[
                 inserted.append(stored)
             else:
                 updated += 1
-            if stored.get("output_status") != "output_synced":
-                synced_candidates.append(stored)
+            synced_candidates.append(stored)
         except Exception as exc:
             errors += 1
             log_error(conn, post, "upsert", str(exc))

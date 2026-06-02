@@ -1371,6 +1371,11 @@ def assert_sync_feishu_audit_and_strict_modes() -> None:
     }
     assert audit["audit_missing_field_summary"][0]["label"] == "文章概要"
     assert "文章概要：1 条" in audit["audit_missing_field_notes"]
+    synced = [{**incomplete[0], "output_status": "output_synced"}]
+    audit_synced = sync_feishu.sync_posts(config, synced, "all_posts", "append", True, audit=True)
+    assert audit_synced["ok"] is True
+    assert audit_synced["output_candidates"] == 1
+    assert audit_synced["keys"] == ["https://facebook.com/example/posts/incomplete"]
 
     strict = sync_feishu.sync_posts(config, incomplete, "all_posts", "append", True, audit=False)
     assert strict["ok"] is False
@@ -2054,6 +2059,56 @@ def assert_sqlite_upsert_preserves_enriched_fields(tmp_path: Path) -> None:
     assert stored["shares"] == 3
     assert stored["post_type"] == "图文"
     assert stored["adoption_status"] == "采用"
+
+
+def assert_sqlite_upsert_resyncs_previously_synced_rows(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, mark_output_synced, row_for_post, upsert_post, upsert_posts
+
+    conn = connect(tmp_path / "resync-output-synced.sqlite")
+    ready = normalize_post(
+        {
+            "account_name": "Story Hub",
+            "account_url": "https://www.facebook.com/storyhub",
+            "post_url": "https://www.facebook.com/storyhub/posts/resync",
+            "posted_at": "2026年5月28日 10:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/resync",
+            "landing_url": "https://story.example/resync",
+            "lead_url_raw": "https://story.example/resync",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "story_summary": VALID_CN_SUMMARY,
+            "summary_source": "article",
+            "likes": 80,
+            "comments": 12,
+            "shares": 3,
+            "post_type": "图文",
+        }
+    )
+    upsert_post(conn, ready)
+    stored_ready = row_for_post(conn, ready)
+    assert stored_ready is not None
+    mark_output_synced(conn, [stored_ready])
+    synced = row_for_post(conn, ready)
+    assert synced is not None
+    assert synced["output_status"] == "output_synced"
+
+    refreshed = normalize_post(
+        {
+            **ready,
+            "likes": 120,
+            "comments": 18,
+            "shares": 5,
+        }
+    )
+    result = upsert_posts(conn, [refreshed])
+    assert result["updated"] == 1
+    assert len(result["sync_candidates"]) == 1
+    assert result["sync_candidates"][0]["post_url"] == "https://facebook.com/storyhub/posts/resync"
+    assert result["sync_candidates"][0]["likes"] == 120
 
 
 def assert_sqlite_upsert_does_not_protect_internal_lead_links(tmp_path: Path) -> None:
@@ -5545,6 +5600,7 @@ def main() -> int:
         hot_after_many_data = json.loads(hot_after_many.stdout)
         assert hot_after_many_data["count"] == 1, hot_after_many.stdout
         assert_sqlite_upsert_preserves_enriched_fields(tmp_path)
+        assert_sqlite_upsert_resyncs_previously_synced_rows(tmp_path)
         assert_sqlite_upsert_does_not_protect_internal_lead_links(tmp_path)
         assert_field_audit_marks_refetchable_missing_fields(tmp_path)
         assert_cli_feishu_auth_blockers_report_run_status(tmp_path)
