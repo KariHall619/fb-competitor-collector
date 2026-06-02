@@ -292,6 +292,7 @@ def annotate_sync_result(
     next_result["complete"] = bool(sync_result.get("ok")) and not incomplete
     if not sync_result.get("ok"):
         next_result.setdefault("run_status", sync_result.get("stage") or "sync_failed")
+        next_result.setdefault("next_actions", completion.get("next_actions") or _failed_sync_next_actions(next_result))
         return next_result
     if incomplete:
         next_result["run_status"] = completion_run_status(completion, ledger_mode=ledger_mode)
@@ -299,6 +300,39 @@ def annotate_sync_result(
             "已写入可审计台账行，但本次采集作业未完成；仍有补抓任务或缺失字段，"
             "需要继续运行可恢复作业入口。"
         )
+        next_result["next_actions"] = completion.get("next_actions", [])
     else:
         next_result["run_status"] = "complete"
+        next_result.setdefault("next_actions", completion.get("next_actions", []))
     return next_result
+
+
+def annotate_sync_failure(sync_result: dict[str, Any]) -> dict[str, Any]:
+    """Attach run_status/next_actions to sync failures without a DB completion scope."""
+
+    next_result = dict(sync_result)
+    if next_result.get("ok"):
+        next_result.setdefault("complete", True)
+        next_result.setdefault("run_status", "complete")
+        next_result.setdefault("next_actions", [])
+        return next_result
+    next_result["complete"] = False
+    stage = str(next_result.get("stage") or "")
+    next_result["run_status"] = stage if stage in {"quality_gate", "audit_output_gate", "partial_gate"} else "sync_failed"
+    next_result.setdefault("next_actions", _failed_sync_next_actions(next_result))
+    return next_result
+
+
+def _failed_sync_next_actions(sync_result: dict[str, Any]) -> list[str]:
+    stage = str(sync_result.get("stage") or sync_result.get("run_status") or "")
+    if stage == "quality_gate":
+        return ["严格完整行同步未执行：继续补齐精确时间、评论/回复引流链接、外部落地页和文章来源中文概要后重试。"]
+    if stage == "audit_output_gate":
+        return ["当前没有可写入正式台账的候选；先确认已从主页顶部采集并导入了有效 Facebook 帖子链接和账号信息。"]
+    if stage == "partial_gate":
+        return ["当前没有 partial_review 预览候选；先确认候选已导入本地库，或改用普通 --sync 台账模式。"]
+    if stage in {"auth_status", "feishu_auth_preflight"}:
+        return ["完成飞书用户授权或等待自动刷新恢复后，重新运行同一同步命令。"]
+    if stage == "upsert_headers":
+        return ["检查飞书输出表头配置；upsert 写入必须提供帖子链接等输出表头。"]
+    return ["飞书同步失败：保留本地 SQLite 结果，修复同步错误后重新运行同一命令。"]

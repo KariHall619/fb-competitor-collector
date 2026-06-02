@@ -174,6 +174,7 @@ Rules:
 - `enrichment_worker.py --stages summary` does not generate summaries. It only verifies whether a valid Codex-written Chinese summary has already been applied; otherwise it leaves `requires_codex_chinese_summary`. Generate Chinese summaries from `export_summary_requests.py` output and apply them with `apply_article_summaries.py --config ... --summaries ...`.
 - When an account job reports `needs_codex_summary`, use its scoped `next_commands` export first. Do not run an unscoped all-database summary export for an account-specific job.
 - If article-material or summary-application input is malformed, treat `run_status=article_material_failed` or `summary_apply_failed` as recoverable operational state; fix the file/config and rerun, not as completed capture.
+- If Feishu sync returns `ok=false`, report its `run_status` and `next_actions`; local SQLite results remain authoritative for retry.
 
 ## Feishu Workflow
 

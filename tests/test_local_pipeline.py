@@ -1562,6 +1562,70 @@ def assert_sync_feishu_audit_and_strict_modes() -> None:
     assert strict["stage"] == "quality_gate"
     assert strict["ready_for_output"] == 0
     assert strict["needs_enrichment_skipped"] == 1
+    assert strict["next_actions"]
+
+
+def assert_sync_failures_include_recovery_actions() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import sync_feishu
+    import sync_status
+
+    quality = sync_status.annotate_sync_result(
+        {"ok": False, "stage": "quality_gate", "ready_for_output": 0},
+        {"post_count": 1, "next_actions": []},
+        ledger_mode=False,
+    )
+    assert quality["complete"] is False
+    assert quality["run_status"] == "quality_gate"
+    assert quality["next_actions"]
+    assert "精确时间" in quality["next_actions"][0]
+
+    empty_audit = sync_status.annotate_sync_result(
+        {"ok": False, "stage": "audit_output_gate", "output_candidates": 0},
+        {"post_count": 0, "next_actions": []},
+        ledger_mode=True,
+    )
+    assert empty_audit["complete"] is False
+    assert empty_audit["run_status"] == "audit_output_gate"
+    assert "主页顶部" in empty_audit["next_actions"][0]
+
+    original_write_rows = sync_feishu.write_rows
+    try:
+        sync_feishu.write_rows = lambda *_args, **_kwargs: {
+            "ok": False,
+            "stage": "feishu_write",
+            "stderr": "simulated write failure",
+            "rows": 1,
+        }
+        config = {
+            "feishu": {
+                "sheets": {"all_posts": "FB竞品帖子链接"},
+                "field_schema": {"output_headers": ["帖子链接", "是否采用"]},
+            }
+        }
+        result = sync_feishu.sync_posts(
+            config,
+            [
+                {
+                    "account_name": "Example Page",
+                    "post_url": "https://facebook.com/example/posts/write-fail",
+                    "output_status": "needs_enrichment",
+                }
+            ],
+            "all_posts",
+            "append",
+            False,
+            audit=True,
+            conn=None,
+        )
+    finally:
+        sync_feishu.write_rows = original_write_rows
+    assert result["ok"] is False
+    assert result["stage"] == "feishu_write"
+    assert result["run_status"] == "sync_failed"
+    assert result["complete"] is False
+    assert result["next_actions"]
+    assert "SQLite" in result["next_actions"][0]
 
 
 def assert_sync_status_marks_incomplete_ledger(tmp_path: Path) -> None:
@@ -5990,6 +6054,7 @@ def main() -> int:
     assert_opencli_detail_enrichment_reuses_tab_with_fallback()
     assert_opencli_detail_enrichment_blocks_for_human_login()
     assert_feishu_writes_require_user_identity()
+    assert_sync_failures_include_recovery_actions()
     assert_check_env_prefers_opencli_route()
     assert_config_resolves_platform_defaults()
     assert_check_env_reports_opencli_route_status()

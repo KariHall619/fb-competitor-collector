@@ -13,7 +13,7 @@ from field_audit import audit_reason_counts, audit_reason_notes, audit_reason_su
 from lark_io import ensure_user_identity, write_rows
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review, ready_for_output
 from store import all_posts, connect, mark_output_synced
-from sync_status import annotate_sync_result, blocked_auth_result, enrichment_completion_summary
+from sync_status import annotate_sync_failure, annotate_sync_result, blocked_auth_result, enrichment_completion_summary
 
 
 def sync_posts(
@@ -45,7 +45,7 @@ def sync_posts(
                     enrichment_completion_summary(conn, completion_scope),
                     ledger_mode=True,
                 )
-            return result
+            return annotate_sync_failure(result)
         output_headers = configured_output_headers(config)
         rows = [output_row_for_headers(post, output_headers) for post in partial_posts]
         headers = output_headers if mode == "overwrite" else None
@@ -59,7 +59,7 @@ def sync_posts(
                 enrichment_completion_summary(conn, completion_scope),
                 ledger_mode=True,
             )
-        return result
+        return annotate_sync_failure(result)
 
     if audit:
         output_headers = configured_output_headers(config)
@@ -78,7 +78,7 @@ def sync_posts(
                     enrichment_completion_summary(conn, completion_scope),
                     ledger_mode=True,
                 )
-            return result
+            return annotate_sync_failure(result)
         rows = [output_row_for_headers(post, output_headers) for post in output_posts]
         result = write_rows(config, sheet_key, rows, headers=output_headers, mode="upsert", dry_run=dry_run)
         result["output_candidates"] = len(output_posts)
@@ -93,7 +93,7 @@ def sync_posts(
                 enrichment_completion_summary(conn, completion_scope),
                 ledger_mode=True,
             )
-        return result
+        return annotate_sync_failure(result)
 
     ready_posts, skipped_posts = ready_for_output(posts)
     errors = output_quality_errors(ready_posts)
@@ -105,7 +105,7 @@ def sync_posts(
                 enrichment_completion_summary(conn, completion_scope),
                 ledger_mode=False,
             )
-        return result
+        return annotate_sync_failure(result)
     if not ready_posts:
         result = {
             "ok": False,
@@ -120,7 +120,7 @@ def sync_posts(
                 enrichment_completion_summary(conn, completion_scope),
                 ledger_mode=False,
             )
-        return result
+        return annotate_sync_failure(result)
     output_headers = configured_output_headers(config)
     rows = [output_row_for_headers(post, output_headers) for post in ready_posts]
     headers = output_headers if mode == "overwrite" else None
@@ -135,7 +135,7 @@ def sync_posts(
             enrichment_completion_summary(conn, completion_scope),
             ledger_mode=False,
         )
-    return result
+    return annotate_sync_failure(result)
 
 
 def main() -> int:
