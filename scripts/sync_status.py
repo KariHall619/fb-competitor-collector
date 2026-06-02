@@ -17,6 +17,22 @@ NON_LEDGER_STATUSES = {"blocked"}
 AUTO_ENRICHMENT_STAGES = {"detail_time", "lead_link", "engagement", "post_type", "article_material"}
 
 
+def blocked_auth_result(message: str, error: str) -> dict[str, Any]:
+    """Return a consistent pre-write auth blocker payload for CLI callers."""
+
+    return {
+        "ok": False,
+        "stage": "feishu_auth_preflight",
+        "run_status": "blocked_auth",
+        "complete": False,
+        "message": message,
+        "error": error,
+        "next_actions": [
+            "完成飞书用户授权或等待自动刷新恢复后，重新运行同一命令；本次未执行 Facebook 采集、导入或飞书写入。"
+        ],
+    }
+
+
 def _post_key(post: dict[str, Any]) -> str:
     return str(post.get("canonical_post_url") or post.get("post_url") or "").strip()
 

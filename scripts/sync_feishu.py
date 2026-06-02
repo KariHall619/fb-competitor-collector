@@ -12,7 +12,7 @@ from field_schema import configured_output_headers, output_row_for_headers
 from lark_io import ensure_user_identity, write_rows
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review, ready_for_output
 from store import all_posts, connect, mark_output_synced
-from sync_status import annotate_sync_result, enrichment_completion_summary
+from sync_status import annotate_sync_result, blocked_auth_result, enrichment_completion_summary
 
 
 def sync_posts(
@@ -153,10 +153,10 @@ def main() -> int:
             print(
                 json.dumps(
                     {
-                        "ok": False,
-                        "stage": "feishu_auth_preflight",
-                        "message": "飞书真实写入前置检查失败；已在读取本地库/同步前停止。",
-                        "error": str(exc),
+                        **blocked_auth_result(
+                            "飞书真实写入前置检查失败；已在读取本地库/同步前停止。",
+                            str(exc),
+                        ),
                     },
                     ensure_ascii=False,
                     indent=2,

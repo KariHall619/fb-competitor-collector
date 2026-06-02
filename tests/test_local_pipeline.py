@@ -745,6 +745,84 @@ def assert_feishu_writes_require_user_identity() -> None:
         lark_io.run_lark = original
 
 
+def assert_cli_feishu_auth_blockers_report_run_status(tmp_path: Path) -> None:
+    fake_lark = tmp_path / "fake-lark-cli"
+    config = tmp_path / "settings_auth_blockers.yaml"
+    sample = tmp_path / "auth_blocker_posts.json"
+    db_path = tmp_path / "auth-blockers.sqlite"
+    fake_lark.write_text(
+        """#!/bin/sh
+if [ "$1" = "config" ]; then
+  echo "$2: user"
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo '{"identity":"bot","tokenStatus":"valid"}'
+  exit 0
+fi
+echo '{}'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
+    config.write_text(text, encoding="utf-8")
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Auth Blocked",
+                        "account_url": "https://www.facebook.com/authblocked",
+                        "post_url": "https://www.facebook.com/authblocked/posts/one",
+                        "relative_time_text": "1h",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    import_cmd = run(
+        [
+            PYTHON,
+            "scripts/import_existing_result.py",
+            "--config",
+            str(config),
+            "--input",
+            str(sample),
+            "--sync",
+        ]
+    )
+    assert import_cmd.returncode == 1, import_cmd.stdout
+    import_data = json.loads(import_cmd.stdout)
+    assert import_data["run_status"] == "blocked_auth"
+    assert import_data["complete"] is False
+    assert import_data["stage"] == "feishu_auth_preflight"
+    assert "next_actions" in import_data
+
+    filter_cmd = run([PYTHON, "scripts/filter_posts.py", "--config", str(config), "--sync"])
+    assert filter_cmd.returncode == 1, filter_cmd.stdout
+    filter_data = json.loads(filter_cmd.stdout)
+    assert filter_data["feishu_sync"]["run_status"] == "blocked_auth"
+    assert filter_data["feishu_sync"]["complete"] is False
+    assert filter_data["feishu_sync"]["stage"] == "feishu_auth_preflight"
+    assert "next_actions" in filter_data["feishu_sync"]
+
+    sync_cmd = run([PYTHON, "scripts/sync_feishu.py", "--config", str(config)])
+    assert sync_cmd.returncode == 1, sync_cmd.stdout
+    sync_data = json.loads(sync_cmd.stdout)
+    assert sync_data["run_status"] == "blocked_auth"
+    assert sync_data["complete"] is False
+    assert sync_data["stage"] == "feishu_auth_preflight"
+    assert "next_actions" in sync_data
+
+
 def assert_check_env_prefers_opencli_route() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from check_env import recommended_capture_route
@@ -4862,6 +4940,7 @@ def main() -> int:
         assert_sqlite_upsert_preserves_enriched_fields(tmp_path)
         assert_sqlite_upsert_does_not_protect_internal_lead_links(tmp_path)
         assert_field_audit_marks_refetchable_missing_fields(tmp_path)
+        assert_cli_feishu_auth_blockers_report_run_status(tmp_path)
         assert_sync_status_marks_incomplete_ledger(tmp_path)
         assert_sync_status_promotes_summary_only_work(tmp_path)
         assert_sync_status_prioritizes_auto_work_over_summary(tmp_path)

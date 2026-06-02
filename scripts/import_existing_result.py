@@ -15,7 +15,7 @@ from field_schema import configured_output_headers, output_row_for_headers
 from models import normalize_post
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review
 from store import connect, enqueue_enrichment_tasks_for_posts, mark_output_synced, upsert_posts
-from sync_status import annotate_sync_result, enrichment_completion_summary
+from sync_status import annotate_sync_result, blocked_auth_result, enrichment_completion_summary
 from lark_io import ensure_user_identity, write_rows
 
 
@@ -74,10 +74,10 @@ def main() -> int:
             print(
                 json.dumps(
                     {
-                        "ok": False,
-                        "stage": "feishu_auth_preflight",
-                        "message": "飞书真实写入前置检查失败；已在导入/写库前停止。",
-                        "error": str(exc),
+                        **blocked_auth_result(
+                            "飞书真实写入前置检查失败；已在导入/写库前停止。",
+                            str(exc),
+                        ),
                     },
                     ensure_ascii=False,
                     indent=2,
