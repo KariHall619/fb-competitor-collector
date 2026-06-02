@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
+VALID_CN_SUMMARY = "这篇故事围绕家庭矛盾和财产冲突展开，主角发现亲人试图夺走资产后及时反击，形成适合短剧改编的反转剧情。"
 
 
 def run(command: list[str], cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
@@ -612,7 +613,7 @@ def assert_exact_time_parsing_and_relative_time_estimation() -> None:
         {
             "post_url": "https://www.facebook.com/example/posts/relative-time",
             "post_time_text": "1h",
-            "article_summary": "这是文章概要",
+            "article_summary": VALID_CN_SUMMARY,
             "crawled_at": "2026-05-28T14:00:00",
         }
     )
@@ -670,7 +671,7 @@ def assert_comments_and_shares_are_output_as_engagement() -> None:
             "account_type": "competitor",
             "post_type": "文本",
             "views": "1.2K",
-            "article_summary": "文章概要",
+            "article_summary": VALID_CN_SUMMARY,
             "reactions": "81",
             "comments": "29",
             "shares": "3",
@@ -716,7 +717,7 @@ def assert_field_schema_controls_output_rows() -> None:
         "posted_at": "2026年5月28日 13:00",
         "time_source": "relative_estimated",
         "landing_url": "https://story.example/article",
-        "story_summary": "文章概要",
+        "story_summary": VALID_CN_SUMMARY,
         "likes": 81,
         "comments": 29,
         "shares": 3,
@@ -917,7 +918,7 @@ def assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_p
                         "landing_url": "https://site.test/story",
                         "lead_link_status": "qualified",
                         "lead_link_source": "comment",
-                        "article_summary": "文章来源概要",
+                        "article_summary": VALID_CN_SUMMARY,
                     }
                 ]
             },
@@ -980,7 +981,7 @@ def assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path: Path) ->
                         "lead_url_raw": "https://l.facebook.com/l.php?u=https%3A%2F%2Fsite.test%2Fstory",
                         "lead_link_status": "qualified",
                         "lead_link_source": "comment_reply",
-                        "article_summary": "文章来源概要",
+                        "article_summary": VALID_CN_SUMMARY,
                         "summary_source": "article",
                         "output_status": "ready_for_output",
                     }
@@ -1038,7 +1039,7 @@ def assert_article_url_alone_does_not_qualify_lead_link(tmp_path: Path) -> None:
                         "time_confirmed": True,
                         "time_source": "dom_aria_label",
                         "article_url": "https://site.test/story",
-                        "article_summary": "文章来源概要",
+                        "article_summary": VALID_CN_SUMMARY,
                         "summary_source": "article",
                     }
                 ]
@@ -1082,7 +1083,7 @@ def assert_filter_sync_applies_output_quality_gate(tmp_path: Path) -> None:
                         "time_confirmed": True,
                         "time_source": "dom_aria_label",
                         "article_url": "https://site.test/story",
-                        "article_summary": "文章来源概要",
+                        "article_summary": VALID_CN_SUMMARY,
                         "summary_source": "article",
                     }
                 ]
@@ -1129,7 +1130,7 @@ def assert_quality_gate_requires_comment_lead_source(tmp_path: Path) -> None:
                         "article_url": "https://site.test/story",
                         "landing_url": "https://site.test/story",
                         "lead_link_status": "qualified",
-                        "article_summary": "文章来源概要",
+                        "article_summary": VALID_CN_SUMMARY,
                         "summary_source": "article",
                         "output_status": "ready_for_output",
                     }
@@ -1503,7 +1504,7 @@ if (dateKeyFromPostedAt('2026年11月3日 01:05') !== '261103') process.exit(2);
 if (dateKeyFromPostedAt('3h') !== '') process.exit(3);
 const payload = {
   posts: [
-    { post_url: 'https://facebook.com/example/posts/1', output_status: 'ready_for_output', posted_at: '2026年6月1日 12:00', time_confirmed: true, summary_source: 'article', story_summary: 'ok', lead_link_status: 'qualified', lead_link_source: 'comment', lead_url_raw: 'https://site.test/a', landing_url: 'https://site.test/a' },
+    { post_url: 'https://facebook.com/example/posts/1', output_status: 'ready_for_output', posted_at: '2026年6月1日 12:00', time_confirmed: true, summary_source: 'article', story_summary: '这篇故事讲述家庭冲突升级后，主角发现问题并及时反击的反转剧情。', lead_link_status: 'qualified', lead_link_source: 'comment', lead_url_raw: 'https://site.test/a', landing_url: 'https://site.test/a' },
     { post_url: 'https://facebook.com/example/posts/2', output_status: 'needs_enrichment', posted_at: '2026年6月1日 13:00', time_confirmed: true, summary_source: 'pending_article_summary', lead_link_status: 'missing', engagement_confidence: 'anchored_missing_metrics' },
   ],
   date_filtered_out: [{ post_url: 'https://facebook.com/example/posts/old' }],
@@ -1549,7 +1550,7 @@ def assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path: Path)
                         "lead_url_raw": "https://kaylestore.net/different-story",
                         "lead_link_status": "qualified",
                         "lead_link_source": "comment",
-                        "article_summary": "可用概要",
+                        "article_summary": VALID_CN_SUMMARY,
                     },
                 ]
             },
@@ -1882,16 +1883,140 @@ def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
             "10",
         ]
     )
-    assert summary_worker.returncode == 0, summary_worker.stdout + summary_worker.stderr
-    assert '"summary:done": 2' in summary_worker.stdout
+    assert summary_worker.returncode == 1, summary_worker.stdout + summary_worker.stderr
 
     sys.path.insert(0, str(ROOT / "scripts"))
-    from store import all_posts, cached_article_material, connect
+    from store import all_posts, cached_article_material, connect, pending_enrichment_tasks
 
     conn = connect(db_path)
     posts = all_posts(conn)
-    assert all(post["output_status"] == "ready_for_output" for post in posts)
+    assert all(post["output_status"] != "ready_for_output" for post in posts)
     assert cached_article_material(conn, article.as_uri())["ok"] is True
+    failed_summary_tasks = pending_enrichment_tasks(conn, stages=["summary"], limit=10)
+    assert all("requires_codex_chinese_summary" in (task.get("last_error") or "") for task in failed_summary_tasks)
+
+    requests_path = tmp_path / "summary_requests.json"
+    exported = run(
+        [
+            PYTHON,
+            "scripts/export_summary_requests.py",
+            "--config",
+            str(config),
+            "--output",
+            str(requests_path),
+        ]
+    )
+    assert exported.returncode == 0, exported.stderr or exported.stdout
+    requests = json.loads(requests_path.read_text(encoding="utf-8"))
+    assert requests["count"] == 2
+    assert "Worker cache story" in requests["requests"][0]["article_material"]["title"]
+
+    bad_summaries = tmp_path / "bad_summaries.json"
+    bad_summaries.write_text(
+        json.dumps({article.as_uri(): "Worker cache story"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    bad_apply = run(
+        [
+            PYTHON,
+            "scripts/apply_article_summaries.py",
+            "--config",
+            str(config),
+            "--summaries",
+            str(bad_summaries),
+        ]
+    )
+    assert bad_apply.returncode == 0, bad_apply.stderr or bad_apply.stdout
+    bad_data = json.loads(bad_apply.stdout)
+    assert bad_data["applied"] == 0
+    assert bad_data["rejected"] == 2
+
+    good_summaries = tmp_path / "good_summaries.json"
+    good_summaries.write_text(
+        json.dumps(
+            {
+                article.as_uri(): "这篇故事围绕家庭资产控制展开，儿子试图冻结母亲信用卡并掌控公司，母亲发现异常后准备通过法律方式反击。"
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    good_apply = run(
+        [
+            PYTHON,
+            "scripts/apply_article_summaries.py",
+            "--config",
+            str(config),
+            "--summaries",
+            str(good_summaries),
+        ]
+    )
+    assert good_apply.returncode == 0, good_apply.stderr or good_apply.stdout
+    good_data = json.loads(good_apply.stdout)
+    assert good_data["applied"] == 2
+    conn = connect(db_path)
+    posts = all_posts(conn)
+    assert all(post["output_status"] == "ready_for_output" for post in posts)
+
+
+def assert_story_summary_audit_downgrades_invalid_rows(tmp_path: Path) -> None:
+    config = tmp_path / "settings.yaml"
+    db_path = tmp_path / "audit.sqlite"
+    raw = tmp_path / "ready_with_bad_summary.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {db_path}"),
+        encoding="utf-8",
+    )
+    raw.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Story Hub",
+                        "account_url": "https://www.facebook.com/storyhub",
+                        "post_url": "https://www.facebook.com/storyhub/posts/pfbid-bad-summary",
+                        "posted_at": "2026年5月28日 10:00",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                        "article_url": "https://story.example/bad",
+                        "landing_url": "https://story.example/bad",
+                        "lead_url_raw": "https://story.example/bad",
+                        "lead_link_status": "qualified",
+                        "lead_link_source": "comment",
+                        "story_summary": "The worker fetched this page once and reused the cached article material.",
+                        "summary_source": "article",
+                        "output_status": "ready_for_output",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--no-sync"])
+    assert imported.returncode == 0, imported.stderr or imported.stdout
+
+    audited = run([PYTHON, "scripts/audit_story_summaries.py", "--config", str(config)])
+    assert audited.returncode == 0, audited.stderr or audited.stdout
+    audit_data = json.loads(audited.stdout)
+    assert audit_data["invalid"] == 1
+    assert "story_summary_not_chinese" in audit_data["items"][0]["errors"]
+
+    fixed = run([PYTHON, "scripts/audit_story_summaries.py", "--config", str(config), "--fix"])
+    assert fixed.returncode == 0, fixed.stderr or fixed.stdout
+    fixed_data = json.loads(fixed.stdout)
+    assert fixed_data["fixed"] == 1
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from store import all_posts, connect, pending_enrichment_tasks
+
+    conn = connect(db_path)
+    post = all_posts(conn)[0]
+    assert post["summary_source"] == "pending_article_summary"
+    assert post["output_status"] != "ready_for_output"
+    tasks = pending_enrichment_tasks(conn, stages=["summary"], limit=10)
+    assert len(tasks) == 1
 
 
 def assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path: Path) -> None:
@@ -2014,6 +2139,7 @@ def main() -> int:
         assert_partial_review_status_and_task_queue(tmp_path)
         assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path)
         assert_enrichment_worker_article_cache_and_summary(tmp_path)
+        assert_story_summary_audit_downgrades_invalid_rows(tmp_path)
         assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path)
 
     print("local pipeline acceptance passed")

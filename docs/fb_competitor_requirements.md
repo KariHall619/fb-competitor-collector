@@ -224,7 +224,7 @@ Sheet id: 44013b
 3. `scripts/opencli_extract_current_tab.mjs`：当前 Chrome Facebook tab 首页候选提取参考入口；
 4. `scripts/prepare_capture_result.py`：把首页候选标准化，保留短帖、媒体链接和缺字段候选为 `needs_enrichment`；
 5. `scripts/opencli_enrich_post_details.mjs`：打开候选详情页，确认精确时间，展开评论/回复，解析账号自发引流链接，并按目标日期过滤；
-6. `scripts/enrich_article_summaries.py` 与 `scripts/apply_article_summaries.py`：基于落地页材料生成或应用中文概要；
+6. `scripts/enrich_article_summaries.py`、`scripts/export_summary_requests.py` 与 `scripts/apply_article_summaries.py`：准备落地页材料、导出 Codex 中文概要请求，并应用合格中文概要；
 7. `scripts/output_quality.py`：最终输出质量门禁；
 8. `scripts/field_schema.py`：飞书 A-K 输出列、表头别名和账号来源表表头识别。
 

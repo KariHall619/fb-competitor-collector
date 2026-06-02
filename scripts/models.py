@@ -532,10 +532,13 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
         "last_seen_at": raw.get("last_seen_at") or reference_time.isoformat(timespec="seconds"),
         "raw_payload": json.dumps(raw, ensure_ascii=False),
     }
-    if not post["output_status"]:
-        from pipeline_status import output_status_for
+    from pipeline_status import output_status_for
 
-        post["output_status"] = output_status_for(post)
+    computed_output_status = output_status_for(post)
+    if not post["output_status"] or (
+        post["output_status"] == "ready_for_output" and computed_output_status != "ready_for_output"
+    ):
+        post["output_status"] = computed_output_status
     if post["crawl_status"] in {"", "imported", "captured"}:
         post["crawl_status"] = post["output_status"] if post["output_status"] == "ready_for_output" else "needs_enrichment"
     return post

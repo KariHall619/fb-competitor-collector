@@ -9,6 +9,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Any
 
+from field_audit import audit_fields_for_storage
 from pipeline_status import missing_enrichment_stages
 
 
@@ -44,13 +45,17 @@ POST_COLUMNS = [
     "time_confirmed",
     "time_source",
     "summary_source",
+    "adoption_status",
+    "field_audit_status",
+    "field_audit_reasons",
+    "field_audit_note",
     "coverage_note",
     "first_seen_at",
     "last_seen_at",
     "raw_payload",
 ]
 
-ENRICHMENT_STAGES = ("detail_time", "lead_link", "article_material", "summary")
+ENRICHMENT_STAGES = ("detail_time", "lead_link", "engagement", "post_type", "article_material", "summary")
 TASK_OPEN_STATUSES = ("pending", "failed")
 
 
@@ -70,6 +75,10 @@ SCHEMA_COLUMNS: dict[str, str] = {
     "relative_time_text": "TEXT",
     "summary_source": "TEXT",
     "time_source": "TEXT",
+    "adoption_status": "TEXT",
+    "field_audit_status": "TEXT",
+    "field_audit_reasons": "TEXT",
+    "field_audit_note": "TEXT",
     "comments": "INTEGER",
     "shares": "INTEGER",
     "coverage_note": "TEXT",
@@ -122,6 +131,10 @@ def init_db(conn: sqlite3.Connection) -> None:
             output_status TEXT,
             time_confirmed INTEGER DEFAULT 0,
             summary_source TEXT,
+            adoption_status TEXT,
+            field_audit_status TEXT,
+            field_audit_reasons TEXT,
+            field_audit_note TEXT,
             coverage_note TEXT,
             first_seen_at TEXT,
             last_seen_at TEXT,
@@ -201,6 +214,7 @@ def upsert_post(conn: sqlite3.Connection, post: dict[str, Any]) -> str:
         raise ValueError("post_url is required")
     if not post.get("canonical_post_url"):
         post["canonical_post_url"] = post["post_url"]
+    post.update(audit_fields_for_storage(post))
     existing = conn.execute(
         "SELECT id FROM posts WHERE canonical_post_url = ? OR post_url = ?",
         (post["canonical_post_url"], post["post_url"]),
@@ -356,6 +370,26 @@ def mark_task_done(conn: sqlite3.Connection, task_id: int, *, duration_ms: int |
         WHERE id = ?
         """,
         (duration_ms, task_id),
+    )
+    conn.commit()
+
+
+def mark_stage_done(conn: sqlite3.Connection, post: dict[str, Any], stage: str, *, duration_ms: int | None = None) -> None:
+    canonical = post.get("canonical_post_url") or post.get("post_url")
+    post_url = post.get("post_url") or canonical
+    if not canonical or not post_url:
+        return
+    conn.execute(
+        """
+        UPDATE enrichment_tasks
+        SET status = 'done',
+            duration_ms = COALESCE(?, duration_ms),
+            last_error = NULL,
+            locked_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE stage = ? AND (canonical_post_url = ? OR post_url = ?)
+        """,
+        (duration_ms, stage, canonical, post_url),
     )
     conn.commit()
 

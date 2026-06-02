@@ -176,13 +176,28 @@ python3 scripts/enrich_article_summaries.py \
   --output exports/with_article_material.json
 ```
 
-Apply Codex-written Chinese summaries:
+Apply Codex-written Chinese summaries to a JSON payload:
 
 ```bash
 python3 scripts/apply_article_summaries.py \
   --input exports/with_article_material.json \
   --summaries exports/article_summaries.json \
   --output exports/ready_for_time_confirmation.json
+```
+
+For SQLite enrichment runs, article material is prepared first and the summary request is exported for Codex. The worker does not turn article title, meta description, or English excerpts into `故事概要`.
+
+```bash
+python3 scripts/enrichment_worker.py --config config/settings.yaml --stages article_material --limit 50
+python3 scripts/export_summary_requests.py --config config/settings.yaml --output exports/summary_requests.json
+python3 scripts/apply_article_summaries.py --config config/settings.yaml --summaries exports/article_summaries.json
+```
+
+Audit local summaries that were previously mis-marked as article summaries:
+
+```bash
+python3 scripts/audit_story_summaries.py --config config/settings.yaml
+python3 scripts/audit_story_summaries.py --config config/settings.yaml --fix
 ```
 
 If all time signals are missing, do not sync. If only a relative time label exists, sync is allowed after estimating the time and marking it with `约` in Feishu.

@@ -16,6 +16,7 @@ from typing import Any
 from config_loader import deep_get, load_config
 from fetch_article_material import extract_material
 from pipeline_status import crawl_status_for, output_status_for
+from story_summary_policy import has_valid_story_summary, story_summary_errors
 from store import (
     cached_article_material,
     connect,
@@ -144,24 +145,13 @@ def run_article_task(config: dict[str, Any], post: dict[str, Any], conn_path: st
 
 
 def run_summary_task(post: dict[str, Any]) -> dict[str, Any]:
-    raw_payload = post.get("raw_payload") or "{}"
-    try:
-        payload = json.loads(raw_payload)
-        if not isinstance(payload, dict):
-            payload = {}
-    except Exception:
-        payload = {}
-    material = payload.get("article_material") or {}
-    if post.get("story_summary") and post.get("summary_source") == "article":
+    if has_valid_story_summary(post):
         next_post = {**post}
-    elif material.get("ok") and (material.get("title") or material.get("meta_description") or material.get("text_excerpt")):
-        parts = [material.get("title") or "", material.get("meta_description") or ""]
-        if not parts[1]:
-            parts.append(str(material.get("text_excerpt") or "").replace("\n", " ")[:180])
-        summary = "；".join(part.strip() for part in parts if part and part.strip())[:260]
-        next_post = {**post, "story_summary": summary, "summary_source": "article"}
     else:
-        raise RuntimeError("missing article material for summary")
+        errors = story_summary_errors(post)
+        if not errors and post.get("summary_source") != "article":
+            errors = ["missing_article_summary"]
+        raise RuntimeError("requires_codex_chinese_summary:" + ",".join(errors or ["missing_article_summary"]))
     next_post["output_status"] = output_status_for(next_post)
     next_post["crawl_status"] = crawl_status_for(next_post)
     return next_post

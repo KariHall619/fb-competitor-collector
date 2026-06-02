@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from models import COMMENT_LEAD_SOURCES, ESTIMATED_TIME_SOURCES, has_qualified_comment_lead_link
+from story_summary_policy import has_valid_story_summary
 
 
 PARTIAL_REVIEW = "partial_review"
@@ -27,7 +28,7 @@ def has_confirmed_time(post: dict[str, Any]) -> bool:
 
 
 def has_article_summary(post: dict[str, Any]) -> bool:
-    return bool(post.get("story_summary") and post.get("summary_source") == "article")
+    return has_valid_story_summary(post)
 
 
 def has_partial_review_signal(post: dict[str, Any]) -> bool:

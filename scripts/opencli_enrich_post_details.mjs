@@ -884,14 +884,19 @@ function shouldReplaceLeadLink(post, leadLink) {
     || sameNormalizedUrl(post.landing_url || post.article_url, leadLink.landing_url);
 }
 
+function hasValidStorySummary(post) {
+  const text = String(post.story_summary || "");
+  const chineseChars = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+  return post.summary_source === "article" && chineseChars >= 8 && text.trim().length >= 12;
+}
+
 function outputStatusFor(post) {
   const requiredOk = Boolean(
     post.post_url
     && post.posted_at
     && post.time_confirmed
     && !["relative_estimated", "relative_hour", "relative_label"].includes(post.time_source || "")
-    && post.story_summary
-    && post.summary_source === "article"
+    && hasValidStorySummary(post)
     && post.lead_link_status === "qualified"
     && ["comment", "comment_reply"].includes(post.lead_link_source || "")
     && (post.landing_url || post.article_url)
@@ -907,7 +912,7 @@ function enrichmentReasonCounts(posts) {
   for (const post of posts || []) {
     if (post.output_status === "ready_for_output") continue;
     if (!post.posted_at || !post.time_confirmed) add("missing_confirmed_posted_at");
-    if (post.summary_source !== "article" || !post.story_summary) add("missing_article_summary");
+    if (!hasValidStorySummary(post)) add("missing_article_summary");
     if (!hasQualifiedLeadLink(post)) add("missing_qualified_comment_lead_link");
     if (post.engagement_confidence && post.engagement_confidence !== "anchored") add("engagement_unconfirmed");
   }

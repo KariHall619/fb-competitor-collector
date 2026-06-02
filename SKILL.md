@@ -88,6 +88,8 @@ Run all commands from the skill root.
 | Detail enrichment | `node scripts/opencli_enrich_post_details.mjs --input <prepared.json> --output <detail_enriched.json> --target-date YYMMDD` |
 | Fetch article material | `python3 scripts/enrich_article_summaries.py --input <detail_enriched.json> --output <with_article_material.json>` |
 | Apply Codex Chinese summaries | `python3 scripts/apply_article_summaries.py --input <with_article_material.json> --summaries <summaries.json> --output <ready.json>` |
+| Export SQLite summary requests | `python3 scripts/export_summary_requests.py --config config/settings.yaml --output exports/summary_requests.json` |
+| Audit local summaries | `python3 scripts/audit_story_summaries.py --config config/settings.yaml` |
 | Local acceptance test | `python3 tests/test_local_pipeline.py` |
 
 ## Data Contract
@@ -141,13 +143,14 @@ Rules:
 - Missing share count, parent post URL, exact time, summary, or lead link must not drop the candidate at capture time. Keep the candidate as `needs_enrichment`; only `ready_for_output` rows may sync to Feishu.
 - Do not sync live capture rows unless `posted_at` is confirmed at least to the hour, formatted like `2026年5月19日 17:00`.
 - Reject estimated relative-time sources such as `relative_estimated`, `relative_hour`, or `relative_label` during Feishu sync, even if a `posted_at` value is present.
-- Do not sync live capture rows whose story summary is copied from Facebook text. The summary must be a Chinese summary based on linked article material and marked `summary_source=article`.
+- Do not sync live capture rows whose story summary is copied from Facebook text, article title, meta description, source excerpt, or English article material. The summary must be a Codex-written Chinese summary based on linked article material and marked `summary_source=article`.
 - Relative labels such as `19m`, `2h`, `12h`, or `1d` are homepage windowing clues only. Use them to decide which visible posts should be opened for detail enrichment and where the scroll boundary probably is. Do not convert them into `posted_at` for formal output. Confirm `posted_at` from Facebook's timestamp tooltip or DOM attributes such as `aria-label`, `title`, `datetime`, or `data-tooltip-*`.
 - Timestamp tooltip capture is automated by the skill. First try synthetic page hover through OpenCLI Browser Bridge; if Facebook does not show the tooltip, the skill may use OpenCLI Browser Bridge mouse movement as an automated fallback. Do not ask the business user to manually hover timestamps.
 - Human intervention is only for blocking states such as login expiry, visitor preview, CAPTCHA/risk control, the wrong Chrome profile, or a page where posts are not visibly loaded.
 - Before deleting any remaining relative-time fallback code, run the exact-time verifier against a real logged-in Facebook tab through the trusted OpenCLI Browser Bridge runtime and require `status=exact_time_confirmed`.
 - Short posts must be kept if they have a valid FB content URL. If comment/reply lead link, landing URL, article summary, engagement, or exact time is missing, keep them as `needs_enrichment` instead of dropping them.
 - For scale-out runs, first import visible candidates as `partial_review`, then resume queued enrichment stages in SQLite. Formal `--sync` still writes only `ready_for_output`; use `--sync-partial --dry-run` only for business preview.
+- `enrichment_worker.py --stages summary` does not generate summaries. It only verifies whether a valid Codex-written Chinese summary has already been applied; otherwise it leaves `requires_codex_chinese_summary`. Generate Chinese summaries from `export_summary_requests.py` output and apply them with `apply_article_summaries.py --config ... --summaries ...`.
 
 ## Feishu Workflow
 

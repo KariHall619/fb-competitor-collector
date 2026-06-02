@@ -83,7 +83,7 @@ Final output requires all of the following:
 - `lead_link_status=qualified`.
 - `lead_link_source` is `comment` or `comment_reply`.
 - `landing_url` or `article_url` resolves outside Facebook/Meta.
-- `story_summary` exists and `summary_source=article`.
+- `story_summary` is a valid Chinese article summary and `summary_source=article`; copied article title, meta description, text excerpt, or English source text does not qualify.
 
 Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 
@@ -100,9 +100,11 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 - `scripts/prepare_capture_result.py`: normalize raw homepage capture and keep incomplete candidates as `needs_enrichment`.
 - `scripts/opencli_enrich_post_details.mjs`: open detail pages, confirm exact time, expand comments/replies, resolve lead links, apply target-date filtering.
 - `scripts/run_capture_pipeline.py`: fast account-level entrypoint that discovers visible candidates, prepares/imports them as partial records, and queues enrichment.
-- `scripts/enrichment_worker.py`: resumes queued `detail_time`, `lead_link`, `article_material`, and `summary` tasks with local concurrency limits. Detail tasks are grouped by post, so one post with both `detail_time` and `lead_link` pending should open the detail page only once in that worker batch.
+- `scripts/enrichment_worker.py`: resumes queued `detail_time`, `lead_link`, and `article_material` tasks with local concurrency limits. Its `summary` stage no longer generates story summaries; it only verifies that a Codex-written Chinese summary has been applied, otherwise it leaves `requires_codex_chinese_summary`.
 - `scripts/enrich_article_summaries.py`: fetch article/landing material for summarization.
+- `scripts/export_summary_requests.py`: export SQLite rows and article material that need Codex-written Chinese summaries.
 - `scripts/apply_article_summaries.py`: apply Codex-written Chinese summaries and recompute `output_status`.
+- `scripts/audit_story_summaries.py`: audit invalid local summaries and optionally downgrade them to `needs_enrichment`.
 - `scripts/import_existing_result.py`: import JSON/CSV into SQLite and optionally sync ready rows.
 - `scripts/filter_posts.py`: filter local SQLite records and optionally sync ready rows.
 - `scripts/sync_feishu.py`: sync local ready rows to Feishu.
@@ -140,6 +142,21 @@ Article material and summary application:
 ```bash
 python3 scripts/enrich_article_summaries.py --input exports/detail_enriched.json --output exports/with_article_material.json
 python3 scripts/apply_article_summaries.py --input exports/with_article_material.json --summaries exports/article_summaries.json --output exports/ready.json
+```
+
+SQLite summary request flow:
+
+```bash
+python3 scripts/enrichment_worker.py --config config/settings.yaml --stages article_material --limit 50
+python3 scripts/export_summary_requests.py --config config/settings.yaml --output exports/summary_requests.json
+python3 scripts/apply_article_summaries.py --config config/settings.yaml --summaries exports/article_summaries.json
+```
+
+Audit invalid local summaries:
+
+```bash
+python3 scripts/audit_story_summaries.py --config config/settings.yaml
+python3 scripts/audit_story_summaries.py --config config/settings.yaml --fix
 ```
 
 Import without Feishu write:
@@ -200,6 +217,7 @@ Current latest passing commit before this file: `365608ba38d090f9b5f8f88e530baec
 ## Performance Notes
 
 - The accuracy contract is unchanged: `ready_for_output` still requires detail-confirmed time, qualified account-owned comment/comment-reply lead link, external landing URL, and article-based Chinese summary.
+- Article material extraction is not summary generation. Do not treat article title, meta description, or source text excerpt as `story_summary`; export summary requests and apply Codex-written Chinese summaries instead.
 - Detail enrichment uses bounded readiness waits. `open_tab_wait_seconds`, `detail_navigation_wait_seconds`, `synthetic_tooltip_wait_ms`, and `real_mouse_tooltip_wait_ms` are maximum waits; the script should continue earlier once the detail DOM, tooltip, or comment expansion signal is available.
 - Do not replace these readiness waits with fixed sleeps unless OpenCLI/Facebook behavior changes and tests are updated. Fixed waits directly increase per-post latency.
 - `enrichment_worker.py` should keep grouping detail tasks by canonical post URL. Splitting `detail_time` and `lead_link` into separate page opens is a regression for the sub-two-minute-per-post target.

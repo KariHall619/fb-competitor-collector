@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from models import COMMENT_LEAD_SOURCES, ESTIMATED_TIME_SOURCES
+from story_summary_policy import story_summary_errors
 
 def has_qualified_comment_lead_link(post: dict[str, Any]) -> bool:
     return (
@@ -23,8 +24,11 @@ def output_quality_errors(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
             row_errors.append("missing_hour_level_posted_at")
         if not post.get("time_confirmed") or post.get("time_source") in ESTIMATED_TIME_SOURCES:
             row_errors.append("unconfirmed_or_estimated_posted_at")
-        if post.get("summary_source") != "article" or not post.get("story_summary"):
+        summary_errors = story_summary_errors(post)
+        if post.get("summary_source") != "article":
             row_errors.append("missing_article_summary")
+        elif summary_errors:
+            row_errors.extend(summary_errors)
         if not has_qualified_comment_lead_link(post):
             row_errors.append("missing_qualified_comment_lead_link")
         if row_errors:
