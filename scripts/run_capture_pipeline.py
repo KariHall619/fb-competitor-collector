@@ -17,7 +17,7 @@ from config_loader import load_config
 from coverage_expectations import apply_expected_coverage, split_expected_labels
 from lark_io import ensure_user_identity
 from models import normalize_date
-from run_account_job import account_job_quality_summary, discover_coverage_summary, quality_thresholds_from_args
+from run_account_job import account_job_quality_summary, completion_blockers_for_summary, discover_coverage_summary, quality_thresholds_from_args
 from store import connect, query_posts
 from sync_status import blocked_auth_result, completion_run_status, enrichment_completion_summary
 
@@ -131,7 +131,38 @@ def capture_pipeline_failed_result(
     if error:
         payload["error"] = error
     payload.update(extra)
+    payload["completion_blockers"] = [
+        {
+            "code": run_status,
+            "label": {
+                "blocked_auth": "飞书授权阻塞",
+                "blocked_opencli": "OpenCLI 未就绪",
+                "human_intervention_required": "需要人工恢复登录/Profile",
+                "discover_failed": "主页发现失败",
+                "prepare_failed": "候选标准化失败",
+                "import_failed": "本地入库失败",
+                "coverage_incomplete": "覆盖不足",
+            }.get(run_status, run_status),
+            "severity": "hard_blocker" if run_status in {"blocked_auth", "blocked_opencli", "human_intervention_required"} else "operational",
+            "priority": 0,
+            "recoverable": True,
+            "message": message,
+            "next_action": payload["next_actions"][0] if payload.get("next_actions") else "",
+            "metrics": {
+                key: payload[key]
+                for key in ("stage", "returncode", "prepared", "database_path", "target_date")
+                if key in payload
+            },
+        }
+    ]
     return payload
+
+
+def emit_result(result: dict) -> None:
+    quality_summary = result.get("quality_summary")
+    if isinstance(quality_summary, dict):
+        result["completion_blockers"] = quality_summary.get("completion_blockers", [])
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def main() -> int:
@@ -199,15 +230,19 @@ def main() -> int:
         try:
             ensure_user_identity(config)
         except RuntimeError as exc:
+            auth_blocker = blocked_auth_result(
+                "飞书真实写入前置检查失败；已在 Facebook 采集前停止。",
+                str(exc),
+            )
             print(
                 json.dumps(
-                    {
-                        **blocked_auth_result(
-                            "飞书真实写入前置检查失败；已在 Facebook 采集前停止。",
-                            str(exc),
-                        ),
-                        "next_actions": capture_pipeline_next_actions("blocked_auth", {}),
-                    },
+                    capture_pipeline_failed_result(
+                        stage="feishu_auth_preflight",
+                        run_status="blocked_auth",
+                        message=auth_blocker["message"],
+                        error=auth_blocker.get("error", ""),
+                        next_actions=capture_pipeline_next_actions("blocked_auth", {}),
+                    ),
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -475,11 +510,12 @@ def main() -> int:
                 result["run_status"] = "quality_threshold_failed"
                 result["quality_summary"]["run_status"] = "quality_threshold_failed"
                 result["quality_summary"]["complete"] = False
+            result["quality_summary"]["completion_blockers"] = completion_blockers_for_summary(result["quality_summary"])
         if args.fail_on_incomplete and result["run_status"] != "complete":
             result["exit_status_reason"] = "incomplete_run_status"
         if result.get("quality_threshold_failed"):
             result["exit_status_reason"] = "quality_threshold_failed"
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        emit_result(result)
         if result.get("quality_threshold_failed"):
             return 2
         if args.fail_on_incomplete and result["run_status"] != "complete":

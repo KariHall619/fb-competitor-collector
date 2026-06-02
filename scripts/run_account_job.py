@@ -892,7 +892,7 @@ def _stage_pressure_notes(stage_pressure: list[dict[str, Any]]) -> list[str]:
     return notes
 
 
-def _completion_blockers(summary: dict[str, Any]) -> list[dict[str, Any]]:
+def completion_blockers_for_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
     """Return ordered blockers that explain why this scoped job is not complete."""
 
     blockers: list[dict[str, Any]] = []
@@ -1243,7 +1243,7 @@ def account_job_quality_summary(
         if action not in next_actions:
             next_actions.append(action)
     summary["next_actions"] = next_actions[:4]
-    summary["completion_blockers"] = _completion_blockers(summary)
+    summary["completion_blockers"] = completion_blockers_for_summary(summary)
     return summary
 
 
@@ -1634,7 +1634,7 @@ def main() -> int:
             result["run_status"] = "quality_threshold_failed"
             result["quality_summary"]["run_status"] = "quality_threshold_failed"
             result["quality_summary"]["complete"] = False
-        result["quality_summary"]["completion_blockers"] = _completion_blockers(result["quality_summary"])
+        result["quality_summary"]["completion_blockers"] = completion_blockers_for_summary(result["quality_summary"])
     result["next_commands"] = next_commands_for_status(
         args=args,
         target_dates=target_dates,

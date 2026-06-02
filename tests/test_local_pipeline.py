@@ -5100,6 +5100,8 @@ exit 0
     assert data["run_status"] == "blocked_auth"
     assert data["complete"] is False
     assert any("飞书用户授权" in action for action in data["next_actions"])
+    assert data["completion_blockers"][0]["code"] == "blocked_auth"
+    assert "飞书授权" in data["completion_blockers"][0]["label"]
     assert not opencli_called.exists()
 
 
@@ -5138,6 +5140,8 @@ exit 1
     assert data["run_status"] == "blocked_opencli"
     assert data["complete"] is False
     assert any("--fix-opencli" in action for action in data["next_actions"])
+    assert data["completion_blockers"][0]["code"] == "blocked_opencli"
+    assert data["completion_blockers"][0]["severity"] == "hard_blocker"
 
 
 def assert_run_capture_pipeline_applies_expected_coverage(tmp_path: Path) -> None:
@@ -5255,6 +5259,11 @@ print(json.dumps(payload, ensure_ascii=False))
     assert data["quality_summary"]["missing_stage_counts"]["detail_time"] == 9
     assert any("精确时间" in note for note in data["quality_summary"]["stage_pressure_notes"])
     assert data["feishu_sync"]["run_status"] == "not_synced"
+    blocker_codes = [item["code"] for item in data["completion_blockers"]]
+    assert blocker_codes[0] == "coverage_incomplete"
+    assert "stage_detail_time" in blocker_codes
+    assert "field_gaps" in blocker_codes
+    assert data["completion_blockers"] == data["quality_summary"]["completion_blockers"]
     assert any("覆盖未完成" in action for action in data["next_actions"])
     assert strict_result.returncode == 2, strict_result.stdout
     strict_data = json.loads(strict_result.stdout)
@@ -5263,6 +5272,7 @@ print(json.dumps(payload, ensure_ascii=False))
     assert strict_data["quality_threshold_failed"] is True
     assert strict_data["exit_status_reason"] == "quality_threshold_failed"
     assert [failure["metric"] for failure in strict_data["quality_threshold_failures"]] == ["final_usable_rate"]
+    assert "quality_threshold_failed" in [item["code"] for item in strict_data["completion_blockers"]]
 
 
 def assert_run_account_job_passes_snapshot_budget(tmp_path: Path) -> None:
