@@ -111,9 +111,11 @@ def expected_coverage_check(
     expected_labels = expected_labels or []
     captured_count = int(discover_payload.get("post_count") or 0)
     captured_labels = _captured_labels(discover_payload)
+    matched_labels = [label for label in expected_labels if label in captured_labels]
     missing_labels = [label for label in expected_labels if label not in captured_labels]
     count_missing = max(0, int(expected_post_count or 0) - captured_count)
     ok = count_missing == 0 and not missing_labels
+    expected_label_count = len(expected_labels)
     messages: list[str] = []
     if count_missing:
         messages.append(f"期望至少 {expected_post_count} 条，当前只抓到 {captured_count} 条。")
@@ -125,9 +127,16 @@ def expected_coverage_check(
         "expected_post_count": int(expected_post_count or 0),
         "captured_post_count": captured_count,
         "missing_post_count": count_missing,
+        "post_count_coverage_rate": round(min(captured_count, int(expected_post_count or 0)) / int(expected_post_count or 1), 4)
+        if expected_post_count
+        else 0.0,
         "expected_labels": expected_labels,
+        "expected_label_count": expected_label_count,
         "captured_labels": captured_labels[:DEFAULT_EXPECTED_LABEL_LIMIT],
+        "matched_labels": matched_labels,
+        "matched_label_count": len(matched_labels),
         "missing_labels": missing_labels,
+        "label_coverage_rate": round(len(matched_labels) / expected_label_count, 4) if expected_label_count else 0.0,
         "message": "；".join(messages),
     }
 
@@ -459,6 +468,7 @@ def discover_coverage_summary(discover_import: dict[str, Any] | None) -> dict[st
         "reasons": sorted(set(reasons)),
         "message": coverage.get("message") or "",
         "expected": coverage.get("expected") or {},
+        "stop_reason": coverage.get("stop_reason") or "",
         "raw_candidate_count": discover.get("raw_candidate_count", 0),
         "post_count": discover.get("post_count", 0),
     }

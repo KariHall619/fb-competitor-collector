@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from field_audit import REASON_LABELS, REASON_STAGES, audit_post_fields, parse_reasons
 from pipeline_status import missing_enrichment_stages
 from store import enrichment_tasks_for_posts
 
@@ -66,11 +67,50 @@ def _open_task_stage_counts(open_tasks: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _field_gap_reasons(post: dict[str, Any]) -> list[str]:
+    stored_reasons = parse_reasons(post.get("field_audit_reasons"))
+    if stored_reasons:
+        return stored_reasons
+    return audit_post_fields(post).get("field_audit_reasons", [])
+
+
+def _field_gap_counts(posts: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for post in posts:
+        if post.get("output_status") in FINAL_OUTPUT_STATUSES:
+            continue
+        for reason in _field_gap_reasons(post):
+            counts[reason] = counts.get(reason, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _top_field_gaps(field_gap_counts: dict[str, int]) -> list[dict[str, Any]]:
+    gaps: list[dict[str, Any]] = []
+    for reason, count in field_gap_counts.items():
+        gaps.append(
+            {
+                "reason": reason,
+                "label": REASON_LABELS.get(reason, reason),
+                "count": count,
+                "stage": REASON_STAGES.get(reason, "coverage" if reason == "coverage" else ""),
+            }
+        )
+    return gaps[:8]
+
+
+def _field_gap_notes(field_gap_counts: dict[str, int]) -> list[str]:
+    notes: list[str] = []
+    for gap in _top_field_gaps(field_gap_counts)[:5]:
+        notes.append(f"{gap['label']}：{gap['count']} 条")
+    return notes
+
+
 def _next_actions(
     *,
     post_count: int,
     coverage_incomplete_count: int,
     missing_stage_counts: dict[str, int],
+    field_gap_counts: dict[str, int],
     requires_codex_summary_count: int,
     open_task_count: int,
 ) -> list[str]:
@@ -84,6 +124,9 @@ def _next_actions(
         actions.append(
             "继续运行 enrichment_worker 的 detail_time,lead_link,engagement,post_type,article_material 阶段。"
         )
+    if field_gap_counts:
+        notes = "、".join(_field_gap_notes(field_gap_counts)[:3])
+        actions.append(f"优先处理最终输出字段缺口：{notes}。")
     if requires_codex_summary_count or missing_stage_counts.get("summary"):
         actions.append("导出 summary requests，写入 Codex 中文概要后再 apply_article_summaries。")
     if not actions:
@@ -137,6 +180,7 @@ def enrichment_completion_summary(conn: Any, posts: list[dict[str, Any]]) -> dic
     missing_stage_counts = _stage_counts(missing_by_post)
     open_stage_counts = _open_task_stage_counts(open_tasks)
     coverage_incomplete_count = len(set(coverage_incomplete_urls))
+    field_gap_counts = _field_gap_counts(posts)
 
     return {
         "post_count": post_count,
@@ -153,6 +197,9 @@ def enrichment_completion_summary(conn: Any, posts: list[dict[str, Any]]) -> dic
         "open_task_stage_counts": open_stage_counts,
         "missing_stages_by_post": dict(list(missing_by_post.items())[:10]),
         "missing_stage_counts": missing_stage_counts,
+        "field_gap_counts": field_gap_counts,
+        "top_field_gaps": _top_field_gaps(field_gap_counts),
+        "field_gap_notes": _field_gap_notes(field_gap_counts),
         "requires_codex_summary_count": len(summary_blockers),
         "requires_codex_summary_urls": sorted({_task_key(task) for task in summary_blockers if _task_key(task)})[:10],
         "coverage_complete": coverage_incomplete_count == 0,
@@ -164,6 +211,7 @@ def enrichment_completion_summary(conn: Any, posts: list[dict[str, Any]]) -> dic
             post_count=post_count,
             coverage_incomplete_count=coverage_incomplete_count,
             missing_stage_counts=missing_stage_counts,
+            field_gap_counts=field_gap_counts,
             requires_codex_summary_count=len(summary_blockers),
             open_task_count=len(open_tasks),
         ),

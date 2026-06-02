@@ -1229,6 +1229,14 @@ def assert_sync_status_marks_incomplete_ledger(tmp_path: Path) -> None:
     assert completion["coverage_incomplete_count"] == 1
     assert completion["open_task_count"] > 0
     assert completion["missing_stage_counts"]["coverage"] == 1
+    assert completion["field_gap_counts"]["exact_time"] == 1
+    assert completion["field_gap_counts"]["lead_link"] == 1
+    assert completion["field_gap_counts"]["article_summary"] == 1
+    assert completion["field_gap_counts"]["coverage"] == 1
+    assert completion["top_field_gaps"][0]["count"] == 1
+    assert any(item["label"] == "覆盖不足" for item in completion["top_field_gaps"])
+    assert "覆盖不足：1 条" in completion["field_gap_notes"]
+    assert any("最终输出字段缺口" in action for action in completion["next_actions"])
     assert any("覆盖未完成" in action for action in completion["next_actions"])
 
 
@@ -2373,6 +2381,56 @@ def assert_opencli_extract_has_under_capture_guards() -> None:
     assert "已达到最大滚动快照数但最后一屏仍有新增候选" in script_text
 
 
+def assert_opencli_extract_stable_end_is_complete_coverage() -> None:
+    js = """
+import { captureCoverageState } from './scripts/opencli_extract_current_tab.mjs';
+
+const stable = captureCoverageState({
+  snapshots: [
+    { index: 0, new_posts: 4 },
+    { index: 1, new_posts: 0 },
+    { index: 2, new_posts: 0 },
+  ],
+  stopReason: 'stable_no_new_posts',
+  maxSnapshots: 3,
+});
+if (stable.coverage_incomplete || !stable.capture_complete || stable.coverage_blocked) {
+  console.error(JSON.stringify(stable, null, 2));
+  process.exit(1);
+}
+
+const cappedWithNewPosts = captureCoverageState({
+  snapshots: [
+    { index: 0, new_posts: 4 },
+    { index: 1, new_posts: 2 },
+    { index: 2, new_posts: 1 },
+  ],
+  stopReason: 'max_snapshots',
+  maxSnapshots: 3,
+});
+if (!cappedWithNewPosts.coverage_incomplete || cappedWithNewPosts.capture_complete) {
+  console.error(JSON.stringify(cappedWithNewPosts, null, 2));
+  process.exit(2);
+}
+
+const cappedWithoutNewPosts = captureCoverageState({
+  snapshots: [
+    { index: 0, new_posts: 4 },
+    { index: 1, new_posts: 0 },
+    { index: 2, new_posts: 0 },
+  ],
+  stopReason: 'max_snapshots',
+  maxSnapshots: 3,
+});
+if (cappedWithoutNewPosts.coverage_incomplete || !cappedWithoutNewPosts.capture_complete) {
+  console.error(JSON.stringify(cappedWithoutNewPosts, null, 2));
+  process.exit(3);
+}
+"""
+    result = run(["node", "--input-type=module", "-e", js])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_prepare_capture_has_no_base_time_argument() -> None:
     help_result = run([PYTHON, "scripts/prepare_capture_result.py", "--help"])
     assert help_result.returncode == 0, help_result.stderr
@@ -3287,6 +3345,11 @@ def assert_run_account_job_expected_coverage_marks_missing_posts() -> None:
     assert expected["enabled"] is True
     assert expected["ok"] is False
     assert expected["missing_post_count"] == 4
+    assert expected["post_count_coverage_rate"] == 0.6923
+    assert expected["expected_label_count"] == 5
+    assert expected["matched_label_count"] == 3
+    assert expected["matched_labels"] == ["38m", "1h", "2h"]
+    assert expected["label_coverage_rate"] == 0.6
     assert expected["missing_labels"] == ["10h", "11h"]
     assert "期望至少 13 条" in expected["message"]
     assert "10h" in checked["coverage"]["message"]
@@ -3370,6 +3433,7 @@ def assert_run_account_job_promotes_discover_coverage_status() -> None:
             "coverage": {
                 "coverage_incomplete": True,
                 "capture_complete": False,
+                "stop_reason": "max_snapshots",
                 "message": "采集达到快照上限时仍有新增候选。",
             },
             "raw_candidate_count": 12,
@@ -3416,6 +3480,7 @@ def assert_run_account_job_promotes_discover_coverage_status() -> None:
     assert summary["incomplete"] is True
     assert summary["reasons"] == ["capture_incomplete", "coverage_incomplete"]
     assert summary["raw_candidate_count"] == 12
+    assert summary["stop_reason"] == "max_snapshots"
     assert next_commands[0]["reason"] == "coverage_incomplete"
     assert "--max-snapshots 32" in next_commands[0]["command"]
     assert "--expected-post-count 13" in next_commands[0]["command"]
@@ -3840,6 +3905,7 @@ def main() -> int:
     assert_comment_mode_expression_can_select_all_comments()
     assert_opencli_extract_helpers_dedupe_homepage_candidates()
     assert_opencli_extract_has_under_capture_guards()
+    assert_opencli_extract_stable_end_is_complete_coverage()
     assert_opencli_extract_script_requires_human_intervention()
     assert_opencli_runtime_keeps_current_bound_tab()
     assert_opencli_tab_tracker_closes_only_registered_tabs()

@@ -78,6 +78,18 @@ function validCandidate(candidate) {
   return true;
 }
 
+function captureCoverageState({ blockedExtraction = null, snapshots = [], stopReason = "max_snapshots", maxSnapshots = MAX_SNAPSHOTS }) {
+  const lastSnapshot = snapshots.at(-1) || {};
+  const hitSnapshotCap =
+    !blockedExtraction && snapshots.length >= Math.max(1, Number(maxSnapshots) || 1) && stopReason === "max_snapshots";
+  const coverageIncomplete = hitSnapshotCap && Number(lastSnapshot.new_posts || 0) > 0;
+  return {
+    coverage_blocked: false,
+    coverage_incomplete: coverageIncomplete,
+    capture_complete: !coverageIncomplete,
+  };
+}
+
 async function waitSeconds(opencliCommand, session, tab, seconds) {
   await runOpencli(["browser", session, "wait", "time", String(seconds), "--tab", tab], { command: opencliCommand });
 }
@@ -119,6 +131,7 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
   const snapshots = [];
   let stableCount = 0;
   let blockedExtraction = null;
+  let stopReason = "max_snapshots";
   let previousSeenCount = 0;
   let noMovementCount = 0;
   let previousScrollHeight = 0;
@@ -126,6 +139,7 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
     const extraction = await evalPage(opencliCommand, session, tab, browserExpression(maxText));
     if (extraction.capture_blocked) {
       blockedExtraction = extraction;
+      stopReason = extraction.logged_out ? "login_required" : "visitor_preview";
       snapshots.push({
         index,
         blocked: true,
@@ -160,7 +174,10 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
     stableCount = seen.size === previousSeenCount ? stableCount + 1 : 0;
     previousSeenCount = seen.size;
     const minSnapshotsReached = snapshots.length >= Math.max(1, MIN_SNAPSHOTS);
-    if (minSnapshotsReached && stableCount >= Math.max(1, STABLE_SNAPSHOTS) && noMovementCount >= 1) break;
+    if (minSnapshotsReached && stableCount >= Math.max(1, STABLE_SNAPSHOTS) && noMovementCount >= 1) {
+      stopReason = "stable_no_new_posts";
+      break;
+    }
     const scrollState = await scrollDown(opencliCommand, session, tab, SCROLL_PIXELS);
     snapshots[snapshots.length - 1].scroll = scrollState;
     const scrollMoved = Number(scrollState?.moved || 0);
@@ -174,15 +191,16 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
     : seen.size > 0
       ? "real_posts_visible"
       : "no_real_posts_visible";
+  const coverage = captureCoverageState({ blockedExtraction, snapshots, stopReason, maxSnapshots: MAX_SNAPSHOTS });
   return {
     status,
     blockedExtraction,
     snapshots,
     posts: [...seen.values()],
+    stop_reason: stopReason,
     stable_snapshot_count: stableCount,
     no_movement_snapshot_count: noMovementCount,
-    coverage_blocked: !blockedExtraction && seen.size > 0 && snapshots.length > 1 && snapshots.at(-1)?.new_posts === 0,
-    coverage_incomplete: !blockedExtraction && snapshots.length >= Math.max(1, MAX_SNAPSHOTS) && snapshots.at(-1)?.new_posts > 0,
+    ...coverage,
   };
 }
 
@@ -229,7 +247,7 @@ async function main() {
   }
 
   const posts = capture.posts;
-  const captureComplete = !capture.coverage_blocked && !capture.coverage_incomplete;
+  const captureComplete = !capture.coverage_incomplete;
 
   outputJson({
     ok: posts.length > 0,
@@ -246,6 +264,7 @@ async function main() {
     capture_complete: captureComplete,
     coverage: {
       snapshot_count: capture.snapshots.length,
+      stop_reason: capture.stop_reason,
       stable_snapshot_count: capture.stable_snapshot_count,
       no_movement_snapshot_count: capture.no_movement_snapshot_count,
       coverage_blocked: capture.coverage_blocked,
@@ -253,8 +272,6 @@ async function main() {
       capture_complete: captureComplete,
       message: capture.coverage_incomplete
         ? "已达到最大滚动快照数但最后一屏仍有新增候选；可能还有更早帖子未覆盖，请提高 --max-snapshots 或继续从页面顶部重试。"
-        : capture.coverage_blocked
-        ? "连续滚动后未发现新增候选；如果人工仍能看到更多目标窗口帖子，请从页面顶部重试或检查 Facebook 虚拟列表是否未加载。"
         : "",
     },
     snapshots: capture.snapshots,
@@ -280,6 +297,7 @@ export {
   INVOKED_FILE,
   RUN_MAIN,
   captureSnapshots,
+  captureCoverageState,
   cleanUrl,
   postKey,
   validCandidate,
