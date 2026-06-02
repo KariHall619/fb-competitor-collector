@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 from typing import Any
 
 from config_loader import load_config
 from field_schema import configured_output_headers, output_row_for_headers
-from lark_io import write_rows
+from lark_io import ensure_user_identity, write_rows
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review, ready_for_output
 from store import all_posts, connect
 
@@ -93,6 +94,23 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config(args.config)
+    if not args.dry_run:
+        try:
+            ensure_user_identity(config)
+        except RuntimeError as exc:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "stage": "feishu_auth_preflight",
+                        "message": "飞书真实写入前置检查失败；已在读取本地库/同步前停止。",
+                        "error": str(exc),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
     conn = connect(config.get("database_path", "data/posts.sqlite"))
     result = sync_posts(
         config,

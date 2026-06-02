@@ -9,7 +9,7 @@ from typing import Any
 
 from config_loader import deep_get, load_config
 from field_schema import configured_output_headers, output_row_for_headers
-from lark_io import write_rows
+from lark_io import ensure_user_identity, write_rows
 from models import normalize_date
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review, ready_for_output
 from store import connect, query_posts
@@ -35,6 +35,26 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config(args.config)
+    real_feishu_write_requested = not args.dry_run and (args.sync or args.sync_audit or args.sync_partial)
+    if real_feishu_write_requested:
+        try:
+            ensure_user_identity(config)
+        except RuntimeError as exc:
+            print(
+                json.dumps(
+                    {
+                        "feishu_sync": {
+                            "ok": False,
+                            "stage": "feishu_auth_preflight",
+                            "message": "飞书真实写入前置检查失败；已在查询/同步前停止。",
+                            "error": str(exc),
+                        }
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
     min_views = args.min_views
     min_likes = args.min_likes
     if args.hot_views:

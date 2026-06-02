@@ -10,7 +10,9 @@ import tempfile
 import time
 from pathlib import Path
 
+from check_env import check_opencli
 from config_loader import load_config
+from lark_io import ensure_user_identity
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +42,43 @@ def main() -> int:
     parser.add_argument("--max-text", default="1500")
     args = parser.parse_args()
 
-    load_config(args.config)
+    config = load_config(args.config)
+    opencli_preflight = check_opencli(
+        config.get("opencli_command") or [config.get("opencli_path", "opencli")],
+        daemon_port=int(config.get("opencli_daemon_port", 19825) or 19825),
+        auto_fix=True,
+    )
+    if not opencli_preflight.get("ok"):
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "stage": "opencli_preflight",
+                    "message": "OpenCLI Browser Bridge 未就绪；已在 Facebook 采集前停止。",
+                    "opencli_browser_bridge": opencli_preflight,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 1
+    if args.sync_partial and not args.dry_run:
+        try:
+            ensure_user_identity(config)
+        except RuntimeError as exc:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "stage": "feishu_auth_preflight",
+                        "message": "飞书真实写入前置检查失败；已在 Facebook 采集前停止。",
+                        "error": str(exc),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="fb-capture-pipeline-") as temp_dir:
         temp = Path(temp_dir)

@@ -51,9 +51,9 @@ This file is the first-stop project memory for future agents working in this rep
   - Wiki: `https://pic6ktmsyi.feishu.cn/wiki/BqkSw67zgiYlbikZWx3cqwZ5nAf`
   - Spreadsheet token: `Md8As2SJzhyuBHtMuOmcLqy3nyf`
   - Current output sheet id: `44013b`
-- `lark-cli auth status` must report `identity=user` and `tokenStatus=valid` before real writes.
-- Enforce `lark-cli config default-as user` and `lark-cli config strict-mode user`.
-- If `tokenStatus=needs_refresh`, stop real writes and ask the operator to refresh login with `lark-cli auth login` or an equivalent token-refreshing command.
+- Real Feishu write paths must run auth preflight before capture/import/sync work. The preflight enforces `lark-cli config default-as user` and `lark-cli config strict-mode user`, then requires `lark-cli auth status` with `identity=user` and `tokenStatus=valid`.
+- If `tokenStatus=needs_refresh`, the code must attempt CLI recovery first, currently via `lark-cli doctor` followed by another `auth status` check. Only if CLI recovery cannot restore a valid user token should the run stop.
+- If silent recovery is impossible, the code may start `lark-cli auth login --json --no-wait` and report the verification payload, but it must do this before Facebook capture or local import side effects when the command intends to write Feishu.
 
 ## Feishu Output Format
 
@@ -94,7 +94,7 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 
 ## Script Map
 
-- `scripts/check_env.py`: first command before testing, capture, or sync. Reports platform, `lark-cli`, Feishu config, OpenCLI command, daemon, Browser Bridge state, and recommended capture route.
+- `scripts/check_env.py`: first command before testing, capture, or sync. Reports platform, `lark-cli`, Feishu config, OpenCLI command, daemon, Browser Bridge state, and recommended capture route. Add `--fix-auth` to actively run the same Feishu auth/config recovery used by real write paths; add `--fix-opencli` to try bounded OpenCLI daemon/doctor recovery before declaring browser bridge blocked.
 - `scripts/config_loader.py`: owns platform/runtime resolution. Keep `lark_cli_path`, `opencli_path`, and `opencli_session` on `auto` unless a machine-specific override is necessary.
 - `scripts/read_accounts.py`: reads source Feishu accounts. It supports competitor/internal columns and generic account columns through `field_schema.py`.
 - `scripts/opencli_runtime.mjs`: shared OpenCLI command/session/tab/eval helpers.
@@ -104,7 +104,7 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 - `scripts/fb_time_extractors.js`: exact Facebook time parsing and timestamp-target helpers.
 - `scripts/prepare_capture_result.py`: normalize raw homepage capture and keep incomplete candidates as `needs_enrichment`.
 - `scripts/opencli_enrich_post_details.mjs`: open detail pages, confirm exact time, expand comments/replies, resolve lead links, apply target-date filtering.
-- `scripts/run_capture_pipeline.py`: fast account-level entrypoint that discovers visible candidates, prepares/imports them as partial records, and queues enrichment.
+- `scripts/run_capture_pipeline.py`: fast account-level entrypoint that first runs bounded OpenCLI Browser Bridge preflight/recovery, then discovers visible candidates, prepares/imports them as partial records, and queues enrichment. If `--sync-partial` will do a real write, it also runs Feishu auth preflight before Facebook capture.
 - `scripts/enrichment_worker.py`: resumes queued `detail_time`, `lead_link`, `engagement`, `post_type`, and `article_material` tasks with local concurrency limits. Its `summary` stage no longer generates story summaries; it only verifies that a Codex-written Chinese summary has been applied, otherwise it leaves `requires_codex_chinese_summary`.
 - `scripts/enrich_article_summaries.py`: fetch article/landing material for summarization.
 - `scripts/export_summary_requests.py`: export SQLite rows and article material that need Codex-written Chinese summaries.
@@ -201,10 +201,9 @@ Last observed on 2026-06-02:
 
 - Platform: `darwin`.
 - `lark-cli` resolved to `/Users/a1/.npm-global/bin/lark-cli`.
-- `lark-cli` identity was `user`, but token status was `needs_refresh`; real writes require refresh.
+- `lark-cli` identity was `user`; `tokenStatus=needs_refresh` was observed, and `lark-cli doctor` could refresh it to `valid` on the next auth status call.
 - OpenCLI command resolved through `npx -y @jackwener/opencli`, version `1.8.1`.
-- OpenCLI daemon was not running on port `19825`.
-- Browser Bridge live capture was blocked until the OpenCLI daemon/extension/profile connection is fixed.
+- OpenCLI daemon can be started by `opencli doctor`, but Browser Bridge live capture remains blocked if the Chrome extension is not connected to the business Chrome profile.
 - `recommended_capture_route.route` was `blocked_until_opencli_ready`.
 
 These are runtime observations, not permanent project facts. Re-run `check_env.py` before live capture or Feishu writes.

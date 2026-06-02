@@ -50,23 +50,156 @@ def parse_lark_output(result: subprocess.CompletedProcess[str]) -> dict[str, Any
     return json.loads(result.stdout)
 
 
-def require_user_identity(config: dict[str, Any]) -> dict[str, Any]:
+def _short_text(value: Any, limit: int = 2000) -> str:
+    text = str(value or "").strip()
+    return text if len(text) <= limit else text[:limit] + "...<truncated>"
+
+
+def _result_summary(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    payload: Any = None
+    stdout = result.stdout.strip()
+    if stdout:
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError:
+            payload = _short_text(stdout)
+    return {
+        "returncode": result.returncode,
+        "stdout": payload if payload is not None else "",
+        "stderr": _short_text(result.stderr),
+    }
+
+
+def _cli_config_value(result: subprocess.CompletedProcess[str]) -> str:
+    text = result.stdout.strip()
+    if ":" not in text:
+        return text.strip()
+    return text.split(":", 1)[1].split("(", 1)[0].strip()
+
+
+def _auth_status(config: dict[str, Any]) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
     result = run_lark(config, ["auth", "status"])
     if result.returncode != 0:
         raise RuntimeError(
             "飞书 CLI 用户身份检查失败，已拒绝写入。"
             f"stdout={result.stdout.strip()} stderr={result.stderr.strip()}"
         )
-    payload = parse_lark_output(result)
+    try:
+        payload = parse_lark_output(result)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "飞书 CLI 用户身份检查返回了无法解析的 JSON，已拒绝写入。"
+            f"stdout={result.stdout.strip()} stderr={result.stderr.strip()}"
+        ) from exc
+    return result, payload
+
+
+def _ensure_user_cli_config(config: dict[str, Any], steps: list[dict[str, Any]]) -> None:
+    for name in ("default-as", "strict-mode"):
+        current = run_lark(config, ["config", name])
+        steps.append({"step": f"check_config_{name}", **_result_summary(current)})
+        if current.returncode != 0:
+            raise RuntimeError(
+                f"飞书 CLI 配置检查失败：config {name}。"
+                f"stdout={current.stdout.strip()} stderr={current.stderr.strip()}"
+            )
+        if _cli_config_value(current) == "user":
+            continue
+        fixed = run_lark(config, ["config", name, "user"])
+        steps.append({"step": f"set_config_{name}_user", **_result_summary(fixed)})
+        if fixed.returncode != 0:
+            raise RuntimeError(
+                f"飞书 CLI 配置自动修正失败：config {name} user。"
+                f"stdout={fixed.stdout.strip()} stderr={fixed.stderr.strip()}"
+            )
+
+
+def _start_device_login(config: dict[str, Any], status_payload: dict[str, Any]) -> dict[str, Any]:
+    scope = str(status_payload.get("scope") or "").strip()
+    args = ["auth", "login", "--json", "--no-wait"]
+    if scope:
+        args.extend(["--scope", scope])
+    else:
+        args.extend(["--domain", "sheets,drive,wiki"])
+    result = run_lark(config, args)
+    summary = {"step": "start_device_login", **_result_summary(result)}
+    if result.returncode != 0:
+        raise RuntimeError(
+            "飞书 CLI 用户登录已尝试自动发起，但启动失败。"
+            f"stdout={result.stdout.strip()} stderr={result.stderr.strip()}"
+        )
+    return summary
+
+
+def ensure_user_identity(config: dict[str, Any], *, allow_device_login: bool = True) -> dict[str, Any]:
+    """Ensure lark-cli can write as a valid user, auto-refreshing when possible."""
+    steps: list[dict[str, Any]] = []
+    recovery = {
+        "attempted": False,
+        "ok": False,
+        "steps": steps,
+    }
+    try:
+        _ensure_user_cli_config(config, steps)
+        status_result, payload = _auth_status(config)
+        steps.append({"step": "auth_status", **_result_summary(status_result)})
+    except RuntimeError as exc:
+        recovery["error"] = str(exc)
+        raise RuntimeError(f"{exc} 已在写入前停止，未执行飞书写入。") from exc
+
     identity = payload.get("identity")
     token_status = payload.get("tokenStatus")
-    if identity != "user" or token_status != "valid":
+
+    if identity == "user" and token_status == "valid":
+        recovery["ok"] = True
+        return {**payload, "_auth_recovery": recovery}
+
+    if identity and identity != "user":
         raise RuntimeError(
             "飞书 CLI 必须以有效用户身份写入。"
             f" 当前 identity={identity!r}, tokenStatus={token_status!r}。"
-            " 请先运行 lark-cli auth login，并确认 lark-cli auth status 为 identity=user、tokenStatus=valid。"
+            " 已在写入前停止，未执行飞书写入。请确认 lark-cli 当前配置使用用户身份。"
         )
-    return payload
+
+    if identity == "user" and token_status == "needs_refresh":
+        recovery["attempted"] = True
+        doctor = run_lark(config, ["doctor"])
+        steps.append({"step": "doctor_refresh_probe", **_result_summary(doctor)})
+        status_result, refreshed = _auth_status(config)
+        steps.append({"step": "auth_status_after_refresh_probe", **_result_summary(status_result)})
+        if refreshed.get("identity") == "user" and refreshed.get("tokenStatus") == "valid":
+            recovery["ok"] = True
+            return {**refreshed, "_auth_recovery": recovery}
+        payload = refreshed
+        identity = payload.get("identity")
+        token_status = payload.get("tokenStatus")
+
+    if allow_device_login:
+        recovery["attempted"] = True
+        try:
+            login_step = _start_device_login(config, payload)
+            steps.append(login_step)
+        except RuntimeError as exc:
+            recovery["error"] = str(exc)
+            raise RuntimeError(
+                "飞书 CLI 用户身份自动恢复失败，已在写入前停止，未执行飞书写入。"
+                f" 当前 identity={identity!r}, tokenStatus={token_status!r}。{exc}"
+            ) from exc
+        raise RuntimeError(
+            "飞书 CLI token 不能自动静默恢复，已自动发起设备登录，"
+            "但仍需要用户在浏览器完成授权；授权完成后重试当前命令。"
+            f" device_login={json.dumps(login_step, ensure_ascii=False)}"
+        )
+
+    raise RuntimeError(
+        "飞书 CLI 必须以有效用户身份写入。"
+        f" 当前 identity={identity!r}, tokenStatus={token_status!r}。"
+        " 自动刷新后仍未恢复，已在写入前停止，未执行飞书写入。"
+    )
+
+
+def require_user_identity(config: dict[str, Any]) -> dict[str, Any]:
+    return ensure_user_identity(config)
 
 
 def read_range(config: dict[str, Any], range_expr: str) -> subprocess.CompletedProcess[str]:

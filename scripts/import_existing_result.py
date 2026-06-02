@@ -15,7 +15,7 @@ from field_schema import configured_output_headers, output_row_for_headers
 from models import normalize_post
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review
 from store import connect, enqueue_enrichment_tasks_for_posts, mark_output_synced, upsert_posts
-from lark_io import write_rows
+from lark_io import ensure_user_identity, write_rows
 
 
 def load_records(path: str | Path) -> list[dict[str, Any]]:
@@ -61,6 +61,28 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config(args.config)
+    real_feishu_write_requested = (
+        not args.dry_run
+        and not args.no_sync
+        and (args.sync or args.sync_audit or args.sync_partial)
+    )
+    if real_feishu_write_requested:
+        try:
+            ensure_user_identity(config)
+        except RuntimeError as exc:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "stage": "feishu_auth_preflight",
+                        "message": "飞书真实写入前置检查失败；已在导入/写库前停止。",
+                        "error": str(exc),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
     defaults = {
         "account_name": args.account_name,
         "account_url": args.account_url,

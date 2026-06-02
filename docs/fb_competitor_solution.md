@@ -145,12 +145,13 @@ filters:
 1. `scripts/read_accounts.py` 读取账号来源表；
 2. `scripts/field_schema.py` 识别账号来源表里的竞品/内部/通用账号列；
 3. `scripts/lark_io.py` 统一封装读写；
-4. 写入前调用 `lark-cli auth status`，必须满足：
+4. 真实写入前调用飞书认证预检，并且必须在 Facebook 采集、导入或同步主体动作之前完成：
    - `identity=user`
    - `tokenStatus=valid`
-5. 项目要求：
+5. 预检会自动修正：
    - `lark-cli config default-as user`
    - `lark-cli config strict-mode user`
+6. 如果 `tokenStatus=needs_refresh`，预检会先执行 CLI 可恢复命令并复查；如果静默恢复失败，会自动发起设备登录并输出验证信息，然后早停，不会等采集完成后才失败。
 
 当前文档：
 
@@ -173,6 +174,8 @@ filters:
 8. `opencli_enrich_post_details.mjs` 优先复用一个详情标签页确认精确时间、评论/回复引流链接和目标日期；单帖低打扰失败时回退到原来的新开详情页流程；
 9. `enrich_article_summaries.py` 抓取落地页材料，`export_summary_requests.py` 导出待 Codex 生成的中文概要请求，`apply_article_summaries.py` 写入 Codex 中文摘要；
 10. 普通 `--sync` 将已确认 Facebook 帖子候选写入飞书台账；缺字段用 `是否采用` 的 `待补抓：...` 标记。只有显式使用 `--strict-ready-only` 时，才只同步 `ready_for_output` 完整记录。
+
+如果 OpenCLI daemon 未运行，`check_env.py --fix-opencli` 会先尝试通过有界 `opencli doctor` / daemon 恢复命令拉起服务。若 daemon 已运行但 Browser Bridge 扩展未连接，说明业务 Chrome profile 的扩展/连接状态仍需人工处理，系统不能改走其他采集路线。
 
 采集阶段不得因为链接形态过早丢弃内容。`/posts/`、`story.php`、`permalink.php`、`reel`、`photo.php`、`watch`、`videos` 都先作为 FB 内容候选保存。父帖链接只作为优先去重依据；抓不到父帖时保留原始内容链接，后续再做相似度/人工复核去重。
 

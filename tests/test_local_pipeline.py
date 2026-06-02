@@ -619,7 +619,7 @@ def assert_opencli_detail_enrichment_blocks_for_human_login() -> None:
 
 def assert_feishu_writes_require_user_identity() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
-    from lark_io import require_user_identity
+    from lark_io import ensure_user_identity, require_user_identity
     import lark_io
 
     original = lark_io.run_lark
@@ -631,19 +631,100 @@ def assert_feishu_writes_require_user_identity() -> None:
             self.stderr = stderr
 
     try:
-        lark_io.run_lark = lambda _config, _args: FakeResult(
-            json.dumps({"identity": "user", "tokenStatus": "valid", "userName": "tester"})
-        )
+        def valid_run(_config, args):
+            if args == ["config", "default-as"]:
+                return FakeResult("default-as: user")
+            if args == ["config", "strict-mode"]:
+                return FakeResult("strict-mode: user")
+            return FakeResult(json.dumps({"identity": "user", "tokenStatus": "valid", "userName": "tester"}))
+
+        lark_io.run_lark = valid_run
         assert require_user_identity({"lark_cli_path": "fake"})["identity"] == "user"
-        lark_io.run_lark = lambda _config, _args: FakeResult(
-            json.dumps({"identity": "bot", "tokenStatus": "valid"})
-        )
+
+        calls = []
+
+        def refresh_run(_config, args):
+            calls.append(args)
+            if args == ["config", "default-as"]:
+                return FakeResult("default-as: user")
+            if args == ["config", "strict-mode"]:
+                return FakeResult("strict-mode: user")
+            if args == ["doctor"]:
+                return FakeResult(json.dumps({"ok": True}))
+            auth_count = sum(1 for item in calls if item == ["auth", "status"])
+            if auth_count == 1:
+                return FakeResult(json.dumps({"identity": "user", "tokenStatus": "needs_refresh", "userName": "tester"}))
+            return FakeResult(json.dumps({"identity": "user", "tokenStatus": "valid", "userName": "tester"}))
+
+        lark_io.run_lark = refresh_run
+        refreshed = ensure_user_identity({"lark_cli_path": "fake"})
+        assert refreshed["tokenStatus"] == "valid"
+        assert refreshed["_auth_recovery"]["attempted"] is True
+        assert ["doctor"] in calls
+
+        def bot_run(_config, args):
+            if args == ["config", "default-as"]:
+                return FakeResult("default-as: user")
+            if args == ["config", "strict-mode"]:
+                return FakeResult("strict-mode: user")
+            return FakeResult(json.dumps({"identity": "bot", "tokenStatus": "valid"}))
+
+        lark_io.run_lark = bot_run
         try:
             require_user_identity({"lark_cli_path": "fake"})
         except RuntimeError as exc:
             assert "有效用户身份" in str(exc)
         else:
             raise AssertionError("bot identity must be rejected")
+
+        failed_calls = []
+
+        def failed_refresh_run(_config, args):
+            failed_calls.append(args)
+            if args == ["config", "default-as"]:
+                return FakeResult("default-as: user")
+            if args == ["config", "strict-mode"]:
+                return FakeResult("strict-mode: user")
+            if args == ["doctor"]:
+                return FakeResult(json.dumps({"ok": False}))
+            if args[:4] == ["auth", "login", "--json", "--no-wait"]:
+                return FakeResult(json.dumps({"verification_uri": "https://example.test/verify"}))
+            return FakeResult(json.dumps({
+                "identity": "user",
+                "tokenStatus": "needs_refresh",
+                "scope": "sheets:spreadsheet:read sheets:spreadsheet:write_only",
+            }))
+
+        lark_io.run_lark = failed_refresh_run
+        try:
+            ensure_user_identity({"lark_cli_path": "fake"})
+        except RuntimeError as exc:
+            assert "已自动发起设备登录" in str(exc)
+            assert "verification_uri" in str(exc)
+        else:
+            raise AssertionError("unrefreshed token must block real write")
+
+        login_calls = []
+
+        def missing_user_run(_config, args):
+            login_calls.append(args)
+            if args == ["config", "default-as"]:
+                return FakeResult("default-as: user")
+            if args == ["config", "strict-mode"]:
+                return FakeResult("strict-mode: user")
+            if args[:4] == ["auth", "login", "--json", "--no-wait"]:
+                return FakeResult(json.dumps({"verification_uri": "https://example.test/login"}))
+            return FakeResult(json.dumps({"identity": "", "tokenStatus": "missing"}))
+
+        lark_io.run_lark = missing_user_run
+        try:
+            ensure_user_identity({"lark_cli_path": "fake"})
+        except RuntimeError as exc:
+            assert "已自动发起设备登录" in str(exc)
+            assert "https://example.test/login" in str(exc)
+        else:
+            raise AssertionError("missing user login must start device auth and block write")
+        assert any(args[:4] == ["auth", "login", "--json", "--no-wait"] for args in login_calls)
     finally:
         lark_io.run_lark = original
 
@@ -658,13 +739,43 @@ def assert_check_env_prefers_opencli_route() -> None:
 
 def assert_check_env_reports_opencli_route_status() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
-    from check_env import check_opencli, version_ok
+    import check_env
 
-    assert version_ok("1.8.0") is True
-    assert version_ok("1.7.9") is False
-    missing = check_opencli(["/definitely/missing/opencli"], daemon_port=9)
+    assert check_env.version_ok("1.8.0") is True
+    assert check_env.version_ok("1.7.9") is False
+    missing = check_env.check_opencli(["/definitely/missing/opencli"], daemon_port=9)
     assert missing["status"] == "opencli_missing"
     assert missing["ok"] is False
+    original_read = check_env.read_opencli_daemon_status
+    original_run = check_env.run_opencli_command
+    original_check = check_env.check_invocation
+    calls = []
+
+    try:
+        check_env.check_invocation = lambda command: {
+            "command": command,
+            "path": command[0],
+            "resolved_path": command[0],
+            "exists": True,
+            "ok": True,
+            "stdout": "1.8.1",
+            "stderr": "",
+        }
+        check_env.read_opencli_daemon_status = lambda _port: {"ok": False, "error": "connection refused"}
+
+        def fake_run(command, args, timeout=20):
+            calls.append((command, args, timeout))
+            return {"ok": True, "returncode": 0, "stdout": "doctor ok", "stderr": ""}
+
+        check_env.run_opencli_command = fake_run
+        fixed = check_env.check_opencli(["opencli"], daemon_port=19825, auto_fix=True)
+        assert fixed["auto_fix_attempted"] is True
+        assert fixed["auto_fix_steps"][0]["step"] == "opencli_doctor"
+        assert calls and calls[0][1] == ["doctor"]
+    finally:
+        check_env.read_opencli_daemon_status = original_read
+        check_env.run_opencli_command = original_run
+        check_env.check_invocation = original_check
 
 
 def assert_config_resolves_platform_defaults() -> None:

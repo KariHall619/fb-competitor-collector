@@ -11,6 +11,7 @@ import urllib.request
 from typing import Any
 
 from config_loader import deep_get, load_config
+from lark_io import ensure_user_identity
 
 
 OPENCLI_MIN_MAJOR = 1
@@ -42,6 +43,33 @@ def check_invocation(command: list[str]) -> dict[str, Any]:
         return {"ok": False, "exists": False, "error": "empty command"}
     executable = check_command(command[0], command[1:] + ["--version"] if len(command) > 1 else ["--version"])
     return {"command": command, **executable}
+
+
+def run_opencli_command(command: list[str], args: list[str], *, timeout: int = 20) -> dict[str, Any]:
+    if not command:
+        return {"ok": False, "error": "empty command"}
+    try:
+        proc = subprocess.run(
+            [*command, *args],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "timeout": True,
+            "returncode": None,
+            "stdout": (exc.stdout or "").strip() if isinstance(exc.stdout, str) else "",
+            "stderr": (exc.stderr or "").strip() if isinstance(exc.stderr, str) else "",
+        }
+    return {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "stdout": proc.stdout.strip(),
+        "stderr": proc.stderr.strip(),
+    }
 
 
 def parse_version(text: str) -> tuple[int, int, int] | None:
@@ -133,7 +161,12 @@ def read_opencli_daemon_status(port: int) -> dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
-def check_opencli(opencli_command: list[str] | str, *, daemon_port: int = 19825) -> dict[str, Any]:
+def check_opencli(
+    opencli_command: list[str] | str,
+    *,
+    daemon_port: int = 19825,
+    auto_fix: bool = False,
+) -> dict[str, Any]:
     command_list = opencli_command if isinstance(opencli_command, list) else [opencli_command]
     command = check_invocation(command_list)
     if not command.get("exists"):
@@ -145,12 +178,23 @@ def check_opencli(opencli_command: list[str] | str, *, daemon_port: int = 19825)
             "message": "OpenCLI 未安装或不在 PATH；请安装 @jackwener/opencli 后重试。",
         }
 
+    recovery_steps: list[dict[str, Any]] = []
     version_text = str(command.get("stdout") or "")
     daemon_status = read_opencli_daemon_status(daemon_port)
     status_payload = daemon_status.get("status") if isinstance(daemon_status.get("status"), dict) else {}
     extension_connected = bool(status_payload.get("extensionConnected"))
     daemon_running = bool(daemon_status.get("ok") and status_payload.get("ok"))
     version_ready = version_ok(version_text)
+    if auto_fix and command.get("ok") and version_ready and not (daemon_running and extension_connected):
+        if not daemon_running:
+            recovery_steps.append({"step": "opencli_doctor", **run_opencli_command(command_list, ["doctor"])})
+        else:
+            recovery_steps.append({"step": "opencli_daemon_restart", **run_opencli_command(command_list, ["daemon", "restart"])})
+            recovery_steps.append({"step": "opencli_doctor", **run_opencli_command(command_list, ["doctor"])})
+        daemon_status = read_opencli_daemon_status(daemon_port)
+        status_payload = daemon_status.get("status") if isinstance(daemon_status.get("status"), dict) else {}
+        extension_connected = bool(status_payload.get("extensionConnected"))
+        daemon_running = bool(daemon_status.get("ok") and status_payload.get("ok"))
     ready = bool(command.get("ok") and version_ready and daemon_running and extension_connected)
     if ready:
         status = "ready"
@@ -174,6 +218,8 @@ def check_opencli(opencli_command: list[str] | str, *, daemon_port: int = 19825)
         "command": command,
         "daemon_port": daemon_port,
         "daemon_status": daemon_status,
+        "auto_fix_attempted": bool(auto_fix and recovery_steps),
+        "auto_fix_steps": recovery_steps,
     }
 
 
@@ -192,6 +238,8 @@ def recommended_capture_route(report: dict[str, Any]) -> dict[str, str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/settings.yaml")
+    parser.add_argument("--fix-auth", action="store_true", help="Auto-fix lark-cli user auth/config where possible.")
+    parser.add_argument("--fix-opencli", action="store_true", help="Auto-start/restart OpenCLI daemon where possible.")
     args = parser.parse_args()
     config = load_config(args.config)
     cli_path = config.get("lark_cli_path", "lark-cli")
@@ -209,8 +257,28 @@ def main() -> int:
         "opencli_browser_bridge": check_opencli(
             config.get("opencli_command") or [opencli_path],
             daemon_port=int(config.get("opencli_daemon_port", 19825) or 19825),
+            auto_fix=args.fix_opencli,
         ),
     }
+    if args.fix_auth:
+        try:
+            auth_payload = ensure_user_identity(config)
+            report["lark_auth_auto_fix"] = {
+                "ok": True,
+                "identity": auth_payload.get("identity"),
+                "tokenStatus": auth_payload.get("tokenStatus"),
+                "userName": auth_payload.get("userName"),
+                "recovery": auth_payload.get("_auth_recovery", {}),
+            }
+            report["lark_auth_status"] = run_cli(cli_path, ["auth", "status"])
+            report["lark_strict_mode"] = run_cli(cli_path, ["config", "strict-mode"])
+            report["lark_default_as"] = run_cli(cli_path, ["config", "default-as"])
+        except RuntimeError as exc:
+            report["lark_auth_auto_fix"] = {
+                "ok": False,
+                "stage": "auth_auto_fix",
+                "error": str(exc),
+            }
     auth_detail = auth_status_detail(report["lark_auth_status"])
     strict_mode = cli_config_value(report["lark_strict_mode"])
     default_as = cli_config_value(report["lark_default_as"])
@@ -220,14 +288,14 @@ def main() -> int:
     if auth_detail["sandbox_keychain_error"]:
         report["lark_identity_message"] = "当前进程读不到飞书 keychain；请在非沙盒环境运行 lark-cli auth status 验证用户身份"
     elif auth_detail["needs_refresh"]:
-        report["lark_identity_message"] = "飞书 CLI 是用户身份，但 token 需要刷新；请运行 lark-cli auth login 或执行一次可刷新 token 的飞书命令"
+        report["lark_identity_message"] = "飞书 CLI 是用户身份，但 token 需要刷新；真实写入路径会先自动刷新。也可运行 check_env.py --fix-auth 立即修复。"
     elif not report["lark_user_identity_forced"]:
-        report["lark_identity_message"] = "飞书 CLI 未强制用户身份；需要 default-as user 且 strict-mode user"
+        report["lark_identity_message"] = "飞书 CLI 未强制用户身份；真实写入路径会先自动设置 default-as user 和 strict-mode user。也可运行 check_env.py --fix-auth 立即修复。"
     else:
         report["lark_identity_message"] = "飞书 CLI 用户身份检查通过"
     report["recommended_capture_route"] = recommended_capture_route(report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    ok = bool(report["lark_cli"].get("ok"))
+    ok = bool(report["lark_cli"].get("ok")) and bool(report.get("lark_auth_auto_fix", {"ok": True}).get("ok"))
     return 0 if ok else 1
 
 

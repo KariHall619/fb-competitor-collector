@@ -26,6 +26,8 @@ OpenCLI Browser Bridge reads the user's normal Chrome tab where Facebook is alre
 
 If OpenCLI Browser Bridge is unavailable, stop and report the setup issue. Do not use another browser automation route for live Facebook capture.
 
+If only the OpenCLI daemon is down, run the project environment check with `--fix-opencli` or execute bounded OpenCLI doctor/daemon recovery before asking the user. If the daemon is running but the Chrome extension is not connected to the business Chrome profile, that remains a human/profile setup blocker.
+
 If the page shows a login prompt, visitor preview, or only one preview post, stop immediately with `human_intervention_required`. Tell the user to manually log in or confirm the Chrome profile, and do not keep scrolling, import, or sync.
 
 ## What Business Users Can Say
@@ -80,7 +82,7 @@ Run all commands from the skill root.
 | Verify FB exact timestamp capture | `scripts/opencli_verify_exact_time.mjs --run` from the OpenCLI Browser Bridge runtime |
 | Import existing JSON/CSV | `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --no-sync` |
 | Import and sync new rows | `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --sync` |
-| Fast partial capture/import | `python3 scripts/run_capture_pipeline.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --partial` |
+| Fast partial capture/import | `python3 scripts/run_capture_pipeline.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --partial` runs OpenCLI preflight/recovery before capture |
 | Resume enrichment queue | `python3 scripts/enrichment_worker.py --config config/settings.yaml --stages detail_time,lead_link,engagement,post_type,article_material --limit 50` |
 | Audit missing fields and queue refetch | `python3 scripts/audit_fields.py --config config/settings.yaml --fix` |
 | Filter local library | `python3 scripts/filter_posts.py --config config/settings.yaml ...` |
@@ -170,11 +172,12 @@ Configured source/output documents:
 
 Before real sync:
 
-1. Run `lark-cli auth login` if token is expired.
-2. Confirm `lark-cli auth status` reports `identity: user` and `tokenStatus: valid`.
-3. Require user identity. If status falls back to `bot`, stop and ask the user to re-login or set identity restrictions.
-4. Confirm `lark-cli config default-as user` and `lark-cli config strict-mode user`.
-5. Use dry-run first when possible.
+1. Run the built-in Feishu auth preflight before capture/import work if the command will do a real Feishu write.
+2. The preflight auto-sets `lark-cli config default-as user` and `lark-cli config strict-mode user`.
+3. If `auth status` reports `identity=user` but `tokenStatus=needs_refresh`, try CLI recovery first and re-check status.
+4. If silent recovery is impossible, auto-start `lark-cli auth login --json --no-wait` and report its verification payload; stop only after this automated attempt.
+5. If status falls back to `bot`, stop before writing and require user identity.
+6. Use dry-run first when possible.
 
 If Feishu sync fails, report the exact `lark-cli` error and keep local SQLite results intact.
 
@@ -221,5 +224,6 @@ The handoff checks still require:
 
 - OpenCLI Browser Bridge availability/profile setup
 - Facebook login in the same normal Chrome profile
-- Feishu `lark-cli auth status` with `identity=user` and `tokenStatus=valid`
+- Feishu write preflight with `identity=user` and `tokenStatus=valid`; write paths auto-recover `needs_refresh` before asking for manual login
+- OpenCLI daemon recovery via `check_env.py --fix-opencli`; extension/profile connection is still a human setup blocker if recovery cannot connect it
 - scheduler setup, if daily automation is enabled later
