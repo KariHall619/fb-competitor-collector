@@ -21,6 +21,7 @@ from store import (
     connect,
     enqueue_enrichment_tasks_for_posts,
     query_posts,
+    recover_stale_running_tasks_for_posts,
     task_counts_for_posts,
 )
 from sync_feishu import sync_posts
@@ -31,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ENRICHMENT_STAGES = "detail_time,lead_link,engagement,post_type,article_material"
 DEFAULT_EXPECTED_LABEL_LIMIT = 50
 HUMAN_INTERVENTION_STATUSES = {"human_intervention_required", "login_required", "visitor_preview", "facebook_tab_missing"}
+DEFAULT_RESUME_STALE_RUNNING_SECONDS = 15
 
 
 def run_command(command: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
@@ -626,6 +628,12 @@ def main() -> int:
     parser.add_argument("--max-resume-passes", type=int, default=2)
     parser.add_argument("--status-only", action="store_true", help="Report resumable status and optional dry-run sync without running enrichment.")
     parser.add_argument("--enrichment-limit", type=int, default=50)
+    parser.add_argument(
+        "--resume-stale-running-seconds",
+        type=int,
+        default=DEFAULT_RESUME_STALE_RUNNING_SECONDS,
+        help="Recover scoped running enrichment tasks older than this before resume passes.",
+    )
     parser.add_argument("--max-text", type=int, default=1500)
     parser.add_argument("--max-snapshots", type=int, default=20)
     parser.add_argument("--expected-post-count", type=int, default=0)
@@ -787,6 +795,11 @@ def main() -> int:
         account_type=args.account_type,
         dates=target_dates,
     )
+    recovered_running_tasks = recover_stale_running_tasks_for_posts(
+        conn,
+        posts,
+        stale_running_seconds=max(0, int(args.resume_stale_running_seconds or 0)),
+    )
     enqueue_enrichment_tasks_for_posts(conn, posts)
     worker_passes: list[dict[str, Any]] = []
     resume_passes = 0 if args.status_only else max(0, args.max_resume_passes)
@@ -833,6 +846,7 @@ def main() -> int:
         "account_type": args.account_type,
         "post_count": len(posts),
         "task_counts": task_counts_for_posts(conn, posts),
+        "recovered_running_tasks": recovered_running_tasks,
         "discover_coverage": discover_coverage_summary(discover_import),
         "feishu_auth_preflight": feishu_auth_preflight,
         "opencli_preflight": opencli_preflight,

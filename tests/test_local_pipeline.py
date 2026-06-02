@@ -2794,6 +2794,39 @@ def assert_stale_running_enrichment_tasks_are_recovered(tmp_path: Path) -> None:
     assert tasks[0]["status"] == "pending"
 
 
+def assert_enqueue_does_not_steal_active_running_tasks(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, pending_enrichment_tasks, upsert_post
+
+    conn = connect(tmp_path / "active-running.sqlite")
+    post = normalize_post(
+        {
+            "post_url": "https://www.facebook.com/example/posts/active-running",
+            "post_time_text": "1h",
+            "story_summary": "Visible homepage candidate.",
+            "crawled_at": "2026-06-03T10:00:00",
+        }
+    )
+    upsert_post(conn, post)
+    enqueue_enrichment_tasks_for_posts(conn, [post])
+    conn.execute(
+        """
+        UPDATE enrichment_tasks
+        SET status = 'running',
+            locked_at = CURRENT_TIMESTAMP,
+            next_run_at = NULL
+        WHERE stage = 'detail_time'
+        """
+    )
+    conn.commit()
+    enqueue_enrichment_tasks_for_posts(conn, [post])
+    running = conn.execute("SELECT status FROM enrichment_tasks WHERE stage = 'detail_time'").fetchone()
+    assert running["status"] == "running"
+    tasks = pending_enrichment_tasks(conn, stages=["detail_time"], limit=10, stale_running_seconds=3600)
+    assert tasks == []
+
+
 def assert_enrichment_worker_scopes_tasks_to_account(tmp_path: Path) -> None:
     config = tmp_path / "settings_worker_scope.yaml"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
@@ -2975,6 +3008,145 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
     assert data["enrichment_completion"]["open_task_count"] > 0
     assert any(item["reason"] == "pending_enrichment" for item in data["next_commands"])
     assert "--resume-only" in data["next_commands"][0]["command"]
+
+
+def assert_run_account_job_recovers_scoped_running_tasks(tmp_path: Path) -> None:
+    config = tmp_path / "settings_account_job_running.yaml"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    db_path = tmp_path / "account-job-running.sqlite"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {db_path}"),
+        encoding="utf-8",
+    )
+    sample = tmp_path / "account_job_running.json"
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Resume Page",
+                        "account_url": "https://www.facebook.com/resumepage",
+                        "post_url": "https://www.facebook.com/resumepage/posts/running",
+                        "relative_time_text": "1h",
+                        "story_summary": "Visible homepage candidate.",
+                        "crawled_at": "2026-06-03T10:00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
+    assert imported.returncode == 0, imported.stdout
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from store import connect
+
+    conn = connect(db_path)
+    conn.execute(
+        """
+        UPDATE enrichment_tasks
+        SET status = 'running',
+            locked_at = '2000-01-01T00:00:00',
+            next_run_at = NULL
+        WHERE stage = 'detail_time'
+        """
+    )
+    conn.commit()
+    job = run(
+        [
+            PYTHON,
+            "scripts/run_account_job.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/resumepage",
+            "--account-name",
+            "Resume Page",
+            "--target-date",
+            "260603",
+            "--resume-only",
+            "--status-only",
+            "--sync",
+            "--dry-run",
+            "--resume-stale-running-seconds",
+            "1",
+        ]
+    )
+    assert job.returncode == 0, job.stdout
+    data = json.loads(job.stdout)
+    assert data["recovered_running_tasks"] == 1
+    assert data["task_counts"].get("detail_time:pending") == 1
+    assert "detail_time:running" not in data["task_counts"]
+    assert data["enrichment_completion"]["open_task_count"] > 0
+
+
+def assert_run_account_job_does_not_recover_fresh_running_tasks(tmp_path: Path) -> None:
+    config = tmp_path / "settings_account_job_fresh_running.yaml"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    db_path = tmp_path / "account-job-fresh-running.sqlite"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {db_path}"),
+        encoding="utf-8",
+    )
+    sample = tmp_path / "account_job_fresh_running.json"
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Resume Page",
+                        "account_url": "https://www.facebook.com/resumepage",
+                        "post_url": "https://www.facebook.com/resumepage/posts/fresh-running",
+                        "relative_time_text": "1h",
+                        "story_summary": "Visible homepage candidate.",
+                        "crawled_at": "2026-06-03T10:00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
+    assert imported.returncode == 0, imported.stdout
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from store import connect
+
+    conn = connect(db_path)
+    conn.execute(
+        """
+        UPDATE enrichment_tasks
+        SET status = 'running',
+            locked_at = CURRENT_TIMESTAMP,
+            next_run_at = NULL
+        WHERE stage = 'detail_time'
+        """
+    )
+    conn.commit()
+    job = run(
+        [
+            PYTHON,
+            "scripts/run_account_job.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/resumepage",
+            "--account-name",
+            "Resume Page",
+            "--target-date",
+            "260603",
+            "--resume-only",
+            "--status-only",
+            "--sync",
+            "--dry-run",
+        ]
+    )
+    assert job.returncode == 0, job.stdout
+    data = json.loads(job.stdout)
+    assert data["recovered_running_tasks"] == 0
+    assert data["task_counts"].get("detail_time:running") == 1
+    assert data["run_status"] == "incomplete_pending_tasks"
 
 
 def assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path: Path) -> None:
@@ -3706,12 +3878,15 @@ def main() -> int:
         assert_partial_review_status_and_task_queue(tmp_path)
         assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path)
         assert_stale_running_enrichment_tasks_are_recovered(tmp_path)
+        assert_enqueue_does_not_steal_active_running_tasks(tmp_path)
         assert_enrichment_worker_scopes_tasks_to_account(tmp_path)
         assert_enrichment_worker_scope_includes_unknown_date_candidates(tmp_path)
         assert_enrichment_worker_article_cache_and_summary(tmp_path)
         assert_story_summary_audit_downgrades_invalid_rows(tmp_path)
         assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path)
         assert_run_account_job_resume_status_reports_incomplete(tmp_path)
+        assert_run_account_job_recovers_scoped_running_tasks(tmp_path)
+        assert_run_account_job_does_not_recover_fresh_running_tasks(tmp_path)
         assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path)
         assert_run_account_job_expected_coverage_marks_missing_posts()
         assert_run_account_job_blocks_auth_before_capture(tmp_path)

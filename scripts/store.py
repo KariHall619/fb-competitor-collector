@@ -372,10 +372,12 @@ def enqueue_enrichment_tasks(
                 post_url = excluded.post_url,
                 status = CASE
                     WHEN enrichment_tasks.status = 'done' THEN enrichment_tasks.status
+                    WHEN enrichment_tasks.status = 'running' THEN enrichment_tasks.status
                     ELSE 'pending'
                 END,
                 next_run_at = CASE
                     WHEN enrichment_tasks.status = 'done' THEN enrichment_tasks.next_run_at
+                    WHEN enrichment_tasks.status = 'running' THEN enrichment_tasks.next_run_at
                     ELSE CURRENT_TIMESTAMP
                 END,
                 updated_at = CURRENT_TIMESTAMP
@@ -442,9 +444,38 @@ def recover_stale_running_tasks(conn: sqlite3.Connection, *, stale_running_secon
             updated_at = CURRENT_TIMESTAMP
         WHERE status = 'running'
           AND locked_at IS NOT NULL
-          AND locked_at <= ?
+          AND replace(locked_at, ' ', 'T') <= ?
         """,
         (stale_cutoff,),
+    )
+    conn.commit()
+    return conn.total_changes - before
+
+
+def recover_stale_running_tasks_for_posts(
+    conn: sqlite3.Connection,
+    posts: list[dict[str, Any]],
+    *,
+    stale_running_seconds: int = 1800,
+) -> int:
+    scope_clause, params = task_scope_clause(posts)
+    if scope_clause == "1 = 0":
+        return 0
+    stale_cutoff = (datetime.utcnow() - timedelta(seconds=stale_running_seconds)).isoformat(timespec="seconds")
+    before = conn.total_changes
+    conn.execute(
+        f"""
+        UPDATE enrichment_tasks
+        SET status = 'pending',
+            locked_at = NULL,
+            next_run_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE {scope_clause}
+          AND status = 'running'
+          AND locked_at IS NOT NULL
+          AND replace(locked_at, ' ', 'T') <= ?
+        """,
+        [*params, stale_cutoff],
     )
     conn.commit()
     return conn.total_changes - before
@@ -493,8 +524,8 @@ def pending_enrichment_tasks_for_posts(
     limit: int = 50,
     stale_running_seconds: int = 1800,
 ) -> list[dict[str, Any]]:
-    recover_stale_running_tasks(conn, stale_running_seconds=stale_running_seconds)
     scope_clause, params = task_scope_clause(posts)
+    recover_stale_running_tasks_for_posts(conn, posts, stale_running_seconds=stale_running_seconds)
     clauses = ["status IN ('pending', 'failed')", "(next_run_at IS NULL OR next_run_at <= CURRENT_TIMESTAMP)"]
     clauses.append(scope_clause)
     if stages:
@@ -541,10 +572,10 @@ def mark_task_running(conn: sqlite3.Connection, task_id: int) -> None:
     conn.execute(
         """
         UPDATE enrichment_tasks
-        SET status = 'running', locked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        SET status = 'running', locked_at = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
-        (task_id,),
+        (utc_now(), task_id),
     )
     conn.commit()
 
