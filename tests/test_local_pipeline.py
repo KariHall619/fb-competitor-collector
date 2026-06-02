@@ -1779,6 +1779,9 @@ def assert_filter_sync_applies_output_quality_gate(tmp_path: Path) -> None:
     )
     assert filtered.returncode == 1, filtered.stdout
     assert "quality_gate" in filtered.stdout
+    assert '"run_status": "quality_gate"' in filtered.stdout
+    assert '"complete": false' in filtered.stdout
+    assert '"enrichment_completion"' in filtered.stdout
 
 
 def assert_quality_gate_requires_comment_lead_source(tmp_path: Path) -> None:

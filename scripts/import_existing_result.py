@@ -128,18 +128,20 @@ def main() -> int:
         sync_candidates = result.get("sync_candidates") or result["inserted"]
         partial_posts, skipped_posts = partial_for_review(sync_candidates)
         if not partial_posts:
+            sync_result = annotate_sync_result(
+                {
+                    "ok": False,
+                    "stage": "partial_gate",
+                    "message": "当前没有可供业务预览的 partial_review 记录。",
+                    "partial_review": 0,
+                    "skipped": len(skipped_posts),
+                },
+                enrichment_completion_summary(conn, sync_candidates),
+                ledger_mode=True,
+            )
             print(
                 json.dumps(
-                    {**import_summary,
-                        "feishu_sync": {
-                            "ok": False,
-                            "stage": "partial_gate",
-                            "message": "当前没有可供业务预览的 partial_review 记录。",
-                            "partial_review": 0,
-                            "skipped": len(skipped_posts),
-                            "enrichment_completion": enrichment_completion_summary(conn, sync_candidates),
-                        }
-                    },
+                    {**import_summary, "feishu_sync": sync_result},
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -171,18 +173,20 @@ def main() -> int:
         headers = configured_output_headers(config)
         output_posts, skipped_posts = audit_output_candidates(sync_candidates)
         if not output_posts:
+            sync_result = annotate_sync_result(
+                {
+                    "ok": False,
+                    "stage": "audit_output_gate",
+                    "message": "当前没有可写入正式表的候选记录。",
+                    "output_candidates": 0,
+                    "skipped": len(skipped_posts),
+                },
+                enrichment_completion_summary(conn, sync_candidates),
+                ledger_mode=True,
+            )
             print(
                 json.dumps(
-                    {**import_summary,
-                        "feishu_sync": {
-                            "ok": False,
-                            "stage": "audit_output_gate",
-                            "message": "当前没有可写入正式表的候选记录。",
-                            "output_candidates": 0,
-                            "skipped": len(skipped_posts),
-                            "enrichment_completion": enrichment_completion_summary(conn, sync_candidates),
-                        }
-                    },
+                    {**import_summary, "feishu_sync": sync_result},
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -213,17 +217,19 @@ def main() -> int:
         ready_posts = [post for post in sync_candidates if post.get("output_status") == "ready_for_output"]
         quality_errors = output_quality_errors(ready_posts)
         if quality_errors:
+            sync_result = annotate_sync_result(
+                {
+                    "ok": False,
+                    "stage": "quality_gate",
+                    "message": "同步已停止：存在完全缺失发帖时间、未生成文章来源中文概要，或缺少评论/回复引流落地链接的记录。",
+                    "errors": quality_errors,
+                },
+                enrichment_completion_summary(conn, sync_candidates),
+                ledger_mode=False,
+            )
             print(
                 json.dumps(
-                    {**import_summary,
-                        "feishu_sync": {
-                            "ok": False,
-                            "stage": "quality_gate",
-                            "message": "同步已停止：存在完全缺失发帖时间、未生成文章来源中文概要，或缺少评论/回复引流落地链接的记录。",
-                            "errors": quality_errors,
-                            "enrichment_completion": enrichment_completion_summary(conn, sync_candidates),
-                        }
-                    },
+                    {**import_summary, "feishu_sync": sync_result},
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -231,18 +237,20 @@ def main() -> int:
             return 1
         skipped = len(sync_candidates) - len(ready_posts)
         if not ready_posts:
+            sync_result = annotate_sync_result(
+                {
+                    "ok": False,
+                    "stage": "quality_gate",
+                    "message": "同步已停止：当前没有字段完整、可写最终表的记录；候选已保存在本地库，需继续补齐发帖时间、摘要和评论/回复引流落地链接。",
+                    "ready_for_output": 0,
+                    "needs_enrichment_skipped": skipped,
+                },
+                enrichment_completion_summary(conn, sync_candidates),
+                ledger_mode=False,
+            )
             print(
                 json.dumps(
-                    {**import_summary,
-                        "feishu_sync": {
-                            "ok": False,
-                            "stage": "quality_gate",
-                            "message": "同步已停止：当前没有字段完整、可写最终表的记录；候选已保存在本地库，需继续补齐发帖时间、摘要和评论/回复引流落地链接。",
-                            "ready_for_output": 0,
-                            "needs_enrichment_skipped": skipped,
-                            "enrichment_completion": enrichment_completion_summary(conn, sync_candidates),
-                        }
-                    },
+                    {**import_summary, "feishu_sync": sync_result},
                     ensure_ascii=False,
                     indent=2,
                 )

@@ -97,18 +97,20 @@ def main() -> int:
         headers = configured_output_headers(config)
         partial_posts, skipped_posts = partial_for_review(posts)
         if not partial_posts:
+            result = annotate_sync_result(
+                {
+                    "ok": False,
+                    "stage": "partial_gate",
+                    "message": "筛选结果中没有可供业务预览的 partial_review 记录。",
+                    "partial_review": 0,
+                    "skipped": len(skipped_posts),
+                },
+                enrichment_completion_summary(conn, posts),
+                ledger_mode=True,
+            )
             print(
                 json.dumps(
-                    {
-                        "feishu_sync": {
-                            "ok": False,
-                            "stage": "partial_gate",
-                            "message": "筛选结果中没有可供业务预览的 partial_review 记录。",
-                            "partial_review": 0,
-                            "skipped": len(skipped_posts),
-                            "enrichment_completion": enrichment_completion_summary(conn, posts),
-                        }
-                    },
+                    {"feishu_sync": result},
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -138,18 +140,20 @@ def main() -> int:
         headers = configured_output_headers(config)
         output_posts, skipped_posts = audit_output_candidates(posts)
         if not output_posts:
+            result = annotate_sync_result(
+                {
+                    "ok": False,
+                    "stage": "audit_output_gate",
+                    "message": "筛选结果中没有可写入正式表的候选记录。",
+                    "output_candidates": 0,
+                    "skipped": len(skipped_posts),
+                },
+                enrichment_completion_summary(conn, posts),
+                ledger_mode=True,
+            )
             print(
                 json.dumps(
-                    {
-                        "feishu_sync": {
-                            "ok": False,
-                            "stage": "audit_output_gate",
-                            "message": "筛选结果中没有可写入正式表的候选记录。",
-                            "output_candidates": 0,
-                            "skipped": len(skipped_posts),
-                            "enrichment_completion": enrichment_completion_summary(conn, posts),
-                        }
-                    },
+                    {"feishu_sync": result},
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -180,34 +184,38 @@ def main() -> int:
         ready_posts, skipped_posts = ready_for_output(posts)
         errors = output_quality_errors(ready_posts)
         if errors:
+            result = annotate_sync_result(
+                {
+                    "ok": False,
+                    "stage": "quality_gate",
+                    "errors": errors,
+                },
+                enrichment_completion_summary(conn, posts),
+                ledger_mode=False,
+            )
             print(
                 json.dumps(
-                    {
-                        "feishu_sync": {
-                            "ok": False,
-                            "stage": "quality_gate",
-                            "errors": errors,
-                            "enrichment_completion": enrichment_completion_summary(conn, posts),
-                        }
-                    },
+                    {"feishu_sync": result},
                     ensure_ascii=False,
                     indent=2,
                 )
             )
             return 1
         if not ready_posts:
+            result = annotate_sync_result(
+                {
+                    "ok": False,
+                    "stage": "quality_gate",
+                    "message": "筛选结果中没有字段完整、可写最终表的记录。",
+                    "ready_for_output": 0,
+                    "needs_enrichment_skipped": len(skipped_posts),
+                },
+                enrichment_completion_summary(conn, posts),
+                ledger_mode=False,
+            )
             print(
                 json.dumps(
-                    {
-                        "feishu_sync": {
-                            "ok": False,
-                            "stage": "quality_gate",
-                            "message": "筛选结果中没有字段完整、可写最终表的记录。",
-                            "ready_for_output": 0,
-                            "needs_enrichment_skipped": len(skipped_posts),
-                            "enrichment_completion": enrichment_completion_summary(conn, posts),
-                        }
-                    },
+                    {"feishu_sync": result},
                     ensure_ascii=False,
                     indent=2,
                 )
