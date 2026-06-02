@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -781,7 +782,34 @@ def main() -> int:
     timezone_name = str(config.get("timezone") or "Asia/Shanghai")
     target_dates = [normalize_date_text(args.target_date)] if args.target_date else dates_for_last_hours(args.last_hours, timezone_name=timezone_name)
 
-    conn = connect(config.get("database_path", "data/posts.sqlite"))
+    database_path = config.get("database_path", "data/posts.sqlite")
+    try:
+        conn = connect(database_path)
+    except sqlite3.Error as exc:
+        run_status = "import_failed"
+        partial_result = {
+            "ok": False,
+            "stage": "sqlite_connect",
+            "run_status": run_status,
+            "complete": False,
+            "message": "本地内容库不可打开；已在 Facebook 采集、补抓和飞书写入前停止。",
+            "error": str(exc),
+            "database_path": str(database_path),
+            "target_dates": target_dates,
+            "account_url": args.account_url,
+            "account_name": args.account_name,
+            "account_type": args.account_type,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+        }
+        partial_result["next_commands"] = next_commands_for_status(
+            args=args,
+            target_dates=target_dates,
+            run_status=run_status,
+            completion={},
+            discover_coverage={"source": "not_run", "complete": False, "incomplete": True, "reasons": ["sqlite_connect"]},
+        )
+        print(json.dumps(partial_result, ensure_ascii=False, indent=2))
+        return 1
     feishu_auth_preflight = {"ok": True, "skipped": True}
     if args.sync and not args.dry_run:
         current_posts = scoped_posts(

@@ -4966,8 +4966,8 @@ def assert_run_account_job_structures_prepare_and_import_failures(tmp_path: Path
         prepare_opencli.chmod(0o755)
         prepare_bin.mkdir()
         (prepare_bin / "node").write_text(
-            """#!/usr/bin/env python3
-import json
+            f"#!{PYTHON}\n"
+            + """import json
 payload = {
   "ok": True,
   "post_count": 1,
@@ -4989,8 +4989,8 @@ print(json.dumps(payload, ensure_ascii=False))
         )
         (prepare_bin / "node").chmod(0o755)
         (prepare_bin / "python3").write_text(
-            """#!/usr/bin/env python3
-import json
+            f"#!{PYTHON}\n"
+            + """import json
 import os
 import subprocess
 import sys
@@ -5040,18 +5040,19 @@ sys.exit(completed.returncode)
         import_config = tmp_path / "settings_account_import_fail.yaml"
         import_bin = tmp_path / "bin-account-import-fail"
         import_opencli = tmp_path / "fake-opencli-account-import-fail"
+        import_db_path = tmp_path / "account-import-fail.sqlite"
         shutil.copy(ROOT / "config" / "settings.yaml.example", import_config)
         text = import_config.read_text(encoding="utf-8")
         text = text.replace("opencli_path: auto", f"opencli_path: {import_opencli}")
         text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
-        text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path}")
+        text = text.replace("database_path: data/posts.sqlite", f"database_path: {import_db_path}")
         import_config.write_text(text, encoding="utf-8")
         import_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
         import_opencli.chmod(0o755)
         import_bin.mkdir()
         (import_bin / "node").write_text(
-            """#!/usr/bin/env python3
-import json
+            f"#!{PYTHON}\n"
+            + """import json
 payload = {
   "ok": True,
   "post_count": 1,
@@ -5072,8 +5073,32 @@ print(json.dumps(payload, ensure_ascii=False))
             encoding="utf-8",
         )
         (import_bin / "node").chmod(0o755)
+        (import_bin / "python3").write_text(
+            f"#!{PYTHON}\n"
+            + """import json
+import os
+import subprocess
+import sys
+if len(sys.argv) > 1 and sys.argv[1] == "scripts/import_existing_result.py":
+    print(json.dumps({
+        "ok": False,
+        "stage": "sqlite_write",
+        "run_status": "import_failed",
+        "complete": False,
+        "message": "本地内容库不可写，已停止导入。",
+        "error": "simulated sqlite write failure",
+    }, ensure_ascii=False))
+    sys.exit(1)
+real_python = os.environ["REAL_PYTHON"]
+completed = subprocess.run([real_python, *sys.argv[1:]], text=True)
+sys.exit(completed.returncode)
+""",
+            encoding="utf-8",
+        )
+        (import_bin / "python3").chmod(0o755)
         import_env = dict(os.environ)
         import_env["PATH"] = f"{import_bin}:{import_env.get('PATH', '')}"
+        import_env["REAL_PYTHON"] = PYTHON
 
         import_result = run(
             [
@@ -5100,6 +5125,38 @@ print(json.dumps(payload, ensure_ascii=False))
         assert import_data["discover_import"]["import"]["run_status"] == "import_failed"
         assert any(item["reason"] == "import_failed" for item in import_data["next_commands"])
         assert "--resume-only" not in import_data["next_commands"][0]["command"]
+
+        sqlite_config = tmp_path / "settings_account_sqlite_connect_fail.yaml"
+        sqlite_opencli = tmp_path / "fake-opencli-sqlite-connect-fail"
+        shutil.copy(ROOT / "config" / "settings.yaml.example", sqlite_config)
+        text = sqlite_config.read_text(encoding="utf-8")
+        text = text.replace("opencli_path: auto", f"opencli_path: {sqlite_opencli}")
+        text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
+        text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path}")
+        sqlite_config.write_text(text, encoding="utf-8")
+        sqlite_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
+        sqlite_opencli.chmod(0o755)
+        sqlite_result = run(
+            [
+                PYTHON,
+                "scripts/run_account_job.py",
+                "--config",
+                str(sqlite_config),
+                "--account-url",
+                "https://www.facebook.com/accountsqlitefail",
+                "--account-name",
+                "Account SQLite Fail",
+                "--target-date",
+                "260603",
+                "--dry-run",
+            ]
+        )
+        assert sqlite_result.returncode == 1, sqlite_result.stdout
+        sqlite_data = json.loads(sqlite_result.stdout)
+        assert sqlite_data["stage"] == "sqlite_connect"
+        assert sqlite_data["run_status"] == "import_failed"
+        assert sqlite_data["complete"] is False
+        assert any(item["reason"] == "import_failed" for item in sqlite_data["next_commands"])
     finally:
         opencli_status.shutdown()
         opencli_status.server_close()
