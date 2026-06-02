@@ -656,6 +656,22 @@ def next_commands_for_status(
                 "command": command_text(resume_command(base, primary_date, force_recover_running=True)),
             }
         )
+    if run_status == "quality_threshold_failed":
+        command = resume_command(base, primary_date, force_recover_running=True)
+        command.extend(
+            [
+                "--status-only",
+                "--max-resume-passes",
+                str(max(int(args.max_resume_passes or 0), 2)),
+            ]
+        )
+        commands.append(
+            {
+                "reason": "quality_threshold_failed",
+                "description": "质量阈值未达标；先按 quality_summary.top_field_gaps 和 quality_thresholds.failures 判断覆盖或补抓缺口，再续跑同账号状态检查。",
+                "command": command_text(command),
+            }
+        )
     if run_status == "blocked_opencli":
         commands.append(
             {
@@ -760,12 +776,100 @@ def _sync_skipped(sync_result: dict[str, Any]) -> bool:
     return str(sync_result.get("stage") or "") == "sync_disabled" or str(sync_result.get("run_status") or "") == "not_synced"
 
 
+def _rate_threshold(value: Any) -> float:
+    try:
+        number = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return round(max(0.0, min(1.0, number)), 4)
+
+
+def quality_thresholds_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "require_coverage_complete": bool(getattr(args, "require_coverage_complete", False)),
+        "min_ledger_usable_rate": _rate_threshold(getattr(args, "min_ledger_usable_rate", 0.0)),
+        "min_final_usable_rate": _rate_threshold(getattr(args, "min_final_usable_rate", 0.0)),
+        "min_completion_rate": _rate_threshold(getattr(args, "min_completion_rate", 0.0)),
+        "min_expected_post_coverage_rate": _rate_threshold(getattr(args, "min_expected_post_coverage_rate", 0.0)),
+        "min_expected_label_coverage_rate": _rate_threshold(getattr(args, "min_expected_label_coverage_rate", 0.0)),
+    }
+
+
+def evaluate_quality_thresholds(summary: dict[str, Any], thresholds: dict[str, Any] | None = None) -> dict[str, Any]:
+    thresholds = thresholds or {}
+    normalized = {
+        "require_coverage_complete": bool(thresholds.get("require_coverage_complete", False)),
+        "min_ledger_usable_rate": _rate_threshold(thresholds.get("min_ledger_usable_rate", 0.0)),
+        "min_final_usable_rate": _rate_threshold(thresholds.get("min_final_usable_rate", 0.0)),
+        "min_completion_rate": _rate_threshold(thresholds.get("min_completion_rate", 0.0)),
+        "min_expected_post_coverage_rate": _rate_threshold(thresholds.get("min_expected_post_coverage_rate", 0.0)),
+        "min_expected_label_coverage_rate": _rate_threshold(thresholds.get("min_expected_label_coverage_rate", 0.0)),
+    }
+    enabled = normalized["require_coverage_complete"] or any(
+        normalized[key] > 0.0
+        for key in (
+            "min_ledger_usable_rate",
+            "min_final_usable_rate",
+            "min_completion_rate",
+            "min_expected_post_coverage_rate",
+            "min_expected_label_coverage_rate",
+        )
+    )
+    failures: list[dict[str, Any]] = []
+    if normalized["require_coverage_complete"] and summary.get("coverage_health") != "complete":
+        failures.append(
+            {
+                "metric": "coverage_health",
+                "actual": summary.get("coverage_health"),
+                "required": "complete",
+                "message": "覆盖未达完整要求；需要从账号主页顶部重跑或补足期望覆盖检查。",
+            }
+        )
+    rate_checks = [
+        ("ledger_usable_rate", "min_ledger_usable_rate", "台账可见率低于阈值。"),
+        ("final_usable_rate", "min_final_usable_rate", "最终完整可用率低于阈值。"),
+        ("completion_rate", "min_completion_rate", "补抓完成率低于阈值。"),
+        ("expected_post_coverage_rate", "min_expected_post_coverage_rate", "期望帖子数量覆盖率低于阈值。"),
+        ("expected_label_coverage_rate", "min_expected_label_coverage_rate", "期望时间标签覆盖率低于阈值。"),
+    ]
+    for metric, threshold_key, message in rate_checks:
+        threshold = normalized[threshold_key]
+        if threshold <= 0.0:
+            continue
+        actual = _float_metric(summary.get(metric))
+        if actual < threshold:
+            failures.append(
+                {
+                    "metric": metric,
+                    "actual": actual,
+                    "required_min": threshold,
+                    "message": message,
+                }
+            )
+    actions: list[str] = []
+    failed_metrics = {failure.get("metric") for failure in failures}
+    if {"coverage_health", "expected_post_coverage_rate", "expected_label_coverage_rate"}.intersection(failed_metrics):
+        actions.append("覆盖率未达标：从账号主页顶部重跑采集，必要时提高 --max-snapshots，并保留 expected count/labels。")
+    if {"completion_rate", "final_usable_rate"}.intersection(failed_metrics):
+        actions.append("可用率未达标：继续运行同账号补抓队列，优先处理 quality_summary.top_field_gaps。")
+    if "ledger_usable_rate" in failed_metrics:
+        actions.append("台账可见率未达标：检查候选是否缺 Facebook 帖子链接或账号信息，修复后重新导入/同步。")
+    return {
+        "enabled": enabled,
+        "ok": not failures,
+        "thresholds": normalized,
+        "failures": failures,
+        "next_actions": actions[:4],
+    }
+
+
 def account_job_quality_summary(
     *,
     run_status: str,
     discover_coverage: dict[str, Any] | None,
     completion: dict[str, Any] | None,
     sync_result: dict[str, Any] | None = None,
+    thresholds: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the small business-facing quality summary for an account job."""
 
@@ -782,6 +886,7 @@ def account_job_quality_summary(
             if str(reason)
         }
     )
+    expected_coverage = discover_coverage.get("expected") if isinstance(discover_coverage.get("expected"), dict) else {}
     sync_enabled = bool(sync_result) and not _sync_skipped(sync_result)
     next_actions: list[str] = []
     for source in (sync_result.get("next_actions"), completion.get("next_actions")):
@@ -792,7 +897,7 @@ def account_job_quality_summary(
             if text and text not in next_actions:
                 next_actions.append(text)
 
-    return {
+    summary = {
         "run_status": run_status,
         "complete": run_status == "complete",
         "coverage_source": coverage_source,
@@ -803,6 +908,9 @@ def account_job_quality_summary(
         "coverage_stop_reason": str(discover_coverage.get("stop_reason") or ""),
         "discovered_post_count": _int_metric(discover_coverage.get("post_count")),
         "raw_candidate_count": _int_metric(discover_coverage.get("raw_candidate_count")),
+        "expected_coverage_enabled": bool(expected_coverage.get("enabled")),
+        "expected_post_coverage_rate": _float_metric(expected_coverage.get("post_count_coverage_rate")),
+        "expected_label_coverage_rate": _float_metric(expected_coverage.get("label_coverage_rate")),
         "post_count": _int_metric(completion.get("post_count")),
         "ledger_candidate_count": _int_metric(completion.get("ledger_candidate_count")),
         "ledger_usable_rate": _float_metric(completion.get("ledger_usable_rate")),
@@ -829,6 +937,13 @@ def account_job_quality_summary(
         },
         "next_actions": next_actions[:4],
     }
+    threshold_result = evaluate_quality_thresholds(summary, thresholds)
+    summary["quality_thresholds"] = threshold_result
+    for action in threshold_result.get("next_actions") or []:
+        if action not in next_actions:
+            next_actions.append(action)
+    summary["next_actions"] = next_actions[:4]
+    return summary
 
 
 def main() -> int:
@@ -867,6 +982,26 @@ def main() -> int:
         action="store_true",
         help="Return a nonzero exit code when run_status is not complete, even if ledger sync itself succeeded.",
     )
+    parser.add_argument(
+        "--require-coverage-complete",
+        action="store_true",
+        help="Fail the account job when homepage/expected coverage is not complete.",
+    )
+    parser.add_argument("--min-ledger-usable-rate", type=float, default=0.0, help="Fail when ledger candidate rate is below this 0-1 threshold.")
+    parser.add_argument("--min-final-usable-rate", type=float, default=0.0, help="Fail when strict final usable rate is below this 0-1 threshold.")
+    parser.add_argument("--min-completion-rate", type=float, default=0.0, help="Fail when enrichment completion rate is below this 0-1 threshold.")
+    parser.add_argument(
+        "--min-expected-post-coverage-rate",
+        type=float,
+        default=0.0,
+        help="Fail when expected-post-count coverage is below this 0-1 threshold.",
+    )
+    parser.add_argument(
+        "--min-expected-label-coverage-rate",
+        type=float,
+        default=0.0,
+        help="Fail when expected-label coverage is below this 0-1 threshold.",
+    )
     args = parser.parse_args()
 
     started = time.monotonic()
@@ -898,6 +1033,7 @@ def main() -> int:
             discover_coverage={"source": "not_run", "complete": False, "incomplete": True, "reasons": ["sqlite_connect"]},
             completion={},
             sync_result={},
+            thresholds=quality_thresholds_from_args(args),
         )
         partial_result["next_commands"] = next_commands_for_status(
             args=args,
@@ -957,6 +1093,7 @@ def main() -> int:
                     "run_status": "blocked_auth",
                     "next_actions": ["完成飞书用户授权后，重新运行同一账号作业。"],
                 },
+                thresholds=quality_thresholds_from_args(args),
             )
             partial_result["next_commands"] = next_commands_for_status(
                 args=args,
@@ -1006,6 +1143,7 @@ def main() -> int:
                 discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
                 completion=completion,
                 sync_result={},
+                thresholds=quality_thresholds_from_args(args),
             )
             partial_result["next_commands"] = next_commands_for_status(
                 args=args,
@@ -1058,6 +1196,7 @@ def main() -> int:
                 discover_coverage=discover_coverage,
                 completion=completion,
                 sync_result={},
+                thresholds=quality_thresholds_from_args(args),
             )
             partial_result["next_commands"] = next_commands_for_status(
                 args=args,
@@ -1119,6 +1258,7 @@ def main() -> int:
                 discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
                 completion=completion_before_worker,
                 sync_result={},
+                thresholds=quality_thresholds_from_args(args),
             )
             partial_result["next_commands"] = next_commands_for_status(
                 args=args,
@@ -1189,17 +1329,34 @@ def main() -> int:
         discover_coverage=result["discover_coverage"],
         completion=completion,
         sync_result=sync_result,
+        thresholds=quality_thresholds_from_args(args),
     )
+    if not result["quality_summary"]["quality_thresholds"]["ok"]:
+        result["complete"] = False
+        result["quality_threshold_failed"] = True
+        result["quality_threshold_failures"] = result["quality_summary"]["quality_thresholds"]["failures"]
+        if run_status == "complete":
+            result["run_status"] = "quality_threshold_failed"
+            result["quality_summary"]["run_status"] = "quality_threshold_failed"
+            result["quality_summary"]["complete"] = False
     result["next_commands"] = next_commands_for_status(
         args=args,
         target_dates=target_dates,
-        run_status=run_status,
+        run_status=result["run_status"],
         completion=completion,
         discover_coverage=result["discover_coverage"],
     )
+    for action in result["quality_summary"]["quality_thresholds"].get("next_actions") or []:
+        if action and all(action != item.get("description") for item in result["next_commands"]):
+            result["next_commands"].append({"reason": "quality_threshold_failed", "description": action, "command": result["next_commands"][0]["command"] if result["next_commands"] else ""})
+    result["next_commands"] = result["next_commands"][:4]
     if args.fail_on_incomplete and run_status != "complete" and sync_result.get("ok", True):
         result["exit_status_reason"] = "incomplete_run_status"
+    if result.get("quality_threshold_failed") and sync_result.get("ok", True):
+        result["exit_status_reason"] = "quality_threshold_failed"
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if result.get("quality_threshold_failed"):
+        return 2
     if args.fail_on_incomplete and run_status != "complete":
         return 2
     return 0 if sync_result.get("ok", True) else 1

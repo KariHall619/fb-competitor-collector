@@ -4313,6 +4313,109 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
     assert strict_data["exit_status_reason"] == "incomplete_run_status"
 
 
+def assert_run_account_job_quality_thresholds_fail_low_usable_rate(tmp_path: Path) -> None:
+    config = tmp_path / "settings_account_job_threshold.yaml"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'account-job-threshold.sqlite'}"),
+        encoding="utf-8",
+    )
+    sample = tmp_path / "account_job_threshold.json"
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Threshold Page",
+                        "account_url": "https://www.facebook.com/thresholdpage",
+                        "post_url": "https://www.facebook.com/thresholdpage/posts/incomplete",
+                        "relative_time_text": "1h",
+                        "story_summary": "Visible homepage candidate.",
+                        "crawled_at": "2026-06-02T12:00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
+    assert imported.returncode == 0, imported.stdout
+    job = run(
+        [
+            PYTHON,
+            "scripts/run_account_job.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/thresholdpage",
+            "--account-name",
+            "Threshold Page",
+            "--target-date",
+            "260602",
+            "--resume-only",
+            "--status-only",
+            "--sync",
+            "--dry-run",
+            "--min-ledger-usable-rate",
+            "1",
+            "--min-final-usable-rate",
+            "0.9",
+        ]
+    )
+    assert job.returncode == 2, job.stdout
+    data = json.loads(job.stdout)
+    assert data["run_status"] == "incomplete_pending_tasks"
+    assert data["complete"] is False
+    assert data["quality_threshold_failed"] is True
+    assert data["exit_status_reason"] == "quality_threshold_failed"
+    thresholds = data["quality_summary"]["quality_thresholds"]
+    assert thresholds["enabled"] is True
+    assert thresholds["ok"] is False
+    assert thresholds["thresholds"]["min_ledger_usable_rate"] == 1.0
+    assert thresholds["thresholds"]["min_final_usable_rate"] == 0.9
+    assert data["quality_summary"]["ledger_usable_rate"] == 1.0
+    assert data["quality_summary"]["final_usable_rate"] == 0.0
+    assert [failure["metric"] for failure in thresholds["failures"]] == ["final_usable_rate"]
+    assert any(item["reason"] == "quality_threshold_failed" for item in data["next_commands"])
+
+
+def assert_run_account_job_quality_threshold_failure_has_recovery_command() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/thresholdpage",
+            "account_name": "Threshold Page",
+            "account_type": "competitor",
+            "sync": True,
+            "dry_run": True,
+            "strict_ready_only": False,
+            "resume_only": False,
+            "max_snapshots": 32,
+            "min_snapshots": 6,
+            "max_resume_passes": 2,
+            "expected_post_count": 0,
+            "expected_labels": "",
+        },
+    )()
+    commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260602"],
+        run_status="quality_threshold_failed",
+        completion={"post_count": 3},
+        discover_coverage={"source": "discover", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert commands[0]["reason"] == "quality_threshold_failed"
+    assert "--resume-only" in commands[0]["command"]
+    assert "--status-only" in commands[0]["command"]
+    assert "--force-recover-running" in commands[0]["command"]
+
+
 def assert_run_account_job_resume_blocks_opencli_before_detail_tasks(tmp_path: Path) -> None:
     config = tmp_path / "settings_account_job_resume_opencli.yaml"
     fake_opencli = tmp_path / "fake-opencli-resume"
@@ -5877,6 +5980,12 @@ def assert_run_account_job_promotes_discover_coverage_status() -> None:
             "top_field_gaps": [{"reason": "exact_time", "label": "精确时间", "count": 12, "stage": "detail_time"}],
         },
         sync_result={"ok": True, "run_status": "synced_ledger_incomplete", "dry_run": True, "output_candidates": 12},
+        thresholds={
+            "require_coverage_complete": True,
+            "min_ledger_usable_rate": 1.0,
+            "min_final_usable_rate": 0.5,
+            "min_completion_rate": 0.5,
+        },
     )
     assert quality["run_status"] == "coverage_incomplete"
     assert quality["coverage_health"] == "incomplete"
@@ -5889,6 +5998,16 @@ def assert_run_account_job_promotes_discover_coverage_status() -> None:
     assert quality["top_field_gaps"][0]["reason"] == "exact_time"
     assert quality["feishu_sync"]["enabled"] is True
     assert quality["feishu_sync"]["output_candidates"] == 12
+    threshold_result = quality["quality_thresholds"]
+    assert threshold_result["enabled"] is True
+    assert threshold_result["ok"] is False
+    assert [failure["metric"] for failure in threshold_result["failures"]] == [
+        "coverage_health",
+        "final_usable_rate",
+        "completion_rate",
+    ]
+    assert any("覆盖率未达标" in action for action in threshold_result["next_actions"])
+    assert any("可用率未达标" in action for action in threshold_result["next_actions"])
 
 
 def assert_run_account_job_promotes_human_intervention_status() -> None:
@@ -6481,6 +6600,8 @@ def main() -> int:
         assert_story_summary_audit_downgrades_invalid_rows(tmp_path)
         assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path)
         assert_run_account_job_resume_status_reports_incomplete(tmp_path)
+        assert_run_account_job_quality_thresholds_fail_low_usable_rate(tmp_path)
+        assert_run_account_job_quality_threshold_failure_has_recovery_command()
         assert_run_account_job_resume_blocks_opencli_before_detail_tasks(tmp_path)
         assert_run_account_job_recovers_scoped_running_tasks(tmp_path)
         assert_run_account_job_does_not_recover_fresh_running_tasks(tmp_path)
