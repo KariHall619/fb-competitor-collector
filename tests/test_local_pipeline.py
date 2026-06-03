@@ -10232,6 +10232,171 @@ sys.exit(0)
     assert "--force-recover-running" in single_resume
 
 
+def assert_run_accounts_job_worker_failed_preserves_batch_retry(tmp_path: Path) -> None:
+    config = tmp_path / "settings_batch_worker_failed.yaml"
+    fake_lark = tmp_path / "fake-lark-cli-worker-failed"
+    fake_python = tmp_path / "fake-python-worker-failed"
+    calls_file = tmp_path / "batch-worker-failed-calls.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch_worker_failed.sqlite'}")
+    text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/usr/bin/env python3
+import json
+payload = {
+  "data": {
+    "valueRange": {
+      "values": [
+        ["主页名称", "竞品fb账户", "内部FB账户"],
+        ["Worker Broken Page", "https://www.facebook.com/workerbrokenchild", ""],
+        ["Good Page", "https://www.facebook.com/goodworkerchild", ""]
+      ]
+    }
+  }
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    fake_python.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+account_url = sys.argv[sys.argv.index("--account-url") + 1]
+account_name = sys.argv[sys.argv.index("--account-name") + 1]
+account_type = sys.argv[sys.argv.index("--account-type") + 1]
+config_path = sys.argv[sys.argv.index("--config") + 1]
+if "workerbrokenchild" in account_url:
+    resume_command = "python3 scripts/run_account_job.py --config " + config_path + " --account-url " + account_url + " --account-name '" + account_name + "' --account-type " + account_type + " --target-date 260603 --resume-only --force-recover-running --sync --dry-run --fail-on-incomplete --max-resume-passes 9 --enrichment-limit 25"
+    payload = {{
+        "ok": False,
+        "run_status": "worker_failed",
+        "complete": False,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 4,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 4,
+            "final_usable_count": 1,
+            "final_usable_rate": 0.25,
+            "open_task_count": 3,
+            "open_task_stage_counts": {{"post_type": 2, "summary": 1}},
+            "missing_stage_counts": {{"post_type": 2, "summary": 1}},
+            "top_field_gaps": [
+                {{"reason": "post_type", "stage": "post_type", "count": 2}},
+                {{"reason": "article_summary", "stage": "summary", "count": 1}}
+            ]
+        }},
+        "next_commands": [
+            {{
+                "reason": "worker_failed",
+                "description": "resume one account after worker fix",
+                "command": resume_command
+            }}
+        ]
+    }}
+    print(json.dumps(payload, ensure_ascii=False))
+    sys.exit(1)
+payload = {{
+    "ok": True,
+    "run_status": "complete",
+    "complete": True,
+    "account_url": account_url,
+    "account_name": account_name,
+    "account_type": account_type,
+    "post_count": 2,
+    "quality_summary": {{
+        "coverage_health": "complete",
+        "ledger_candidate_count": 2,
+        "final_usable_count": 2,
+        "final_usable_rate": 1.0,
+        "open_task_count": 0
+    }},
+    "next_commands": []
+}}
+print(json.dumps(payload, ensure_ascii=False))
+sys.exit(0)
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--sync",
+            "--dry-run",
+            "--no-open-account-tabs",
+            "--auto-follow-attempts",
+            "6",
+            "--max-snapshots",
+            "40",
+            "--min-snapshots",
+            "8",
+            "--max-resume-passes",
+            "9",
+            "--enrichment-limit",
+            "25",
+            "--expected-post-count",
+            "13",
+            "--expected-labels",
+            "38m,1h,2h",
+            "--require-coverage-complete",
+            "--min-final-usable-rate",
+            "0.9",
+        ],
+        env={**os.environ, "PYTHON": str(fake_python)},
+    )
+    assert result.returncode == 2, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert len(calls) == 2
+    assert data["run_status"] == "accounts_incomplete"
+    assert data["accounts_completed"] == 1
+    assert data["accounts_incomplete"] == 1
+    assert [item["reason"] for item in data["next_commands"][:2]] == [
+        "rerun_batch_after_worker_fix",
+        "worker_failed",
+    ]
+    batch_rerun = shlex.split(data["next_commands"][0]["command"])
+    assert "scripts/run_accounts_job.py" in batch_rerun
+    assert batch_rerun[batch_rerun.index("--config") + 1] == str(config)
+    assert batch_rerun[batch_rerun.index("--target-date") + 1] == "260603"
+    assert "--sync" in batch_rerun
+    assert "--dry-run" in batch_rerun
+    assert "--no-open-account-tabs" in batch_rerun
+    assert batch_rerun[batch_rerun.index("--auto-follow-attempts") + 1] == "6"
+    assert batch_rerun[batch_rerun.index("--max-snapshots") + 1] == "40"
+    assert batch_rerun[batch_rerun.index("--min-snapshots") + 1] == "8"
+    assert batch_rerun[batch_rerun.index("--max-resume-passes") + 1] == "9"
+    assert batch_rerun[batch_rerun.index("--enrichment-limit") + 1] == "25"
+    assert batch_rerun[batch_rerun.index("--expected-post-count") + 1] == "13"
+    assert batch_rerun[batch_rerun.index("--expected-labels") + 1] == "38m,1h,2h"
+    assert "--require-coverage-complete" in batch_rerun
+    assert batch_rerun[batch_rerun.index("--min-final-usable-rate") + 1] == "0.9"
+    single_resume = shlex.split(data["next_commands"][1]["command"])
+    assert "scripts/run_account_job.py" in single_resume
+    assert single_resume[single_resume.index("--account-url") + 1] == "https://www.facebook.com/workerbrokenchild"
+    assert "--resume-only" in single_resume
+    assert "--force-recover-running" in single_resume
+
+
 def assert_run_accounts_job_auth_blocker_preserves_batch_retry(tmp_path: Path) -> None:
     config = tmp_path / "settings_batch_auth_blocker.yaml"
     fake_lark = tmp_path / "fake-lark-cli-batch-auth"
@@ -10304,6 +10469,83 @@ exit 0
     assert rerun[rerun.index("--limit") + 1] == "2"
     assert "--sync" in rerun
     assert "--dry-run" not in rerun
+    assert rerun[rerun.index("--auto-follow-attempts") + 1] == "6"
+    assert rerun[rerun.index("--max-snapshots") + 1] == "40"
+    assert rerun[rerun.index("--min-snapshots") + 1] == "8"
+    assert rerun[rerun.index("--max-resume-passes") + 1] == "9"
+    assert rerun[rerun.index("--enrichment-limit") + 1] == "25"
+    assert rerun[rerun.index("--expected-post-count") + 1] == "13"
+    assert rerun[rerun.index("--expected-labels") + 1] == "38m,1h,2h"
+    assert "--require-coverage-complete" in rerun
+    assert rerun[rerun.index("--min-final-usable-rate") + 1] == "0.9"
+
+
+def assert_run_accounts_job_accounts_load_failed_preserves_batch_retry(tmp_path: Path) -> None:
+    config = tmp_path / "settings_batch_accounts_load_failed.yaml"
+    fake_lark = tmp_path / "fake-lark-cli-accounts-load-failed"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch_accounts_load_failed.sqlite'}")
+    text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/bin/sh
+echo "source workbook unavailable" >&2
+exit 1
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--account-type",
+            "competitor",
+            "--limit",
+            "2",
+            "--sync",
+            "--dry-run",
+            "--no-open-account-tabs",
+            "--auto-follow-attempts",
+            "6",
+            "--max-snapshots",
+            "40",
+            "--min-snapshots",
+            "8",
+            "--max-resume-passes",
+            "9",
+            "--enrichment-limit",
+            "25",
+            "--expected-post-count",
+            "13",
+            "--expected-labels",
+            "38m,1h,2h",
+            "--require-coverage-complete",
+            "--min-final-usable-rate",
+            "0.9",
+        ]
+    )
+    assert result.returncode == 1, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    assert data["run_status"] == "accounts_load_failed"
+    assert data["complete"] is False
+    assert data["next_commands"][0]["reason"] == "accounts_load_failed"
+    rerun = shlex.split(data["next_commands"][0]["command"])
+    assert "scripts/run_accounts_job.py" in rerun
+    assert rerun[rerun.index("--config") + 1] == str(config)
+    assert rerun[rerun.index("--target-date") + 1] == "260603"
+    assert rerun[rerun.index("--account-type") + 1] == "competitor"
+    assert rerun[rerun.index("--limit") + 1] == "2"
+    assert "--sync" in rerun
+    assert "--dry-run" in rerun
+    assert "--no-open-account-tabs" in rerun
     assert rerun[rerun.index("--auto-follow-attempts") + 1] == "6"
     assert rerun[rerun.index("--max-snapshots") + 1] == "40"
     assert rerun[rerun.index("--min-snapshots") + 1] == "8"
@@ -12085,7 +12327,9 @@ def main() -> int:
         assert_run_accounts_job_child_opencli_blocker_preserves_batch_retry(tmp_path)
         assert_run_accounts_job_child_auth_blocker_preserves_batch_retry(tmp_path)
         assert_run_accounts_job_human_intervention_preserves_batch_retry(tmp_path)
+        assert_run_accounts_job_worker_failed_preserves_batch_retry(tmp_path)
         assert_run_accounts_job_auth_blocker_preserves_batch_retry(tmp_path)
+        assert_run_accounts_job_accounts_load_failed_preserves_batch_retry(tmp_path)
         assert_run_capture_pipeline_passes_snapshot_budget(tmp_path)
         assert_run_capture_pipeline_auto_retries_snapshot_cap(tmp_path)
         assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path)

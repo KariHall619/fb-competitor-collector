@@ -845,6 +845,16 @@ def _batch_human_recovery_items(args: argparse.Namespace) -> list[dict[str, Any]
     ]
 
 
+def _batch_worker_recovery_items(args: argparse.Namespace) -> list[dict[str, Any]]:
+    return [
+        {
+            "reason": "rerun_batch_after_worker_fix",
+            "description": "补抓执行器或运行环境修复后，按原批量范围重新运行所有目标账号，避免只续跑单个账号而漏掉后续采集、补抓或同步。",
+            "command": command_text(batch_retry_command(args)),
+        },
+    ]
+
+
 def _append_hard_blocker_commands(
     commands: list[dict[str, Any]],
     account: dict[str, Any],
@@ -931,6 +941,24 @@ def _append_human_intervention_commands(
     return len(commands) >= limit
 
 
+def _append_worker_failed_commands(
+    commands: list[dict[str, Any]],
+    account: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    limit: int,
+) -> bool:
+    for item in _batch_worker_recovery_items(args):
+        if _append_batch_next_command(commands, account, item, limit=limit):
+            return True
+    for item in account.get("next_commands") or []:
+        if not isinstance(item, dict) or not item.get("command"):
+            continue
+        if _append_batch_next_command(commands, account, item, limit=limit):
+            return True
+    return len(commands) >= limit
+
+
 def synthesized_batch_next_command(account: dict[str, Any], args: argparse.Namespace) -> dict[str, Any] | None:
     if account.get("complete") or str(account.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS:
         return None
@@ -964,6 +992,10 @@ def next_commands_for_batch(account_results: list[dict[str, Any]], args: argpars
             continue
         if str(account.get("run_status") or "") == "human_intervention_required":
             if _append_human_intervention_commands(commands, account, args, limit=limit):
+                return commands
+            continue
+        if str(account.get("run_status") or "") == "worker_failed":
+            if _append_worker_failed_commands(commands, account, args, limit=limit):
                 return commands
             continue
         added_for_account = False
@@ -1086,6 +1118,13 @@ def main() -> int:
                     "complete": False,
                     "error": str(exc),
                     "next_actions": ["修复飞书账号源配置、权限或表头后重新运行批量账号作业。"],
+                    "next_commands": [
+                        {
+                            "reason": "accounts_load_failed",
+                            "description": "修复飞书账号源配置、权限或表头后，按原批量范围重新运行所有目标账号。",
+                            "command": command_text(batch_retry_command(args)),
+                        }
+                    ],
                 },
                 ensure_ascii=False,
                 indent=2,
