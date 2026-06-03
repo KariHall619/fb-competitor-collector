@@ -2946,6 +2946,53 @@ def assert_sqlite_upsert_resyncs_previously_synced_rows(tmp_path: Path) -> None:
     assert result["sync_candidates"][0]["likes"] == 120
 
 
+def assert_sqlite_upsert_clears_resolved_coverage_note(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, row_for_post, upsert_post
+    from sync_status import enrichment_completion_summary
+
+    conn = connect(tmp_path / "coverage-note-clear.sqlite")
+    incomplete = normalize_post(
+        {
+            "account_name": "Coverage Page",
+            "account_url": "https://www.facebook.com/coveragepage",
+            "post_url": "https://www.facebook.com/coveragepage/posts/one",
+            "posted_at": "2026年6月3日 10:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/coverage",
+            "landing_url": "https://story.example/coverage",
+            "lead_url_raw": "https://story.example/coverage",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "story_summary": VALID_CN_SUMMARY,
+            "summary_source": "article",
+            "likes": 80,
+            "comments": 12,
+            "shares": 3,
+            "post_type": "图文",
+            "coverage_note": "采集达到快照上限时仍有新增候选，本次覆盖不完整，需从主页顶部继续补抓。",
+        }
+    )
+    upsert_post(conn, incomplete)
+    stored_incomplete = row_for_post(conn, incomplete)
+    assert stored_incomplete is not None
+    incomplete_summary = enrichment_completion_summary(conn, [stored_incomplete], {})
+    assert incomplete_summary["coverage_incomplete_count"] == 1
+    assert incomplete_summary["coverage_health"] == "incomplete"
+
+    resolved = normalize_post({**incomplete, "coverage_note": ""})
+    upsert_post(conn, resolved)
+    stored_resolved = row_for_post(conn, resolved)
+    assert stored_resolved is not None
+    assert stored_resolved["coverage_note"] == ""
+    resolved_summary = enrichment_completion_summary(conn, [stored_resolved], {})
+    assert resolved_summary["coverage_incomplete_count"] == 0
+    assert resolved_summary["coverage_health"] == "complete"
+    assert resolved_summary["has_incomplete_enrichment"] is False
+
+
 def assert_sqlite_upsert_does_not_protect_internal_lead_links(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
@@ -10587,6 +10634,7 @@ def main() -> int:
         assert_sqlite_upsert_preserves_enriched_fields(tmp_path)
         assert_sqlite_upsert_preserves_article_material_payload(tmp_path)
         assert_sqlite_upsert_resyncs_previously_synced_rows(tmp_path)
+        assert_sqlite_upsert_clears_resolved_coverage_note(tmp_path)
         assert_sqlite_upsert_does_not_protect_internal_lead_links(tmp_path)
         assert_sqlite_upsert_dedupes_equivalent_media_urls(tmp_path)
         assert_field_audit_marks_refetchable_missing_fields(tmp_path)

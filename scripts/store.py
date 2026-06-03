@@ -276,8 +276,12 @@ def choose_value(existing: dict[str, Any], incoming: dict[str, Any], column: str
         return current or new_value
     if column == "raw_payload":
         return merge_raw_payload(current, new_value)
-    if column in {"last_seen_at", "crawled_at", "coverage_note"}:
+    if column in {"last_seen_at", "crawled_at"}:
         return new_value if non_empty(new_value) else current
+    if column == "coverage_note":
+        if new_value is not None:
+            return new_value
+        return current
     if column in {"field_audit_status", "field_audit_reasons", "field_audit_note"}:
         return new_value if new_value is not None else current
     if column == "adoption_status":
