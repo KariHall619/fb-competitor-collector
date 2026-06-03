@@ -222,7 +222,7 @@ def main() -> int:
             )
             return 1
         headers = configured_output_headers(config)
-        rows = [output_row_for_headers(post, headers) for post in partial_posts]
+        rows = [output_row_for_headers(post, headers, config) for post in partial_posts]
         sync_result = write_rows(
             config,
             "filter_result",
@@ -266,7 +266,7 @@ def main() -> int:
                 )
             )
             return 1
-        rows = [output_row_for_headers(post, headers) for post in output_posts]
+        rows = [output_row_for_headers(post, headers, config) for post in output_posts]
         sync_result = write_rows(
             config,
             "all_posts",
@@ -334,7 +334,7 @@ def main() -> int:
             )
             return 1
         headers = configured_output_headers(config)
-        rows = [output_row_for_headers(post, headers) for post in ready_posts]
+        rows = [output_row_for_headers(post, headers, config) for post in ready_posts]
         sync_result = write_rows(
             config,
             "all_posts",

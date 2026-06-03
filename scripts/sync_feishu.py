@@ -47,7 +47,7 @@ def sync_posts(
                 )
             return annotate_sync_failure(result)
         output_headers = configured_output_headers(config)
-        rows = [output_row_for_headers(post, output_headers) for post in partial_posts]
+        rows = [output_row_for_headers(post, output_headers, config) for post in partial_posts]
         headers = output_headers if mode == "overwrite" else None
         result = write_rows(config, sheet_key, rows, headers=headers, mode=mode, dry_run=dry_run)
         result["partial_review"] = len(partial_posts)
@@ -79,7 +79,7 @@ def sync_posts(
                     ledger_mode=True,
                 )
             return annotate_sync_failure(result)
-        rows = [output_row_for_headers(post, output_headers) for post in output_posts]
+        rows = [output_row_for_headers(post, output_headers, config) for post in output_posts]
         result = write_rows(config, sheet_key, rows, headers=output_headers, mode="upsert", dry_run=dry_run)
         result["output_candidates"] = len(output_posts)
         result["skipped"] = len(skipped_posts)
@@ -122,7 +122,7 @@ def sync_posts(
             )
         return annotate_sync_failure(result)
     output_headers = configured_output_headers(config)
-    rows = [output_row_for_headers(post, output_headers) for post in ready_posts]
+    rows = [output_row_for_headers(post, output_headers, config) for post in ready_posts]
     headers = output_headers if mode == "overwrite" else None
     result = write_rows(config, sheet_key, rows, headers=headers, mode=mode, dry_run=dry_run)
     if result.get("ok") and conn is not None and not dry_run:

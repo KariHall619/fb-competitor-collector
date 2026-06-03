@@ -1563,6 +1563,30 @@ def assert_audit_marker_is_written_to_adoption_status() -> None:
     ]
     manual = {**post, "adoption_status": "采用"}
     assert output_row_for_headers(manual, headers)[1] == "采用"
+    strict_config = {
+        "quality_audit": {
+            "required_engagement_fields": ["likes"],
+            "low_like_threshold": 10,
+            "required_post_types": ["视频"],
+        }
+    }
+    strict_post = {
+        "post_url": "https://facebook.com/example/posts/strict-marker",
+        "posted_at": "2026年6月3日 12:00",
+        "time_confirmed": True,
+        "time_source": "dom_aria_label",
+        "landing_url": "https://story.example/strict-marker",
+        "lead_url_raw": "https://story.example/strict-marker",
+        "lead_link_status": "qualified",
+        "lead_link_source": "comment",
+        "story_summary": VALID_CN_SUMMARY,
+        "summary_source": "article",
+        "likes": 8,
+        "post_type": "图文",
+        "field_audit_reasons": "",
+    }
+    assert output_row_for_headers(strict_post, headers, strict_config)[1] == "待补抓：点赞数异常低、帖子类型"
+    assert output_row_for_headers({**strict_post, "adoption_status": "不采用"}, headers, strict_config)[1] == "不采用"
 
 
 def assert_ledger_marker_includes_time_summary_and_coverage() -> None:
@@ -1749,11 +1773,16 @@ def assert_sync_feishu_audit_and_strict_modes() -> None:
     assert audit["keys"] == ["https://facebook.com/example/posts/incomplete"]
     assert audit["audit_missing_field_counts"] == {
         "article_summary": 1,
+        "comments": 1,
         "exact_time": 1,
         "lead_link": 1,
+        "likes": 1,
+        "post_type": 1,
+        "shares": 1,
     }
     assert audit["audit_missing_field_summary"][0]["label"] == "文章概要"
     assert "文章概要：1 条" in audit["audit_missing_field_notes"]
+    assert "评论数：1 条" in audit["audit_missing_field_notes"]
     synced = [{**incomplete[0], "output_status": "output_synced"}]
     audit_synced = sync_feishu.sync_posts(config, synced, "all_posts", "append", True, audit=True)
     assert audit_synced["ok"] is True

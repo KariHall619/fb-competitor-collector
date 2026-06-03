@@ -167,7 +167,7 @@ def audit_reason_counts(posts: list[dict[str, Any]], config: dict[str, Any] | No
     counts: dict[str, int] = {}
     for post in posts:
         reasons = parse_reasons(post.get("field_audit_reasons"))
-        if not reasons:
+        if config is not None or not reasons:
             reasons = audit_post_fields(post, config).get("field_audit_reasons", [])
         for reason in reasons:
             counts[reason] = counts.get(reason, 0) + 1
@@ -196,10 +196,12 @@ def is_system_audit_marker(value: Any) -> bool:
     return str(value or "").strip().startswith(SYSTEM_MARKER_PREFIX)
 
 
-def adoption_status_for_output(post: dict[str, Any]) -> str:
+def adoption_status_for_output(post: dict[str, Any], config: dict[str, Any] | None = None) -> str:
     existing = str(post.get("adoption_status") or "").strip()
     if existing and not is_system_audit_marker(existing):
         return existing
+    if config is not None:
+        return audit_post_fields(post, config).get("field_audit_note", "")
     return audit_marker_for_reasons(parse_reasons(post.get("field_audit_reasons")))
 
 

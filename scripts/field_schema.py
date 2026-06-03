@@ -168,7 +168,7 @@ def output_account_type(value: Any) -> str:
     return text
 
 
-def output_value(post: dict[str, Any], field: str) -> Any:
+def output_value(post: dict[str, Any], field: str, config: dict[str, Any] | None = None) -> Any:
     if field == "account_name":
         return post.get("account_name") or post.get("account_url") or ""
     if field == "account_type":
@@ -187,7 +187,7 @@ def output_value(post: dict[str, Any], field: str) -> Any:
         include_views = not current_header or "浏览量" in current_header
         return engagement_text(post, include_views=include_views)
     if field == "adoption_status":
-        return adoption_status_for_output(post)
+        return adoption_status_for_output(post, config)
     if field == "internal_link":
         return post.get("internal_link", "")
     if field in {"views", "likes", "comments", "shares"}:
@@ -196,15 +196,19 @@ def output_value(post: dict[str, Any], field: str) -> Any:
     return post.get(field, "")
 
 
-def output_row_for_headers(post: dict[str, Any], headers: list[str]) -> list[Any]:
+def output_row_for_headers(
+    post: dict[str, Any],
+    headers: list[str],
+    config: dict[str, Any] | None = None,
+) -> list[Any]:
     row: list[Any] = []
     for header in headers:
         field = output_field_for_header(header)
         if field == "engagement":
             value_post = {**post, "_current_output_header": header}
-            row.append(output_value(value_post, field))
+            row.append(output_value(value_post, field, config))
         else:
-            row.append(output_value(post, field) if field else "")
+            row.append(output_value(post, field, config) if field else "")
     return row
 
 
