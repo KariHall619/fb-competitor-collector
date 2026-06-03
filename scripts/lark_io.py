@@ -295,6 +295,14 @@ def normalized_upsert_key(value: Any, key_field: str) -> str:
     return facebook_content_key(text) or text
 
 
+def cell_has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
 def merge_upsert_row(existing: list[Any], incoming: list[Any], headers: list[str]) -> list[Any]:
     width = max(len(headers), len(existing), len(incoming))
     merged = list(existing) + [""] * (width - len(existing))
@@ -304,6 +312,8 @@ def merge_upsert_row(existing: list[Any], incoming: list[Any], headers: list[str
         current = merged[index]
         new_value = incoming_full[index]
         if field == "adoption_status" and current and not is_system_audit_marker(current):
+            continue
+        if field != "adoption_status" and not cell_has_value(new_value):
             continue
         merged[index] = new_value
     return merged[:width]

@@ -1663,6 +1663,24 @@ def assert_feishu_upsert_merges_rows_without_overwriting_manual_adoption() -> No
     existing_marker = ["https://facebook.com/post/2", "旧概要", "待补抓：评论数"]
     incoming_ready = ["https://facebook.com/post/2", "新概要", ""]
     assert merge_upsert_row(existing_marker, incoming_ready, headers) == ["https://facebook.com/post/2", "新概要", ""]
+
+    business_headers = ["帖子链接", "帖子类型", "故事概要", "是否采用"]
+    existing_enriched = ["https://facebook.com/post/3", "图文", VALID_CN_SUMMARY, "待补抓：分享数"]
+    incoming_partial = ["https://facebook.com/post/3", "", "", "待补抓：帖子类型、文章概要、分享数"]
+    assert merge_upsert_row(existing_enriched, incoming_partial, business_headers) == [
+        "https://facebook.com/post/3",
+        "图文",
+        VALID_CN_SUMMARY,
+        "待补抓：帖子类型、文章概要、分享数",
+    ]
+
+    incoming_completed = ["https://facebook.com/post/3", "", "", ""]
+    assert merge_upsert_row(existing_enriched, incoming_completed, business_headers) == [
+        "https://facebook.com/post/3",
+        "图文",
+        VALID_CN_SUMMARY,
+        "",
+    ]
     assert normalized_upsert_key(
         "https://www.facebook.com/storyhub/posts/pfbid123?utm_source=x",
         "post_url",
