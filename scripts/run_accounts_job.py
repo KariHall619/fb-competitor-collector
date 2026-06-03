@@ -18,6 +18,7 @@ from read_accounts import read_accounts
 
 
 ACCOUNT_HARD_BLOCKERS = {"blocked_auth", "blocked_opencli", "human_intervention_required"}
+ACCOUNT_SCRIPT_FAILURE_STATUSES = {"account_job_failed", "account_completion_unverified"}
 MAX_AUTO_FOLLOW_ATTEMPTS = 50
 MACHINE_RECOVERABLE_STATUSES = {
     "coverage_incomplete",
@@ -855,6 +856,16 @@ def _batch_worker_recovery_items(args: argparse.Namespace) -> list[dict[str, Any
     ]
 
 
+def _batch_account_job_recovery_items(args: argparse.Namespace) -> list[dict[str, Any]]:
+    return [
+        {
+            "reason": "rerun_batch_after_account_job_fix",
+            "description": "子账号作业输出异常或缺少质量摘要；修复脚本/契约问题后按原批量范围重新运行所有目标账号。",
+            "command": command_text(batch_retry_command(args)),
+        },
+    ]
+
+
 def _append_hard_blocker_commands(
     commands: list[dict[str, Any]],
     account: dict[str, Any],
@@ -959,6 +970,33 @@ def _append_worker_failed_commands(
     return len(commands) >= limit
 
 
+def _append_account_job_failed_commands(
+    commands: list[dict[str, Any]],
+    account: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    limit: int,
+) -> bool:
+    for item in _batch_account_job_recovery_items(args):
+        if _append_batch_next_command(commands, account, item, limit=limit):
+            return True
+    account_command = str(account.get("command") or "").strip()
+    if account_command:
+        item = {
+            "reason": str(account.get("run_status") or "account_job_failed"),
+            "description": "修复子账号作业脚本或输出契约后，单独重跑这个账号；优先使用上一条批量命令保持完整业务范围。",
+            "command": account_command,
+        }
+        if _append_batch_next_command(commands, account, item, limit=limit):
+            return True
+    for item in account.get("next_commands") or []:
+        if not isinstance(item, dict) or not item.get("command"):
+            continue
+        if _append_batch_next_command(commands, account, item, limit=limit):
+            return True
+    return len(commands) >= limit
+
+
 def synthesized_batch_next_command(account: dict[str, Any], args: argparse.Namespace) -> dict[str, Any] | None:
     if account.get("complete") or str(account.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS:
         return None
@@ -996,6 +1034,10 @@ def next_commands_for_batch(account_results: list[dict[str, Any]], args: argpars
             continue
         if str(account.get("run_status") or "") == "worker_failed":
             if _append_worker_failed_commands(commands, account, args, limit=limit):
+                return commands
+            continue
+        if str(account.get("run_status") or "") in ACCOUNT_SCRIPT_FAILURE_STATUSES:
+            if _append_account_job_failed_commands(commands, account, args, limit=limit):
                 return commands
             continue
         added_for_account = False
