@@ -18,6 +18,7 @@ from read_accounts import read_accounts
 
 
 ACCOUNT_HARD_BLOCKERS = {"blocked_auth", "blocked_opencli", "human_intervention_required"}
+MAX_AUTO_FOLLOW_ATTEMPTS = 50
 AUTO_FOLLOW_REASONS = {
     "coverage_incomplete",
     "pending_enrichment",
@@ -254,6 +255,24 @@ def next_auto_follow_command(summary: dict[str, Any], account: dict[str, Any]) -
     return []
 
 
+def account_progress_key(summary: dict[str, Any]) -> tuple[int, int, int, int, int]:
+    """Return a monotonic-ish quality key for deciding whether auto-follow is still useful."""
+
+    return (
+        int(summary.get("final_usable_count") or 0),
+        int(summary.get("ledger_candidate_count") or 0),
+        -int(summary.get("open_task_count") or 0),
+        int(round(float(summary.get("final_usable_rate") or 0.0) * 10000)),
+        int(summary.get("post_count") or 0),
+    )
+
+
+def account_quality_improved(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    return account_progress_key(current) > account_progress_key(previous)
+
+
 def batch_retry_command(args: argparse.Namespace, *, fix_opencli: bool = False) -> list[Any]:
     command: list[Any] = [
         os.environ.get("PYTHON") or sys.executable,
@@ -311,9 +330,12 @@ def batch_retry_command(args: argparse.Namespace, *, fix_opencli: bool = False) 
 def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any]) -> dict[str, Any]:
     attempts: list[dict[str, Any]] = []
     command = account_job_command(args, account)
-    max_attempts = 1 if args.status_only else max(1, int(args.auto_follow_attempts or 0))
+    base_attempt_limit = 1 if args.status_only else max(1, int(args.auto_follow_attempts or 0))
+    hard_attempt_limit = base_attempt_limit if args.status_only else max(base_attempt_limit, MAX_AUTO_FOLLOW_ATTEMPTS)
     final_summary: dict[str, Any] | None = None
-    for attempt_index in range(1, max_attempts + 1):
+    previous_summary: dict[str, Any] | None = None
+    extended_after_budget = 0
+    for attempt_index in range(1, hard_attempt_limit + 1):
         command_key = subprocess.list2cmdline(command)
         result = run_command(command)
         payload = parse_json_output(result)
@@ -332,21 +354,31 @@ def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any])
             }
         )
         final_summary = summary
+        improved = account_quality_improved(previous_summary, summary)
+        attempts[-1]["quality_progress_key"] = list(account_progress_key(summary))
+        if improved:
+            attempts[-1]["quality_improved"] = True
         if summary.get("complete") or str(summary.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS:
             break
         if result.returncode not in {0, 2}:
             break
-        if attempt_index >= max_attempts:
-            if next_auto_follow_command(summary, account):
-                attempts[-1]["auto_follow_stopped_reason"] = "max_attempts_reached"
-                attempts[-1]["next_auto_follow_available"] = True
-            break
         follow = next_auto_follow_command(summary, account)
         if not follow:
             break
+        if attempt_index >= base_attempt_limit:
+            if improved and attempt_index < hard_attempt_limit:
+                attempts[-1]["auto_follow_extended_after_budget"] = True
+                extended_after_budget += 1
+            else:
+                attempts[-1]["auto_follow_stopped_reason"] = "max_attempts_reached"
+                attempts[-1]["next_auto_follow_available"] = True
+                if attempt_index >= hard_attempt_limit:
+                    attempts[-1]["auto_follow_hard_limit_reached"] = True
+                break
         follow_key = subprocess.list2cmdline(follow)
         if follow_key == command_key:
             attempts[-1]["auto_follow_repeated_command"] = True
+        previous_summary = summary
         command = follow
     if final_summary is None:
         final_summary = {
@@ -370,7 +402,9 @@ def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any])
         }
     final_summary["attempts"] = attempts
     final_summary["auto_follow_attempted"] = len(attempts) > 1
-    final_summary["auto_follow_attempt_limit"] = max_attempts
+    final_summary["auto_follow_attempt_limit"] = base_attempt_limit
+    final_summary["auto_follow_hard_attempt_limit"] = hard_attempt_limit
+    final_summary["auto_follow_extended_after_budget_count"] = extended_after_budget
     final_summary["auto_follow_exhausted"] = bool(
         attempts and attempts[-1].get("auto_follow_stopped_reason") == "max_attempts_reached"
     )

@@ -7275,6 +7275,140 @@ sys.exit(code)
     assert any(attempt.get("auto_follow_repeated_command") for attempt in account["attempts"])
 
 
+def assert_run_accounts_job_extends_attempts_while_quality_improves(tmp_path: Path) -> None:
+    config = tmp_path / "settings_batch_extend_progress.yaml"
+    fake_lark = tmp_path / "fake-lark-cli-extend-progress"
+    fake_python = tmp_path / "fake-python-extend-progress"
+    calls_file = tmp_path / "batch-extend-progress-calls.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch_extend_progress.sqlite'}")
+    text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/usr/bin/env python3
+import json
+payload = {
+  "data": {
+    "valueRange": {
+      "values": [
+        ["主页名称", "竞品fb账户", "内部FB账户"],
+        ["Progress Page", "https://www.facebook.com/progresspage", ""]
+      ]
+    }
+  }
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    fake_python.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+account_url = sys.argv[sys.argv.index("--account-url") + 1]
+account_name = sys.argv[sys.argv.index("--account-name") + 1]
+account_type = sys.argv[sys.argv.index("--account-type") + 1]
+config_path = sys.argv[sys.argv.index("--config") + 1]
+call_number = len(calls)
+resume_command = "python3 scripts/run_account_job.py --config " + config_path + " --account-url " + account_url + " --account-name '" + account_name + "' --account-type " + account_type + " --target-date 260603 --resume-only --force-recover-running --sync --dry-run --fail-on-incomplete --max-resume-passes 8"
+if call_number < 4:
+    usable = call_number
+    remaining = 4 - call_number
+    payload = {{
+        "ok": True,
+        "run_status": "incomplete_pending_tasks",
+        "complete": False,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 4,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 4,
+            "final_usable_count": usable,
+            "final_usable_rate": round(usable / 4, 4),
+            "open_task_count": remaining,
+            "top_field_gaps": [
+                {{"reason": "post_type", "count": remaining}},
+                {{"reason": "article_summary", "count": remaining}}
+            ]
+        }},
+        "next_commands": [{{
+            "reason": "pending_enrichment",
+            "description": "continue same scoped queue",
+            "command": resume_command
+        }}]
+    }}
+    code = 2
+else:
+    payload = {{
+        "ok": True,
+        "run_status": "complete",
+        "complete": True,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 4,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 4,
+            "final_usable_count": 4,
+            "final_usable_rate": 1.0,
+            "open_task_count": 0
+        }},
+        "next_commands": []
+    }}
+    code = 0
+print(json.dumps(payload, ensure_ascii=False))
+sys.exit(code)
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--sync",
+            "--dry-run",
+            "--no-open-account-tabs",
+            "--auto-follow-attempts",
+            "2",
+        ],
+        env={**os.environ, "PYTHON": str(fake_python)},
+    )
+    assert result.returncode == 0, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert len(calls) == 4
+    assert data["run_status"] == "complete"
+    account = data["accounts"][0]
+    assert account["auto_follow_attempt_limit"] == 2
+    assert account["auto_follow_extended_after_budget_count"] == 2
+    assert account["auto_follow_exhausted"] is False
+    assert [attempt["run_status"] for attempt in account["attempts"]] == [
+        "incomplete_pending_tasks",
+        "incomplete_pending_tasks",
+        "incomplete_pending_tasks",
+        "complete",
+    ]
+    assert account["attempts"][1]["auto_follow_extended_after_budget"] is True
+    assert account["attempts"][2]["auto_follow_extended_after_budget"] is True
+
+
 def assert_run_accounts_job_opencli_blocker_preserves_batch_retry(tmp_path: Path) -> None:
     config = tmp_path / "settings_batch_opencli_blocker.yaml"
     fake_lark = tmp_path / "fake-lark-cli-opencli-blocker"
@@ -9230,6 +9364,7 @@ def main() -> int:
         assert_run_accounts_job_runs_all_accounts_and_aggregates_status(tmp_path)
         assert_run_accounts_job_auto_follows_coverage_recovery(tmp_path)
         assert_run_accounts_job_repeats_same_resume_until_complete(tmp_path)
+        assert_run_accounts_job_extends_attempts_while_quality_improves(tmp_path)
         assert_run_accounts_job_opencli_blocker_preserves_batch_retry(tmp_path)
         assert_run_accounts_job_auth_blocker_preserves_batch_retry(tmp_path)
         assert_run_capture_pipeline_passes_snapshot_budget(tmp_path)
