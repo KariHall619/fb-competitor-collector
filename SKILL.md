@@ -141,6 +141,8 @@ Preferred fields:
 Rules:
 
 - `canonical_post_url` is the dedupe key.
+- Facebook content identity is centralized in `scripts/models.py::facebook_content_key`. Feishu `post_url` upsert and SQLite canonical URLs must use the same identity rule so photo, video/watch, reel, share, and group-post URL variants update one ledger row instead of creating duplicates.
+- OpenCLI snapshot dedupe uses `scripts/opencli_extract_current_tab.mjs::postKey`; keep it aligned with `facebook_content_key` when adding new accepted Facebook URL forms.
 - Logged-out Facebook pages must return `login_required`; do not import or sync visitor-preview rows.
 - Visitor-preview pages must return `human_intervention_required` immediately; do not keep trying to scroll because Facebook commonly exposes only one preview post.
 - Empty shells, comment-only blocks, or pages without visible real posts are blocking evidence.

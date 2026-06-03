@@ -28,7 +28,10 @@ from models import (
 from pipeline_status import crawl_status_for, output_status_for
 
 
-MEDIA_LINK_RE = re.compile(r"facebook\.com/(?:photo(?:\.php|/)|reel/|watch/|[^/]+/videos/|videos/)", re.I)
+MEDIA_LINK_RE = re.compile(
+    r"(?:facebook\.com/(?:photo(?:\.php|/)|photos/|reel/|watch/|video/|[^/]+/videos/|videos/|share/)|fb\.watch/)",
+    re.I,
+)
 
 
 def prepare_failed_result(

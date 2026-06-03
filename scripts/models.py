@@ -128,8 +128,8 @@ def parse_count(value: Any) -> int | None:
     return int(number)
 
 
-def canonicalize_post_url(value: Any) -> str:
-    """Normalize common Facebook post/reel URL variants for dedupe."""
+def facebook_content_key(value: Any) -> str:
+    """Return a stable Facebook content identity for dedupe/upsert."""
 
     if value in (None, ""):
         return ""
@@ -140,7 +140,7 @@ def canonicalize_post_url(value: Any) -> str:
     if "l.facebook.com" in parsed.netloc:
         qs = parse_qs(parsed.query)
         if qs.get("u"):
-            return canonicalize_post_url(unquote(qs["u"][0]))
+            return facebook_content_key(unquote(qs["u"][0]))
     netloc = parsed.netloc.lower()
     if netloc.startswith("m."):
         netloc = netloc[2:]
@@ -148,29 +148,98 @@ def canonicalize_post_url(value: Any) -> str:
         netloc = netloc[4:]
     path = re.sub(r"/+", "/", parsed.path).rstrip("/")
     qs = parse_qs(parsed.query)
+    parts = [part for part in path.split("/") if part]
 
-    story_fbid = (qs.get("story_fbid") or qs.get("fbid") or [""])[0]
+    story_fbid = (qs.get("story_fbid") or [""])[0]
+    photo_fbid = (qs.get("fbid") or [""])[0]
     account_id = (qs.get("id") or [""])[0]
     if story_fbid and account_id:
-        return f"https://facebook.com/{account_id}/posts/{story_fbid}"
+        return f"post:{account_id}:{story_fbid}"
 
-    # Keep the stable prefix through the post/reel identifier and discard tracking.
-    parts = [part for part in path.split("/") if part]
     if "posts" in parts:
         idx = parts.index("posts")
         if idx > 0 and idx + 1 < len(parts):
-            return f"https://facebook.com/{parts[idx - 1]}/posts/{parts[idx + 1]}"
+            if idx >= 2 and parts[idx - 2] == "groups":
+                return f"group-post:{parts[idx - 1]}:{parts[idx + 1]}"
+            return f"post:{parts[idx - 1]}:{parts[idx + 1]}"
     if "permalink.php" in path and story_fbid:
-        return f"https://facebook.com/permalink/{story_fbid}"
+        return f"permalink:{account_id or 'unknown'}:{story_fbid}"
     if "reel" in parts:
         idx = parts.index("reel")
         if idx + 1 < len(parts):
-            return f"https://facebook.com/reel/{parts[idx + 1]}"
+            return f"reel:{parts[idx + 1]}"
     if "watch" in parts and qs.get("v"):
-        return f"https://facebook.com/watch/{qs['v'][0]}"
-    if ("photo.php" in path or parts == ["photo"]) and story_fbid:
-        return f"https://facebook.com/photo/{story_fbid}"
+        return f"video:{qs['v'][0]}"
+    if "videos" in parts:
+        idx = parts.index("videos")
+        if idx + 1 < len(parts):
+            return f"video:{parts[idx + 1]}"
+    if "video" in parts:
+        idx = parts.index("video")
+        if idx + 1 < len(parts):
+            return f"video:{parts[idx + 1]}"
+    if ("photo.php" in path or parts == ["photo"]) and photo_fbid:
+        return f"photo:{photo_fbid}"
+    if "photos" in parts:
+        idx = parts.index("photos")
+        if idx + 1 < len(parts):
+            tail = [part for part in parts[idx + 1 :] if part not in {"a", "p", "photo"}]
+            numeric_tail = [part for part in tail if re.fullmatch(r"\d{6,}", part)]
+            photo_id = numeric_tail[-1] if numeric_tail else tail[-1] if tail else ""
+            if photo_id:
+                return f"photo:{photo_id}"
+    if "share" in parts:
+        idx = parts.index("share")
+        if idx + 1 < len(parts):
+            return f"share:{':'.join(parts[idx + 1:])}"
+    if netloc == "fb.watch":
+        key = parts[0] if parts else path.lstrip("/")
+        if key:
+            return f"fb-watch:{key}"
+    if netloc.endswith("facebook.com"):
+        return f"url:{path}"
+    return text
 
+
+def canonicalize_post_url(value: Any) -> str:
+    """Normalize common Facebook content URL variants for dedupe."""
+
+    key = facebook_content_key(value)
+    if not key:
+        return ""
+    parts = key.split(":")
+    kind = parts[0]
+    if kind == "post" and len(parts) >= 3:
+        return f"https://facebook.com/{parts[1]}/posts/{parts[2]}"
+    if kind == "group-post" and len(parts) >= 3:
+        return f"https://facebook.com/groups/{parts[1]}/posts/{parts[2]}"
+    if kind == "permalink" and len(parts) >= 3:
+        if parts[1] != "unknown":
+            return f"https://facebook.com/{parts[1]}/posts/{parts[2]}"
+        return f"https://facebook.com/permalink/{parts[2]}"
+    if kind == "reel" and len(parts) >= 2:
+        return f"https://facebook.com/reel/{parts[1]}"
+    if kind == "fb-watch" and len(parts) >= 2:
+        return f"https://fb.watch/{parts[1]}"
+    if kind == "video" and len(parts) >= 2:
+        return f"https://facebook.com/video/{parts[1]}"
+    if kind == "photo" and len(parts) >= 3:
+        return f"https://facebook.com/{parts[1]}/photos/{parts[2]}"
+    if kind == "photo" and len(parts) >= 2:
+        return f"https://facebook.com/photo/{parts[1]}"
+    if kind == "share" and len(parts) >= 2:
+        return f"https://facebook.com/share/{'/'.join(parts[1:])}"
+    if kind == "url":
+        return f"https://facebook.com{':'.join(parts[1:])}"
+
+    text = str(value).strip()
+    parsed = urlparse(text)
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("m."):
+        netloc = netloc[2:]
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    path = re.sub(r"/+", "/", parsed.path).rstrip("/")
     return urlunparse(("https", netloc or "facebook.com", path, "", "", ""))
 
 
@@ -186,14 +255,16 @@ def facebook_link_kind(value: Any) -> str:
     qs = parse_qs(parsed.query)
     if "facebook.com" not in netloc and "fb.watch" not in netloc:
         return "external"
-    if "/posts/" in path or "story.php" in path or "permalink.php" in path or qs.get("story_fbid"):
+    if "/posts/" in path or "/groups/" in path and "/posts/" in path or "story.php" in path or "permalink.php" in path or qs.get("story_fbid"):
         return "parent_post"
     if "/reel/" in path:
         return "reel"
-    if "photo.php" in path or "/photo/" in path or qs.get("fbid"):
+    if "photo.php" in path or "/photo/" in path or "/photos/" in path or qs.get("fbid"):
         return "photo"
-    if "/watch/" in path or "/videos/" in path or qs.get("v"):
+    if "/watch/" in path or "/video/" in path or "/videos/" in path or qs.get("v") or "fb.watch" in netloc:
         return "video"
+    if "/share/" in path:
+        return "facebook"
     return "facebook"
 
 

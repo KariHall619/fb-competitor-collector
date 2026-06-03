@@ -54,17 +54,43 @@ function postKey(post) {
   try {
     const parsed = new URL(url);
     const parts = parsed.pathname.split("/").filter(Boolean);
-    const storyFbid = parsed.searchParams.get("story_fbid") || parsed.searchParams.get("fbid");
+    const storyFbid = parsed.searchParams.get("story_fbid");
+    const photoFbid = parsed.searchParams.get("fbid");
     const id = parsed.searchParams.get("id");
     if (storyFbid && id) return `story:${id}:${storyFbid}`;
     if (parts.includes("posts")) {
       const index = parts.indexOf("posts");
-      if (index > 0 && parts[index + 1]) return `post:${parts[index - 1]}:${parts[index + 1]}`;
+      if (index > 0 && parts[index + 1]) {
+        if (index >= 2 && parts[index - 2] === "groups") return `group-post:${parts[index - 1]}:${parts[index + 1]}`;
+        return `post:${parts[index - 1]}:${parts[index + 1]}`;
+      }
     }
     if (parts.includes("reel")) {
       const index = parts.indexOf("reel");
       if (parts[index + 1]) return `reel:${parts[index + 1]}`;
     }
+    if (parts.includes("videos")) {
+      const index = parts.indexOf("videos");
+      if (parts[index + 1]) return `video:${parts[index + 1]}`;
+    }
+    if (parts.includes("video")) {
+      const index = parts.indexOf("video");
+      if (parts[index + 1]) return `video:${parts[index + 1]}`;
+    }
+    if (parts.includes("watch") && parsed.searchParams.get("v")) return `video:${parsed.searchParams.get("v")}`;
+    if ((parsed.pathname.includes("photo.php") || parts.join("/") === "photo") && photoFbid) return `photo:${photoFbid}`;
+    if (parts.includes("photos")) {
+      const index = parts.indexOf("photos");
+      const tail = parts.slice(index + 1).filter((part) => !["a", "p", "photo"].includes(part));
+      const numericTail = tail.filter((part) => /^\d{6,}$/.test(part));
+      const photoId = numericTail.at(-1) || tail.at(-1);
+      if (photoId) return `photo:${photoId}`;
+    }
+    if (parts.includes("share")) {
+      const index = parts.indexOf("share");
+      if (parts[index + 1]) return `share:${parts.slice(index + 1).join(":")}`;
+    }
+    if (parsed.hostname === "fb.watch" && parts[0]) return `fb-watch:${parts[0]}`;
     return url;
   } catch {
     return url;

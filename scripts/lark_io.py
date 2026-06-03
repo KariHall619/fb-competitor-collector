@@ -8,11 +8,11 @@ import json
 import subprocess
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
 
 from config_loader import deep_get, load_config
 from field_audit import is_system_audit_marker
 from field_schema import output_field_for_header
+from models import facebook_content_key
 
 
 def run_lark(config: dict[str, Any], args: list[str], *, input_json: Any = None) -> subprocess.CompletedProcess[str]:
@@ -292,41 +292,7 @@ def normalized_upsert_key(value: Any, key_field: str) -> str:
         return ""
     if key_field != "post_url":
         return text
-    try:
-        parsed = urlparse(text)
-    except Exception:
-        return text
-    if "l.facebook.com" in parsed.netloc:
-        qs = parse_qs(parsed.query)
-        if qs.get("u"):
-            return normalized_upsert_key(unquote(qs["u"][0]), key_field)
-    netloc = parsed.netloc.lower()
-    if netloc.startswith("m."):
-        netloc = netloc[2:]
-    if netloc.startswith("www."):
-        netloc = netloc[4:]
-    path = parsed.path.rstrip("/")
-    qs = parse_qs(parsed.query)
-    parts = [part for part in path.split("/") if part]
-    story_fbid = (qs.get("story_fbid") or qs.get("fbid") or [""])[0]
-    account_id = (qs.get("id") or [""])[0]
-    if story_fbid and account_id:
-        return f"facebook:{account_id}:posts:{story_fbid}"
-    if "posts" in parts:
-        index = parts.index("posts")
-        if index > 0 and index + 1 < len(parts):
-            return f"facebook:{parts[index - 1]}:posts:{parts[index + 1]}"
-    if "reel" in parts:
-        index = parts.index("reel")
-        if index + 1 < len(parts):
-            return f"facebook:reel:{parts[index + 1]}"
-    if "watch" in parts and qs.get("v"):
-        return f"facebook:watch:{qs['v'][0]}"
-    if ("photo.php" in path or parts == ["photo"]) and story_fbid:
-        return f"facebook:photo:{story_fbid}"
-    if netloc.endswith("facebook.com"):
-        return f"https://facebook.com{path}"
-    return text
+    return facebook_content_key(text) or text
 
 
 def merge_upsert_row(existing: list[Any], incoming: list[Any], headers: list[str]) -> list[Any]:

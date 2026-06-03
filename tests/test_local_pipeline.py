@@ -74,7 +74,7 @@ def start_opencli_status_server() -> ThreadingHTTPServer:
 
 def assert_url_canonicalization() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
-    from models import canonicalize_post_url
+    from models import canonicalize_post_url, facebook_content_key
 
     urls = [
         "https://www.facebook.com/themeaningoflife88/posts/pfbid02abc?utm_source=x",
@@ -92,6 +92,30 @@ def assert_url_canonicalization() -> None:
     assert (
         canonicalize_post_url("https://www.facebook.com/photo/?fbid=790&set=a.123")
         == "https://facebook.com/photo/790"
+    )
+    assert (
+        canonicalize_post_url("https://www.facebook.com/themeaningoflife88/photos/a.123/9876543212345678/?type=3")
+        == "https://facebook.com/photo/9876543212345678"
+    )
+    assert (
+        facebook_content_key("https://www.facebook.com/photo.php?fbid=9876543212345678&set=p.9876543212345678")
+        == facebook_content_key("https://www.facebook.com/themeaningoflife88/photos/a.123/9876543212345678/?type=3")
+    )
+    assert (
+        canonicalize_post_url("https://www.facebook.com/storyhub/videos/1234567890123456/?ref=embed_video")
+        == "https://facebook.com/video/1234567890123456"
+    )
+    assert (
+        facebook_content_key("https://www.facebook.com/watch/?v=1234567890123456")
+        == facebook_content_key("https://www.facebook.com/storyhub/videos/1234567890123456/?ref=embed_video")
+    )
+    assert (
+        canonicalize_post_url("https://www.facebook.com/groups/778899/posts/112233445566")
+        == "https://facebook.com/groups/778899/posts/112233445566"
+    )
+    assert (
+        canonicalize_post_url("https://www.facebook.com/share/p/abcDEF123/?mibextid=wwXIfr")
+        == "https://facebook.com/share/p/abcDEF123"
     )
 
 
@@ -1580,6 +1604,24 @@ def assert_feishu_upsert_merges_rows_without_overwriting_manual_adoption() -> No
         "https://m.facebook.com/story.php?story_fbid=123&id=456&ref=share",
         "post_url",
     ) == normalized_upsert_key("https://facebook.com/456/posts/123", "post_url")
+    assert normalized_upsert_key(
+        "https://www.facebook.com/photo.php?fbid=9876543212345678&set=p.9876543212345678",
+        "post_url",
+    ) == normalized_upsert_key(
+        "https://www.facebook.com/themeaningoflife88/photos/a.123/9876543212345678/?type=3",
+        "post_url",
+    )
+    assert normalized_upsert_key(
+        "https://www.facebook.com/watch/?v=1234567890123456",
+        "post_url",
+    ) == normalized_upsert_key(
+        "https://www.facebook.com/storyhub/videos/1234567890123456/",
+        "post_url",
+    )
+    assert normalized_upsert_key(
+        "https://www.facebook.com/share/p/abcDEF123/?mibextid=wwXIfr",
+        "post_url",
+    ) == "share:p:abcDEF123"
 
 
 def assert_feishu_upsert_matches_canonical_post_urls(tmp_path: Path) -> None:
@@ -1633,6 +1675,52 @@ def assert_feishu_upsert_matches_canonical_post_urls(tmp_path: Path) -> None:
         lark_io.ensure_sheet = original_ensure_sheet
         lark_io.read_range = original_read_range
         lark_io.write_range = original_write_range
+
+
+def assert_sqlite_upsert_dedupes_equivalent_media_urls(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, row_for_post, upsert_post
+
+    conn = connect(tmp_path / "media-dedupe.sqlite")
+    first = normalize_post(
+        {
+            "account_name": "The meaning of life",
+            "post_url": "https://www.facebook.com/photo.php?fbid=9876543212345678&set=p.9876543212345678&type=3",
+            "post_time_text": "1h",
+            "crawled_at": "2026-06-02T12:00:00",
+            "story_summary": "Photo candidate first seen from photo.php",
+        }
+    )
+    second = normalize_post(
+        {
+            "account_name": "The meaning of life",
+            "post_url": "https://www.facebook.com/themeaningoflife88/photos/a.123/9876543212345678/?type=3",
+            "posted_at": "2026年6月2日 11:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/photo",
+            "landing_url": "https://story.example/photo",
+            "lead_url_raw": "https://story.example/photo",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "article_summary": VALID_CN_SUMMARY,
+            "summary_source": "article",
+            "likes": 8,
+            "comments": 2,
+            "shares": 1,
+        }
+    )
+    assert first["canonical_post_url"] == second["canonical_post_url"]
+    assert upsert_post(conn, first) == "inserted"
+    assert upsert_post(conn, second) == "updated"
+    rows = conn.execute("SELECT * FROM posts").fetchall()
+    assert len(rows) == 1
+    stored = row_for_post(conn, second)
+    assert stored is not None
+    assert stored["posted_at"] == "2026年6月2日 11:00"
+    assert stored["lead_link_status"] == "qualified"
+    assert stored["likes"] == 8
 
 
 def assert_sync_feishu_audit_and_strict_modes() -> None:
@@ -3585,6 +3673,24 @@ const duplicate = {
 if (postKey(first) !== postKey(duplicate)) {
   console.error(JSON.stringify({ first: postKey(first), duplicate: postKey(duplicate) }, null, 2));
   process.exit(2);
+}
+const photoA = { post_url: 'https://www.facebook.com/photo.php?fbid=9876543212345678&set=p.9876543212345678' };
+const photoB = { post_url: 'https://www.facebook.com/themeaningoflife88/photos/a.123/9876543212345678/?type=3' };
+if (postKey(photoA) !== postKey(photoB)) {
+  console.error(JSON.stringify({ photoA: postKey(photoA), photoB: postKey(photoB) }, null, 2));
+  process.exit(6);
+}
+const videoA = { post_url: 'https://www.facebook.com/watch/?v=1234567890123456' };
+const videoB = { post_url: 'https://www.facebook.com/storyhub/videos/1234567890123456/' };
+if (postKey(videoA) !== postKey(videoB)) {
+  console.error(JSON.stringify({ videoA: postKey(videoA), videoB: postKey(videoB) }, null, 2));
+  process.exit(7);
+}
+if (postKey({ post_url: 'https://www.facebook.com/groups/778899/posts/112233445566?ref=share' }) !== 'group-post:778899:112233445566') {
+  process.exit(8);
+}
+if (postKey({ post_url: 'https://www.facebook.com/share/p/abcDEF123/?mibextid=wwXIfr' }) !== 'share:p:abcDEF123') {
+  process.exit(9);
 }
 if (!validCandidate(first)) process.exit(3);
 if (!validCandidate({ post_url: first.post_url, story_summary: 'short' })) process.exit(4);
@@ -6937,6 +7043,7 @@ def main() -> int:
         assert_sqlite_upsert_preserves_enriched_fields(tmp_path)
         assert_sqlite_upsert_resyncs_previously_synced_rows(tmp_path)
         assert_sqlite_upsert_does_not_protect_internal_lead_links(tmp_path)
+        assert_sqlite_upsert_dedupes_equivalent_media_urls(tmp_path)
         assert_field_audit_marks_refetchable_missing_fields(tmp_path)
         assert_cli_feishu_auth_blockers_report_run_status(tmp_path)
         assert_import_existing_result_reports_structured_input_failures(tmp_path)
