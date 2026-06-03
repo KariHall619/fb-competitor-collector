@@ -317,10 +317,9 @@ def merged_post(existing: dict[str, Any], incoming: dict[str, Any], config: dict
     merged = {column: choose_value(existing, incoming, column) for column in POST_COLUMNS}
     if not merged.get("canonical_post_url"):
         merged["canonical_post_url"] = incoming.get("canonical_post_url") or existing.get("canonical_post_url") or incoming.get("post_url")
-    if existing.get("output_status") != "output_synced":
-        computed_output = output_status_for(merged, config)
-        merged["output_status"] = computed_output
-        merged["crawl_status"] = crawl_status_for(merged, config)
+    computed_output = output_status_for(merged, config)
+    merged["output_status"] = computed_output
+    merged["crawl_status"] = crawl_status_for(merged, config)
     merged.update(audit_fields_for_storage(merged, config))
     return merged
 

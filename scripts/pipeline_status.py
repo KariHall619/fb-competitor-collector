@@ -71,8 +71,17 @@ def missing_enrichment_stages(post: dict[str, Any], config: dict[str, Any] | Non
 
 def output_status_for(post: dict[str, Any], config: dict[str, Any] | None = None) -> str:
     explicit = str(post.get("output_status") or "")
-    if explicit in {BLOCKED, OUTPUT_SYNCED}:
+    if explicit == BLOCKED:
         return explicit
+    if (
+        explicit == OUTPUT_SYNCED
+        and post.get("post_url")
+        and has_confirmed_time(post)
+        and has_article_summary(post)
+        and has_qualified_comment_lead_link(post)
+        and audit_post_fields(post, config).get("field_audit_status") == "passed"
+    ):
+        return OUTPUT_SYNCED
     if (
         post.get("post_url")
         and has_confirmed_time(post)

@@ -634,7 +634,8 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
 
     computed_output_status = output_status_for(post)
     if not post["output_status"] or (
-        post["output_status"] == "ready_for_output" and computed_output_status != "ready_for_output"
+        post["output_status"] in {"ready_for_output", "output_synced"}
+        and computed_output_status != post["output_status"]
     ):
         post["output_status"] = computed_output_status
     if post["crawl_status"] in {"", "imported", "captured"}:

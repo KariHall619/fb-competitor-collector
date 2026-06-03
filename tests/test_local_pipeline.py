@@ -3071,6 +3071,88 @@ def assert_sqlite_upsert_resyncs_previously_synced_rows(tmp_path: Path) -> None:
     assert result["sync_candidates"][0]["likes"] == 120
 
 
+def assert_output_synced_rows_missing_business_fields_reopen_enrichment(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, pending_enrichment_tasks, row_for_post, upsert_post
+
+    config = {
+        "quality_audit": {
+            "required_engagement_fields": ["likes", "comments", "shares"],
+            "required_post_types": ["图文", "视频", "仅图片", "仅文字"],
+        }
+    }
+    conn = connect(tmp_path / "synced-missing-business-fields.sqlite")
+    partial = normalize_post(
+        {
+            "account_name": "Legacy Synced",
+            "account_url": "https://www.facebook.com/legacysynced",
+            "post_url": "https://www.facebook.com/legacysynced/posts/missing-fields",
+            "posted_at": "2026年6月3日 10:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/legacy-missing",
+            "landing_url": "https://story.example/legacy-missing",
+            "lead_url_raw": "https://story.example/legacy-missing",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "likes": 38,
+            "comments": 12,
+            "shares": 4,
+            "story_summary": "",
+            "summary_source": "",
+            "post_type": "",
+            "output_status": "output_synced",
+        }
+    )
+    upsert_post(conn, partial, config)
+    conn.execute(
+        """
+        UPDATE posts
+        SET output_status = 'output_synced',
+            crawl_status = 'output_synced'
+        WHERE canonical_post_url = ? OR post_url = ?
+        """,
+        (partial["canonical_post_url"], partial["post_url"]),
+    )
+    conn.execute(
+        """
+        INSERT INTO enrichment_tasks
+        (canonical_post_url, post_url, stage, status, last_error)
+        VALUES
+        (?, ?, 'post_type', 'done', 'old success marker'),
+        (?, ?, 'summary', 'done', 'old success marker')
+        """,
+        (
+            partial["canonical_post_url"],
+            partial["post_url"],
+            partial["canonical_post_url"],
+            partial["post_url"],
+        ),
+    )
+    conn.commit()
+
+    upsert_post(conn, partial, config)
+    stored = row_for_post(conn, partial)
+    assert stored is not None
+    assert stored["output_status"] != "output_synced"
+    assert "article_summary" in stored["field_audit_reasons"]
+    assert "post_type" in stored["field_audit_reasons"]
+
+    task_summary = enqueue_enrichment_tasks_for_posts(conn, [stored], config)
+    assert task_summary["stage_counts"] == {"article_material": 1, "post_type": 1, "summary": 1}
+    assert task_summary["open_stage_counts"] == {"article_material": 1, "post_type": 1, "summary": 1}
+    tasks = sorted(
+        (task["stage"], task["status"], task["last_error"])
+        for task in pending_enrichment_tasks(conn, stages=["article_material", "post_type", "summary"], limit=10)
+    )
+    assert tasks == [
+        ("article_material", "pending", None),
+        ("post_type", "pending", None),
+        ("summary", "pending", None),
+    ]
+
+
 def assert_sqlite_upsert_clears_resolved_coverage_note(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
@@ -12522,6 +12604,7 @@ def main() -> int:
         assert_sqlite_upsert_preserves_enriched_fields(tmp_path)
         assert_sqlite_upsert_preserves_article_material_payload(tmp_path)
         assert_sqlite_upsert_resyncs_previously_synced_rows(tmp_path)
+        assert_output_synced_rows_missing_business_fields_reopen_enrichment(tmp_path)
         assert_sqlite_upsert_clears_resolved_coverage_note(tmp_path)
         assert_sqlite_upsert_does_not_protect_internal_lead_links(tmp_path)
         assert_sqlite_upsert_dedupes_equivalent_media_urls(tmp_path)
