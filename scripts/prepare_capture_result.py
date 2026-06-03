@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from coverage_status import coverage_note_from_payload
+from field_schema import normalize_header
 from models import (
     clean_article_url,
     clean_post_url,
@@ -34,12 +35,23 @@ MEDIA_LINK_RE = re.compile(
 )
 ARTICLE_SUMMARY_KEYS = ("article_summary", "文章摘要", "内容摘要", "故事概要", "摘要", "简述")
 POST_TYPE_KEYS = ("post_type", "帖子类型", "内容类型")
+VIEW_KEYS = ("views", "播放量", "浏览量")
+LIKE_KEYS = ("likes", "reactions", "点赞量", "点赞数", "反应数")
+COMMENT_KEYS = ("comments", "评论数", "评论量")
+SHARE_KEYS = ("shares", "分享数", "分享量")
+ENGAGEMENT_KEYS = ("engagement_data", "engagement_raw", "互动数据", "互动数据（点赞量）", "互动数据(点赞量)", "互动数据汇总")
 
 
 def first_raw_value(raw: dict[str, Any], keys: tuple[str, ...]) -> Any:
     for key in keys:
         value = raw.get(key)
         if value not in (None, ""):
+            return value
+    normalized_keys = {normalize_header(key) for key in keys}
+    for raw_key, value in raw.items():
+        if value in (None, ""):
+            continue
+        if normalize_header(raw_key) in normalized_keys:
             return value
     return ""
 
@@ -101,9 +113,9 @@ def summary_source_for_story(raw: dict[str, Any], story_summary: str) -> str:
 
 
 def parse_engagement(raw: dict[str, Any]) -> tuple[int | None, int | None, str]:
-    engagement = str(raw.get("engagement_data") or raw.get("engagement_raw") or "")
-    views = parse_count(raw.get("views") or raw.get("播放量") or raw.get("浏览量"))
-    likes = parse_count(raw.get("likes") or raw.get("reactions") or raw.get("点赞量"))
+    engagement = str(first_raw_value(raw, ENGAGEMENT_KEYS) or "")
+    views = parse_count(first_raw_value(raw, VIEW_KEYS))
+    likes = parse_count(first_raw_value(raw, LIKE_KEYS))
     if views is None:
         match = re.search(r"([\d.,]+)\s*([kKmM万]?)\s*(views|plays|次播放|播放)", engagement, re.I)
         if match:
@@ -244,7 +256,7 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
         note_parts.append("评论区或评论回复引流链接待确认")
     if views is None and likes is None and not engagement:
         note_parts.append("互动数据未确认")
-    if parse_count(raw.get("shares") or raw.get("分享数")) is None:
+    if parse_count(first_raw_value(raw, SHARE_KEYS)) is None:
         note_parts.append("分享数未确认")
 
     record = {
@@ -269,8 +281,8 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
         "time_source": time_source,
         "views": views,
         "likes": likes,
-        "comments": parse_count(raw.get("comments") or raw.get("评论数")),
-        "shares": parse_count(raw.get("shares") or raw.get("分享数")),
+        "comments": parse_count(first_raw_value(raw, COMMENT_KEYS)),
+        "shares": parse_count(first_raw_value(raw, SHARE_KEYS)),
         "engagement_data": engagement,
         "crawl_status": "captured",
         "coverage_note": raw.get("coverage_note") or defaults.get("coverage_note", ""),

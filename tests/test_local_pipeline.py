@@ -3557,6 +3557,64 @@ def assert_prepare_capture_preserves_type_and_article_summary(tmp_path: Path) ->
     assert row[4] == ""
 
 
+def assert_prepare_capture_accepts_normalized_business_header_aliases(tmp_path: Path) -> None:
+    raw = tmp_path / "raw_with_normalized_summary_aliases.json"
+    prepared = tmp_path / "prepared_with_normalized_summary_aliases.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Summary Page",
+                        "account_url": "https://www.facebook.com/summarypage",
+                        "post_url": "https://www.facebook.com/summarypage/posts/normalized-aliases",
+                        "posted_at": "2026年5月27日 17:06",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                        "landing_url": "https://story.example/normalized-aliases",
+                        "lead_url_raw": "https://story.example/normalized-aliases",
+                        "lead_link_status": "qualified",
+                        "lead_link_source": "comment",
+                        "内容 类型": "图文",
+                        "内容摘要\n": VALID_CN_SUMMARY,
+                        "点赞量": 80,
+                        "评论 数": 12,
+                        "分享数 ": 3,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    prepared_result = run(
+        [
+            PYTHON,
+            "scripts/prepare_capture_result.py",
+            "--input",
+            str(raw),
+            "--output",
+            str(prepared),
+            "--target-date",
+            "260527",
+            "--account-url",
+            "https://www.facebook.com/summarypage",
+            "--account-name",
+            "Summary Page",
+        ]
+    )
+    assert prepared_result.returncode == 0, prepared_result.stderr or prepared_result.stdout
+    prepared_data = json.loads(prepared.read_text(encoding="utf-8"))
+    post = prepared_data["posts"][0]
+    assert post["post_type"] == "图文"
+    assert post["story_summary"] == VALID_CN_SUMMARY
+    assert post["summary_source"] == "article"
+    assert post["comments"] == 12
+    assert post["shares"] == 3
+    assert "文章概要待生成" not in post["note"]
+    assert "帖子类型待确认" not in post["note"]
+
+
 def assert_normalize_post_marks_existing_story_summary_as_article() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
@@ -3613,6 +3671,38 @@ def assert_normalize_post_accepts_business_header_aliases() -> None:
     assert post["landing_url"] == "https://story.example/business-alias"
     assert post["story_summary"] == VALID_CN_SUMMARY
     assert post["summary_source"] == "article"
+    assert post["output_status"] == "ready_for_output"
+
+
+def assert_normalize_post_accepts_normalized_business_header_aliases() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+
+    post = normalize_post(
+        {
+            "account_name": "Imported Sheet",
+            "post_url": "https://www.facebook.com/imported/posts/business-alias-normalized",
+            "posted_at": "2026年5月27日 17:06",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "落地页链接 ": "https://story.example/business-alias-normalized",
+            "lead_url_raw": "https://story.example/business-alias-normalized",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "内容 类型": "图文",
+            "内容摘要\n": VALID_CN_SUMMARY,
+            "点赞量": 80,
+            "评论 数": 12,
+            "分享数 ": 3,
+        }
+    )
+    assert post["post_type"] == "图文"
+    assert post["article_url"] == "https://story.example/business-alias-normalized"
+    assert post["landing_url"] == "https://story.example/business-alias-normalized"
+    assert post["story_summary"] == VALID_CN_SUMMARY
+    assert post["summary_source"] == "article"
+    assert post["comments"] == 12
+    assert post["shares"] == 3
     assert post["output_status"] == "ready_for_output"
 
 
@@ -12818,8 +12908,10 @@ def main() -> int:
         assert_strict_sync_completion_uses_full_candidate_scope(tmp_path)
         assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path)
         assert_prepare_capture_preserves_type_and_article_summary(tmp_path)
+        assert_prepare_capture_accepts_normalized_business_header_aliases(tmp_path)
         assert_normalize_post_marks_existing_story_summary_as_article()
         assert_normalize_post_accepts_business_header_aliases()
+        assert_normalize_post_accepts_normalized_business_header_aliases()
         assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_path)
         assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path)
         assert_article_url_alone_does_not_qualify_lead_link(tmp_path)

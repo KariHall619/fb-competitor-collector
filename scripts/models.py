@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlencode, unquote, urlparse, urlunparse
 from typing import Any
 
-from field_schema import DEFAULT_OUTPUT_HEADERS, output_row_for_headers
+from field_schema import DEFAULT_OUTPUT_HEADERS, normalize_header, output_row_for_headers
 from value_utils import parse_bool
 
 
@@ -28,6 +28,11 @@ ARTICLE_SUMMARY_KEYS = ("article_summary", "文章摘要", "内容摘要", "故�
 SUMMARY_KEYS = (*ARTICLE_SUMMARY_KEYS, "story_summary", "topic_content")
 POST_TYPE_KEYS = ("post_type", "帖子类型", "内容类型")
 POSTED_AT_KEYS = ("posted_at", "发帖时间精确值")
+ENGAGEMENT_KEYS = ("engagement_data", "互动数据", "互动数据（点赞量）", "互动数据(点赞量)", "互动数据汇总")
+VIEW_KEYS = ("views", "播放量", "浏览量")
+LIKE_KEYS = ("likes", "点赞量", "点赞数", "reactions", "反应数")
+COMMENT_KEYS = ("comments", "评论数", "评论量")
+SHARE_KEYS = ("shares", "分享数", "分享量")
 FACEBOOK_INTERNAL_HOSTS = {
     "facebook.com",
     "m.facebook.com",
@@ -82,6 +87,12 @@ def first_value(raw: dict[str, Any], keys: tuple[str, ...], default: Any = "") -
     for key in keys:
         value = raw.get(key)
         if value not in (None, ""):
+            return value
+    normalized_keys = {normalize_header(key) for key in keys}
+    for raw_key, value in raw.items():
+        if value in (None, ""):
+            continue
+        if normalize_header(raw_key) in normalized_keys:
             return value
     return default
 
@@ -575,11 +586,11 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
             raw = {**raw, "note": note}
     posted_date_source = raw.get("posted_date") or posted_at or raw.get("post_time") or raw.get("发帖时间") or ""
     posted_date = normalize_post_time(posted_date_source)
-    engagement_raw = raw.get("engagement_data") or raw.get("互动数据") or ""
-    views = parse_count(raw.get("views") or raw.get("播放量") or raw.get("浏览量"))
-    likes = parse_count(raw.get("likes") or raw.get("点赞量") or raw.get("reactions"))
-    comments = parse_count(raw.get("comments") or raw.get("评论数"))
-    shares = parse_count(raw.get("shares") or raw.get("分享数"))
+    engagement_raw = first_value(raw, ENGAGEMENT_KEYS)
+    views = parse_count(first_value(raw, VIEW_KEYS))
+    likes = parse_count(first_value(raw, LIKE_KEYS))
+    comments = parse_count(first_value(raw, COMMENT_KEYS))
+    shares = parse_count(first_value(raw, SHARE_KEYS))
     note = raw.get("note") or raw.get("备注") or ""
     if views is None and likes is None and comments is None and shares is None:
         note = append_note(note, "互动数据未确认")
