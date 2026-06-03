@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from check_env import check_opencli
 from config_loader import load_config
 from coverage_expectations import apply_expected_coverage, split_expected_labels
+from discovery_retry import attach_auto_retry_report, needs_snapshot_budget_retry, retry_snapshot_budget
 from lark_io import ensure_user_identity
 from models import normalize_date
 from store import (
@@ -160,6 +161,88 @@ def import_prepared(
     return payload
 
 
+def discover_homepage_once(
+    args: argparse.Namespace,
+    *,
+    max_snapshots: int,
+    min_snapshots: int,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, Any], int]:
+    started = time.monotonic()
+    discover = run_command(
+        [
+            "node",
+            "scripts/opencli_extract_current_tab.mjs",
+            "--config",
+            args.config,
+            "--account-url",
+            args.account_url,
+            "--max-text",
+            str(args.max_text),
+            "--max-snapshots",
+            str(max_snapshots),
+            "--min-snapshots",
+            str(min_snapshots),
+        ]
+    )
+    payload = parse_json_output(discover)
+    payload["returncode"] = discover.returncode
+    payload["snapshot_budget"] = {
+        "max_snapshots": int(max_snapshots),
+        "min_snapshots": int(min_snapshots),
+    }
+    return discover, payload, int((time.monotonic() - started) * 1000)
+
+
+def discover_homepage_with_retry(args: argparse.Namespace) -> tuple[subprocess.CompletedProcess[str], dict[str, Any], dict[str, Any]]:
+    max_snapshots = int(args.max_snapshots or 0)
+    min_snapshots = int(args.min_snapshots or 0)
+    discover, payload, elapsed_ms = discover_homepage_once(
+        args,
+        max_snapshots=max_snapshots,
+        min_snapshots=min_snapshots,
+    )
+    attempts = [
+        {
+            "attempt": 1,
+            "max_snapshots": max_snapshots,
+            "min_snapshots": min_snapshots,
+            "returncode": discover.returncode,
+            "ok": bool(payload.get("ok")),
+            "post_count": payload.get("post_count", 0),
+            "coverage_incomplete": bool(payload.get("coverage_incomplete") or (payload.get("coverage") or {}).get("coverage_incomplete")),
+            "stop_reason": (payload.get("coverage") or {}).get("stop_reason") or "",
+            "elapsed_ms": elapsed_ms,
+        }
+    ]
+    if discover.returncode == 0 and payload.get("ok") and needs_snapshot_budget_retry(payload):
+        raised_max = retry_snapshot_budget(max_snapshots, minimum=32)
+        retry_discover, retry_payload, retry_elapsed_ms = discover_homepage_once(
+            args,
+            max_snapshots=raised_max,
+            min_snapshots=min_snapshots,
+        )
+        attempts.append(
+            {
+                "attempt": 2,
+                "max_snapshots": raised_max,
+                "min_snapshots": min_snapshots,
+                "returncode": retry_discover.returncode,
+                "ok": bool(retry_payload.get("ok")),
+                "post_count": retry_payload.get("post_count", 0),
+                "coverage_incomplete": bool(
+                    retry_payload.get("coverage_incomplete") or (retry_payload.get("coverage") or {}).get("coverage_incomplete")
+                ),
+                "stop_reason": (retry_payload.get("coverage") or {}).get("stop_reason") or "",
+                "elapsed_ms": retry_elapsed_ms,
+            }
+        )
+        if retry_discover.returncode == 0 and retry_payload.get("ok"):
+            retry_payload = attach_auto_retry_report(retry_payload, attempts=attempts)
+            return retry_discover, retry_payload, {"attempted": True, "attempts": attempts}
+    payload = attach_auto_retry_report(payload, attempts=attempts if len(attempts) > 1 else [])
+    return discover, payload, {"attempted": len(attempts) > 1, "attempts": attempts}
+
+
 def discover_and_import(
     args: argparse.Namespace,
     *,
@@ -169,24 +252,7 @@ def discover_and_import(
     with tempfile.TemporaryDirectory(prefix="fb-account-job-") as temp_dir:
         temp = Path(temp_dir)
         raw_path = temp / "raw.json"
-        discover = run_command(
-            [
-                "node",
-                "scripts/opencli_extract_current_tab.mjs",
-                "--config",
-                args.config,
-                "--account-url",
-                args.account_url,
-                "--max-text",
-                str(args.max_text),
-                "--max-snapshots",
-                str(args.max_snapshots),
-                "--min-snapshots",
-                str(args.min_snapshots),
-            ]
-        )
-        discover_payload = parse_json_output(discover)
-        discover_payload["returncode"] = discover.returncode
+        discover, discover_payload, discover_retry = discover_homepage_with_retry(args)
         if discover.returncode != 0 or not discover_payload.get("ok"):
             stage = "human_intervention_required" if needs_human_intervention(discover_payload) else "discover"
             return {
@@ -195,6 +261,7 @@ def discover_and_import(
                 "human_intervention_required": needs_human_intervention(discover_payload),
                 "elapsed_ms": int((time.monotonic() - discover_started) * 1000),
                 "discover": discover_payload,
+                "discover_retry": discover_retry,
             }
         expected_labels = split_expected_labels(getattr(args, "expected_labels", ""))
         discover_payload = apply_expected_coverage(
@@ -245,6 +312,7 @@ def discover_and_import(
                         "coverage_blocked": discover_payload.get("coverage_blocked", False),
                         "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
                         "expected_coverage": (discover_payload.get("coverage") or {}).get("expected", {}),
+                        "auto_retry": (discover_payload.get("coverage") or {}).get("auto_retry", {}),
                     },
                     "prepare": prepare_payload,
                     "returncode": prepare.returncode,
@@ -268,6 +336,7 @@ def discover_and_import(
                         "coverage_blocked": discover_payload.get("coverage_blocked", False),
                         "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
                         "expected_coverage": (discover_payload.get("coverage") or {}).get("expected", {}),
+                        "auto_retry": (discover_payload.get("coverage") or {}).get("auto_retry", {}),
                     },
                     "prepare": {
                         "ok": False,
@@ -305,6 +374,7 @@ def discover_and_import(
                             "coverage_blocked": discover_payload.get("coverage_blocked", False),
                             "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
                             "expected_coverage": (discover_payload.get("coverage") or {}).get("expected", {}),
+                            "auto_retry": (discover_payload.get("coverage") or {}).get("auto_retry", {}),
                         },
                         "prepared_counts": prepared_counts,
                         "prepared": prepared_counts[target_date],
@@ -331,7 +401,9 @@ def discover_and_import(
                 "coverage_blocked": discover_payload.get("coverage_blocked", False),
                 "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
                 "expected_coverage": (discover_payload.get("coverage") or {}).get("expected", {}),
+                "auto_retry": (discover_payload.get("coverage") or {}).get("auto_retry", {}),
             },
+            "discover_retry": discover_retry,
             "prepared_counts": prepared_counts,
             "imports": imports,
         }

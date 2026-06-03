@@ -17,7 +17,13 @@ from config_loader import load_config
 from coverage_expectations import apply_expected_coverage, split_expected_labels
 from lark_io import ensure_user_identity
 from models import normalize_date
-from run_account_job import account_job_quality_summary, completion_blockers_for_summary, discover_coverage_summary, quality_thresholds_from_args
+from run_account_job import (
+    account_job_quality_summary,
+    completion_blockers_for_summary,
+    discover_coverage_summary,
+    discover_homepage_with_retry,
+    quality_thresholds_from_args,
+)
 from store import connect, query_posts
 from sync_status import blocked_auth_result, completion_run_status, enrichment_completion_summary
 
@@ -274,23 +280,7 @@ def main() -> int:
         prepared_path = temp / "prepared.json"
 
         discover_started = time.monotonic()
-        discover = run_command(
-            [
-                "node",
-                "scripts/opencli_extract_current_tab.mjs",
-                "--config",
-                args.config,
-                "--account-url",
-                args.account_url,
-                "--max-text",
-                args.max_text,
-                "--max-snapshots",
-                str(args.max_snapshots),
-                "--min-snapshots",
-                str(args.min_snapshots),
-            ]
-        )
-        discover_payload = parse_stdout_json(discover)
+        discover, discover_payload, discover_retry = discover_homepage_with_retry(args)
         if discover.returncode != 0 or not discover_payload.get("ok"):
             run_status = "human_intervention_required" if needs_human_intervention(discover_payload) else "discover_failed"
             print(
@@ -305,6 +295,7 @@ def main() -> int:
                         elapsed_ms=int((time.monotonic() - started) * 1000),
                         discover_elapsed_ms=int((time.monotonic() - discover_started) * 1000),
                         result=discover_payload,
+                        discover_retry=discover_retry,
                     ),
                     ensure_ascii=False,
                     indent=2,
@@ -352,6 +343,7 @@ def main() -> int:
                             "coverage": discover_payload.get("coverage", {}),
                             "coverage_blocked": discover_payload.get("coverage_blocked", False),
                             "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
+                            "auto_retry": (discover_payload.get("coverage") or {}).get("auto_retry", {}),
                         },
                         stdout=prepare.stdout,
                         stderr=prepare.stderr,
@@ -380,6 +372,7 @@ def main() -> int:
                             "coverage": discover_payload.get("coverage", {}),
                             "coverage_blocked": discover_payload.get("coverage_blocked", False),
                             "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
+                            "auto_retry": (discover_payload.get("coverage") or {}).get("auto_retry", {}),
                         },
                         output_path=str(prepared_path),
                     ),
@@ -481,6 +474,7 @@ def main() -> int:
             "capture_complete": discover_payload.get("capture_complete", True),
             "coverage": discover_payload.get("coverage", {}),
             "expected_coverage": (discover_payload.get("coverage") or {}).get("expected", {}),
+            "discover_retry": discover_retry,
             "prepared": prepared_payload.get("prepared", 0),
             "coverage_note": prepared_payload.get("coverage_note", ""),
             "ready_for_output": prepared_payload.get("ready_for_output", 0),

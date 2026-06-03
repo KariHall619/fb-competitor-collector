@@ -5546,6 +5546,134 @@ print(json.dumps(payload, ensure_ascii=False))
     assert argv[argv.index("--min-snapshots") + 1] == "9"
 
 
+def assert_run_account_job_auto_retries_snapshot_cap(tmp_path: Path) -> None:
+    config = tmp_path / "settings_account_retry_snapshots.yaml"
+    fake_bin = tmp_path / "bin-account-retry-snapshots"
+    fake_opencli = tmp_path / "fake-opencli-account-retry-snapshots"
+    calls_file = tmp_path / "account-retry-calls.json"
+    db_path = tmp_path / "account-retry-snapshots.sqlite"
+    opencli_status = start_opencli_status_server()
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
+    config.write_text(text, encoding="utf-8")
+    fake_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
+    fake_opencli.chmod(0o755)
+    fake_bin.mkdir()
+    (fake_bin / "node").write_text(
+        f"""#!{PYTHON}
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+max_snapshots = int(sys.argv[sys.argv.index("--max-snapshots") + 1])
+base = {{
+    "ok": True,
+    "snapshots": [{{"visible_time_texts": ["1h", "2h"], "new_posts": 0}}],
+}}
+if max_snapshots < 32:
+    payload = {{
+        **base,
+        "post_count": 1,
+        "raw_candidate_count": 1,
+        "capture_complete": False,
+        "coverage_incomplete": True,
+        "coverage": {{
+            "capture_complete": False,
+            "coverage_incomplete": True,
+            "stop_reason": "max_snapshots",
+            "message": "hit cap"
+        }},
+        "posts": [
+            {{
+                "post_url": "https://www.facebook.com/accountretry/posts/one",
+                "post_time_text": "1h",
+                "crawled_at": "2026-06-03T12:00:00",
+                "raw_text": "candidate one"
+            }}
+        ]
+    }}
+else:
+    payload = {{
+        **base,
+        "post_count": 2,
+        "raw_candidate_count": 2,
+        "capture_complete": True,
+        "coverage": {{
+            "capture_complete": True,
+            "coverage_incomplete": False,
+            "stop_reason": "stable_no_new_posts"
+        }},
+        "posts": [
+            {{
+                "post_url": "https://www.facebook.com/accountretry/posts/one",
+                "post_time_text": "1h",
+                "crawled_at": "2026-06-03T12:00:00",
+                "raw_text": "candidate one"
+            }},
+            {{
+                "post_url": "https://www.facebook.com/accountretry/posts/two",
+                "post_time_text": "2h",
+                "crawled_at": "2026-06-03T12:00:00",
+                "raw_text": "candidate two"
+            }}
+        ]
+    }}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    (fake_bin / "node").chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+
+    try:
+        result = run(
+            [
+                PYTHON,
+                "scripts/run_account_job.py",
+                "--config",
+                str(config),
+                "--account-url",
+                "https://www.facebook.com/accountretry",
+                "--account-name",
+                "Account Retry",
+                "--target-date",
+                "260603",
+                "--dry-run",
+                "--status-only",
+                "--max-snapshots",
+                "20",
+                "--min-snapshots",
+                "6",
+            ],
+            env=env,
+        )
+    finally:
+        opencli_status.shutdown()
+        opencli_status.server_close()
+    assert result.returncode == 0, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert len(calls) == 2
+    assert calls[0][calls[0].index("--max-snapshots") + 1] == "20"
+    assert calls[1][calls[1].index("--max-snapshots") + 1] == "32"
+    assert data["post_count"] == 2
+    assert data["discover_import"]["discover"]["post_count"] == 2
+    assert data["discover_import"]["discover_retry"]["attempted"] is True
+    assert data["discover_import"]["discover"]["auto_retry"]["resolved"] is True
+    assert data["discover_coverage"]["complete"] is True
+    assert data["discover_coverage"]["incomplete"] is False
+    assert data["quality_summary"]["coverage_health"] == "complete"
+    assert data["quality_summary"]["ledger_candidate_count"] == 2
+    assert data["run_status"] != "coverage_incomplete"
+
+
 def assert_run_account_job_structures_prepare_and_import_failures(tmp_path: Path) -> None:
     opencli_status = start_opencli_status_server()
     try:
@@ -5846,6 +5974,130 @@ print(json.dumps(payload, ensure_ascii=False))
     assert argv[argv.index("--max-snapshots") + 1] == "44"
     assert "--min-snapshots" in argv
     assert argv[argv.index("--min-snapshots") + 1] == "9"
+
+
+def assert_run_capture_pipeline_auto_retries_snapshot_cap(tmp_path: Path) -> None:
+    config = tmp_path / "settings_capture_retry_snapshots.yaml"
+    fake_bin = tmp_path / "bin-capture-retry-snapshots"
+    fake_opencli = tmp_path / "fake-opencli-capture-retry-snapshots"
+    calls_file = tmp_path / "capture-retry-calls.json"
+    db_path = tmp_path / "capture-retry-snapshots.sqlite"
+    opencli_status = start_opencli_status_server()
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
+    config.write_text(text, encoding="utf-8")
+    fake_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
+    fake_opencli.chmod(0o755)
+    fake_bin.mkdir()
+    (fake_bin / "node").write_text(
+        f"""#!{PYTHON}
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+max_snapshots = int(sys.argv[sys.argv.index("--max-snapshots") + 1])
+if max_snapshots < 32:
+    payload = {{
+        "ok": True,
+        "post_count": 1,
+        "raw_candidate_count": 1,
+        "capture_complete": False,
+        "coverage_incomplete": True,
+        "coverage": {{
+            "capture_complete": False,
+            "coverage_incomplete": True,
+            "stop_reason": "max_snapshots",
+            "message": "hit cap"
+        }},
+        "snapshots": [{{"visible_time_texts": ["1h"], "new_posts": 1}}],
+        "posts": [
+            {{
+                "post_url": "https://www.facebook.com/captureretry/posts/one",
+                "post_time_text": "1h",
+                "crawled_at": "2026-06-03T12:00:00",
+                "raw_text": "candidate one"
+            }}
+        ]
+    }}
+else:
+    payload = {{
+        "ok": True,
+        "post_count": 2,
+        "raw_candidate_count": 2,
+        "capture_complete": True,
+        "coverage": {{
+            "capture_complete": True,
+            "coverage_incomplete": False,
+            "stop_reason": "stable_no_new_posts"
+        }},
+        "snapshots": [{{"visible_time_texts": ["1h", "2h"], "new_posts": 0}}],
+        "posts": [
+            {{
+                "post_url": "https://www.facebook.com/captureretry/posts/one",
+                "post_time_text": "1h",
+                "crawled_at": "2026-06-03T12:00:00",
+                "raw_text": "candidate one"
+            }},
+            {{
+                "post_url": "https://www.facebook.com/captureretry/posts/two",
+                "post_time_text": "2h",
+                "crawled_at": "2026-06-03T12:00:00",
+                "raw_text": "candidate two"
+            }}
+        ]
+    }}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    (fake_bin / "node").chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+
+    try:
+        result = run(
+            [
+                PYTHON,
+                "scripts/run_capture_pipeline.py",
+                "--config",
+                str(config),
+                "--account-url",
+                "https://www.facebook.com/captureretry",
+                "--account-name",
+                "Capture Retry",
+                "--target-date",
+                "260603",
+                "--max-snapshots",
+                "20",
+                "--min-snapshots",
+                "6",
+            ],
+            env=env,
+        )
+    finally:
+        opencli_status.shutdown()
+        opencli_status.server_close()
+    assert result.returncode == 0, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert len(calls) == 2
+    assert calls[0][calls[0].index("--max-snapshots") + 1] == "20"
+    assert calls[1][calls[1].index("--max-snapshots") + 1] == "32"
+    assert data["run_status"] != "coverage_incomplete"
+    assert data["post_count"] == 2
+    assert data["coverage"]["coverage_incomplete"] is False
+    assert data["coverage"]["auto_retry"]["attempted"] is True
+    assert data["coverage"]["auto_retry"]["resolved"] is True
+    assert data["discover_retry"]["attempted"] is True
+    assert data["discover_retry"]["attempts"][0]["coverage_incomplete"] is True
+    assert data["discover_retry"]["attempts"][1]["coverage_incomplete"] is False
+    assert data["quality_summary"]["coverage_health"] == "complete"
 
 
 def assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path: Path) -> None:
@@ -7105,7 +7357,9 @@ def main() -> int:
         assert_run_capture_pipeline_reports_opencli_blocker(tmp_path)
         assert_run_capture_pipeline_applies_expected_coverage(tmp_path)
         assert_run_account_job_passes_snapshot_budget(tmp_path)
+        assert_run_account_job_auto_retries_snapshot_cap(tmp_path)
         assert_run_capture_pipeline_passes_snapshot_budget(tmp_path)
+        assert_run_capture_pipeline_auto_retries_snapshot_cap(tmp_path)
         assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path)
         assert_run_capture_pipeline_structures_prepare_and_import_failures(tmp_path)
         assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path)
