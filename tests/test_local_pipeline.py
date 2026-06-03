@@ -2761,6 +2761,46 @@ def assert_sqlite_upsert_preserves_enriched_fields(tmp_path: Path) -> None:
     assert stored["adoption_status"] == "采用"
 
 
+def assert_sqlite_upsert_preserves_article_material_payload(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from story_summary_policy import article_material_for_post
+    from store import connect, row_for_post, upsert_post
+
+    conn = connect(tmp_path / "article-material-upsert.sqlite")
+    with_material = normalize_post(
+        {
+            "account_name": "Material Page",
+            "account_url": "https://www.facebook.com/materialpage",
+            "post_url": "https://www.facebook.com/materialpage/posts/keep-material",
+            "article_url": "https://story.example/material",
+            "landing_url": "https://story.example/material",
+            "article_material": {
+                "ok": True,
+                "title": "Existing material",
+                "text_excerpt": "Fetched article text that should remain available for summary export.",
+            },
+        }
+    )
+    upsert_post(conn, with_material)
+    partial = normalize_post(
+        {
+            "account_name": "Material Page",
+            "account_url": "https://www.facebook.com/materialpage",
+            "post_url": "https://www.facebook.com/materialpage/posts/keep-material",
+            "post_time_text": "2h",
+            "story_summary": "Visible homepage candidate.",
+            "raw_payload": {"story_summary": "Visible homepage candidate."},
+        }
+    )
+    upsert_post(conn, partial)
+    stored = row_for_post(conn, with_material)
+    assert stored is not None
+    material = article_material_for_post(stored)
+    assert material["ok"] is True
+    assert material["title"] == "Existing material"
+
+
 def assert_sqlite_upsert_resyncs_previously_synced_rows(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
@@ -3080,6 +3120,121 @@ def assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path: Path) -> 
     assert '"audit_output": true' in audit.stdout
     assert '"output_candidates": 2' in audit.stdout
     assert '"rows": 2' in audit.stdout
+
+
+def assert_prepare_capture_preserves_type_and_article_summary(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from field_schema import output_row_for_headers
+    from store import connect, row_for_post
+
+    raw = tmp_path / "raw_with_summary.json"
+    prepared = tmp_path / "prepared_with_summary.json"
+    config = tmp_path / "settings_with_summary.yaml"
+    db_path = tmp_path / "summary-preserve.sqlite"
+    raw.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Summary Page",
+                        "account_url": "https://www.facebook.com/summarypage",
+                        "post_url": "https://www.facebook.com/summarypage/posts/keeps-fields",
+                        "posted_at": "2026年5月27日 17:06",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                        "article_url": "https://story.example/keeps-fields",
+                        "landing_url": "https://story.example/keeps-fields",
+                        "lead_url_raw": "https://story.example/keeps-fields",
+                        "lead_link_status": "qualified",
+                        "lead_link_source": "comment",
+                        "post_type": "图文",
+                        "story_summary": VALID_CN_SUMMARY,
+                        "summary_source": "article",
+                        "likes": 80,
+                        "comments": 12,
+                        "shares": 3,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    prepared_result = run(
+        [
+            PYTHON,
+            "scripts/prepare_capture_result.py",
+            "--input",
+            str(raw),
+            "--output",
+            str(prepared),
+            "--target-date",
+            "260527",
+            "--account-url",
+            "https://www.facebook.com/summarypage",
+            "--account-name",
+            "Summary Page",
+        ]
+    )
+    assert prepared_result.returncode == 0, prepared_result.stderr or prepared_result.stdout
+    prepared_data = json.loads(prepared.read_text(encoding="utf-8"))
+    post = prepared_data["posts"][0]
+    assert post["post_type"] == "图文"
+    assert post["story_summary"] == VALID_CN_SUMMARY
+    assert post["summary_source"] == "article"
+    assert "文章概要待生成" not in post["note"]
+    assert "帖子类型待确认" not in post["note"]
+
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {db_path}"),
+        encoding="utf-8",
+    )
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(prepared), "--no-sync"])
+    assert imported.returncode == 0, imported.stderr or imported.stdout
+    conn = connect(db_path)
+    stored = row_for_post(conn, post)
+    assert stored is not None
+    assert stored["post_type"] == "图文"
+    assert stored["story_summary"] == VALID_CN_SUMMARY
+    assert stored["summary_source"] == "article"
+    row = output_row_for_headers(
+        stored,
+        ["账号", "帖子链接", "帖子类型", "故事概要", "是否采用"],
+        {"quality_audit": {"required_engagement_fields": ["likes", "comments", "shares"]}},
+    )
+    assert row[2] == "图文"
+    assert row[3] == VALID_CN_SUMMARY
+    assert row[4] == ""
+
+
+def assert_normalize_post_marks_existing_story_summary_as_article() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+
+    post = normalize_post(
+        {
+            "account_name": "Imported Sheet",
+            "post_url": "https://www.facebook.com/imported/posts/summary",
+            "posted_at": "2026年5月27日 17:06",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/imported",
+            "landing_url": "https://story.example/imported",
+            "lead_url_raw": "https://story.example/imported",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "帖子类型": "视频",
+            "故事概要": VALID_CN_SUMMARY,
+            "likes": 80,
+            "comments": 12,
+            "shares": 3,
+        }
+    )
+    assert post["post_type"] == "视频"
+    assert post["story_summary"] == VALID_CN_SUMMARY
+    assert post["summary_source"] == "article"
+    assert post["output_status"] == "ready_for_output"
 
 
 def assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_path: Path) -> None:
@@ -7857,6 +8012,7 @@ def main() -> int:
         hot_after_many_data = json.loads(hot_after_many.stdout)
         assert hot_after_many_data["count"] == 1, hot_after_many.stdout
         assert_sqlite_upsert_preserves_enriched_fields(tmp_path)
+        assert_sqlite_upsert_preserves_article_material_payload(tmp_path)
         assert_sqlite_upsert_resyncs_previously_synced_rows(tmp_path)
         assert_sqlite_upsert_does_not_protect_internal_lead_links(tmp_path)
         assert_sqlite_upsert_dedupes_equivalent_media_urls(tmp_path)
@@ -7879,6 +8035,8 @@ def main() -> int:
         assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path)
         assert_strict_sync_completion_uses_full_candidate_scope(tmp_path)
         assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path)
+        assert_prepare_capture_preserves_type_and_article_summary(tmp_path)
+        assert_normalize_post_marks_existing_story_summary_as_article()
         assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_path)
         assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path)
         assert_article_url_alone_does_not_qualify_lead_link(tmp_path)

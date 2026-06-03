@@ -237,12 +237,46 @@ def non_empty(value: Any) -> bool:
     return value not in (None, "")
 
 
+def payload_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def has_article_material_payload(value: Any) -> bool:
+    material = payload_dict(value).get("article_material")
+    return isinstance(material, dict) and bool(material)
+
+
+def merge_raw_payload(existing_value: Any, incoming_value: Any) -> Any:
+    if not non_empty(incoming_value):
+        return existing_value
+    existing_payload = payload_dict(existing_value)
+    incoming_payload = payload_dict(incoming_value)
+    if existing_payload and incoming_payload:
+        merged = {**existing_payload, **incoming_payload}
+        if has_article_material_payload(existing_value) and not has_article_material_payload(incoming_value):
+            merged["article_material"] = existing_payload["article_material"]
+        return json.dumps(merged, ensure_ascii=False)
+    if has_article_material_payload(existing_value) and not has_article_material_payload(incoming_value):
+        return existing_value
+    return incoming_value
+
+
 def choose_value(existing: dict[str, Any], incoming: dict[str, Any], column: str) -> Any:
     current = existing.get(column)
     new_value = incoming.get(column)
     if column in {"first_seen_at", "created_at"}:
         return current or new_value
-    if column in {"last_seen_at", "crawled_at", "raw_payload", "coverage_note"}:
+    if column == "raw_payload":
+        return merge_raw_payload(current, new_value)
+    if column in {"last_seen_at", "crawled_at", "coverage_note"}:
         return new_value if non_empty(new_value) else current
     if column in {"field_audit_status", "field_audit_reasons", "field_audit_note"}:
         return new_value if new_value is not None else current

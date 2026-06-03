@@ -494,6 +494,17 @@ def has_output_post_time(post: dict[str, Any]) -> bool:
     return bool(post.get("posted_at"))
 
 
+def summary_source_for_raw(raw: dict[str, Any], summary: Any) -> str:
+    explicit = raw.get("summary_source")
+    if explicit:
+        return str(explicit)
+    if raw.get("article_summary"):
+        return "article"
+    if raw.get("故事概要") or raw.get("文章摘要"):
+        return "article"
+    return ""
+
+
 def normalize_post_time(value: Any, now: datetime | None = None) -> str:
     """Convert absolute post dates to YYMMDD.
 
@@ -600,7 +611,7 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
         "output_status": raw.get("output_status") or defaults.get("output_status", ""),
         "time_confirmed": time_confirmed,
         "time_source": time_source,
-        "summary_source": raw.get("summary_source") or ("article" if raw.get("article_summary") else ""),
+        "summary_source": summary_source_for_raw(raw, story_summary),
         "adoption_status": raw.get("adoption_status") or raw.get("是否采用") or "",
         "field_audit_status": raw.get("field_audit_status") or "",
         "field_audit_reasons": raw.get("field_audit_reasons") or "",

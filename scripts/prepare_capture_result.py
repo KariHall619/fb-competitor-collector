@@ -74,10 +74,20 @@ def load_raw_posts(path: str | Path) -> tuple[dict[str, Any] | list[dict[str, An
 
 
 def clean_story_placeholder(raw: dict[str, Any]) -> str:
-    article_summary = raw.get("article_summary") or ""
+    article_summary = raw.get("article_summary") or raw.get("故事概要") or raw.get("文章摘要") or ""
     if article_summary:
         return str(article_summary).strip()
+    if raw.get("summary_source") == "article" and raw.get("story_summary"):
+        return str(raw.get("story_summary") or "").strip()
     return ""
+
+
+def summary_source_for_story(raw: dict[str, Any], story_summary: str) -> str:
+    if raw.get("summary_source"):
+        return str(raw.get("summary_source") or "")
+    if raw.get("article_summary") or raw.get("故事概要") or raw.get("文章摘要"):
+        return "article"
+    return "pending_article_summary"
 
 
 def parse_engagement(raw: dict[str, Any]) -> tuple[int | None, int | None, str]:
@@ -213,8 +223,13 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
         note_parts.append("目标日期待确认")
     if not article_url:
         note_parts.append("评论/回复引流落地链接待确认")
-    if not raw.get("article_summary"):
+    story_summary = clean_story_placeholder(raw)
+    summary_source = summary_source_for_story(raw, story_summary)
+    post_type = str(raw.get("post_type") or raw.get("帖子类型") or "").strip()
+    if not story_summary or summary_source != "article":
         note_parts.append("文章概要待生成")
+    if not post_type:
+        note_parts.append("帖子类型待确认")
     if lead_link_status != "qualified":
         note_parts.append("评论区或评论回复引流链接待确认")
     if views is None and likes is None and not engagement:
@@ -234,8 +249,9 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
         "landing_url": landing_url,
         "lead_link_status": lead_link_status,
         "lead_link_source": lead_link_source,
-        "story_summary": clean_story_placeholder(raw),
-        "summary_source": "article" if raw.get("article_summary") else "pending_article_summary",
+        "post_type": post_type,
+        "story_summary": story_summary,
+        "summary_source": summary_source,
         "posted_date": candidate_date,
         "posted_at": posted_at,
         "relative_time_text": relative_time,
