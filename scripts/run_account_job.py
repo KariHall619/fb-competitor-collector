@@ -471,7 +471,13 @@ def should_run_worker_for_completion(completion: dict[str, Any]) -> bool:
     return True
 
 
-def run_worker_pass(args: argparse.Namespace, *, target_dates: list[str], pass_index: int) -> dict[str, Any]:
+def run_worker_pass(
+    args: argparse.Namespace,
+    *,
+    target_dates: list[str],
+    pass_index: int,
+    stages: str = ENRICHMENT_STAGES,
+) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     for target_date in target_dates:
         command = [
@@ -480,7 +486,7 @@ def run_worker_pass(args: argparse.Namespace, *, target_dates: list[str], pass_i
             "--config",
             args.config,
             "--stages",
-            ENRICHMENT_STAGES,
+            stages,
             "--date",
             target_date,
             "--account-url",
@@ -545,6 +551,7 @@ def run_worker_pass(args: argparse.Namespace, *, target_dates: list[str], pass_i
         "codex_summary_required": bool(codex_summary_required_count),
         "codex_summary_required_count": codex_summary_required_count,
         "codex_summary_required_urls": codex_summary_required_urls[:10],
+        "stages": stages,
         "results": results,
     }
 
@@ -2114,6 +2121,25 @@ def main() -> int:
             auto_fix=True,
         )
         if not opencli_preflight.get("ok"):
+            preflight_worker_passes: list[dict[str, Any]] = []
+            if _int_metric((completion_before_worker.get("open_task_stage_counts") or {}).get("article_material")) > 0:
+                preflight_worker_passes.append(
+                    run_worker_pass(
+                        args,
+                        target_dates=target_dates,
+                        pass_index=1,
+                        stages="article_material",
+                    )
+                )
+                posts = scoped_posts(
+                    conn,
+                    account_name=args.account_name,
+                    account_url=args.account_url,
+                    account_type=args.account_type,
+                    dates=target_dates,
+                )
+                enqueue_enrichment_tasks_for_posts(conn, posts, config)
+                completion_before_worker = enrichment_completion_summary(conn, posts, config)
             preflight_summary_auto_apply = auto_generate_and_apply_summaries(args, target_dates, completion_before_worker)
             if preflight_summary_auto_apply.get("ok") and not preflight_summary_auto_apply.get("skipped"):
                 posts = scoped_posts(
@@ -2150,6 +2176,7 @@ def main() -> int:
                 "task_counts": task_counts_for_posts(conn, posts),
                 "recovered_running_tasks": recovered_running_tasks,
                 "opencli_preflight": opencli_preflight,
+                "preflight_worker_passes": preflight_worker_passes,
                 "summary_auto_apply": preflight_summary_auto_apply,
                 "feishu_sync": sync_result,
                 "enrichment_completion": completion_before_worker,

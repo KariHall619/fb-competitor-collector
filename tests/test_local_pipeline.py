@@ -6832,131 +6832,126 @@ sys.exit(1)
 def assert_run_account_job_keeps_missing_post_type_incomplete_after_summary_apply(tmp_path: Path) -> None:
     config = tmp_path / "settings_account_missing_type_summary.yaml"
     db_path = tmp_path / "account-missing-type-summary.sqlite"
-    fake_lark = tmp_path / "fake-lark-cli-missing-type-summary"
-    writes_file = tmp_path / "missing-type-summary-writes.json"
+    fake_opencli = tmp_path / "fake-opencli-missing-type-summary"
+    article_dir = tmp_path / "article_site"
+    article_dir.mkdir()
+    article_path = article_dir / "missing-type-summary.html"
+    article_path.write_text(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Inheritance control story</title>
+    <meta name="description" content="A son tries to freeze his mother's credit card and take control of a family company.">
+  </head>
+  <body>
+    <h1>Inheritance control story</h1>
+    <p>A mother discovers that her son secretly tried to freeze her credit card and redirect company assets, forcing her to confront a family betrayal.</p>
+    <p>The story follows the conflict as she gathers evidence, protects the business, and prepares a legal counterattack against the relatives trying to control her property.</p>
+  </body>
+</html>
+""".strip(),
+        encoding="utf-8",
+    )
+    server, article_base_url = start_static_http_server(article_dir)
+    article_url = f"{article_base_url}/{article_path.name}"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
     config_text = config.read_text(encoding="utf-8")
     config_text = config_text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
-    config_text = config_text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
-    config_text = config_text.replace('output_spreadsheet_url: ""', 'output_spreadsheet_url: "https://fake.feishu.cn/sheets/output"')
+    config_text = config_text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
     config.write_text(config_text, encoding="utf-8")
-    fake_lark.write_text(
-        f"""#!/usr/bin/env python3
-import json
-import pathlib
-import sys
-writes_path = pathlib.Path(r"{writes_file}")
-args = sys.argv[1:]
-if args[:2] == ["config", "default-as"]:
-    print("default-as: user")
-    sys.exit(0)
-if args[:2] == ["config", "strict-mode"]:
-    print("strict-mode: user")
-    sys.exit(0)
-if args[:2] == ["auth", "status"]:
-    print(json.dumps({{"identity": "user", "tokenStatus": "valid", "userName": "Test User"}}))
-    sys.exit(0)
-if args[:2] == ["sheets", "+info"]:
-    print(json.dumps({{"data": {{"sheets": {{"sheets": [{{"title": "全量内容库", "sheet_id": "sheet1"}}, {{"title": "FB竞品帖子链接", "sheet_id": "sheet2"}}]}}}}}}))
-    sys.exit(0)
-if args[:2] == ["sheets", "+create-sheet"]:
-    print(json.dumps({{"ok": True, "sheet_id": "sheet2"}}))
-    sys.exit(0)
-if args[:2] == ["sheets", "+read"]:
-    print(json.dumps({{"data": {{"valueRange": {{"values": []}}}}}}))
-    sys.exit(0)
-if args[:2] == ["sheets", "+write"]:
-    range_value = args[args.index("--range") + 1]
-    values = json.loads(args[args.index("--values") + 1])
-    existing = json.loads(writes_path.read_text(encoding="utf-8")) if writes_path.exists() else []
-    existing.append({{"range": range_value, "values": values}})
-    writes_path.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
-    print(json.dumps({{"ok": True, "rows": len(values)}}))
-    sys.exit(0)
-print("unexpected lark call: " + " ".join(args), file=sys.stderr)
-sys.exit(1)
+    fake_opencli.write_text(
+        """#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo '1.8.1'
+  exit 0
+fi
+echo 'opencli unavailable' >&2
+exit 1
 """,
         encoding="utf-8",
     )
-    fake_lark.chmod(0o755)
+    fake_opencli.chmod(0o755)
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
     from store import connect, enqueue_enrichment_tasks_for_posts, row_for_post, upsert_post
 
-    conn = connect(db_path)
-    post = normalize_post(
-        {
-            "account_name": "Missing Type Summary",
-            "account_url": "https://www.facebook.com/missingtypesummary",
-            "account_type": "competitor",
-            "post_url": "https://www.facebook.com/missingtypesummary/posts/needs-type",
-            "posted_at": "2026年6月3日 12:00",
-            "time_confirmed": True,
-            "time_source": "dom_aria_label",
-            "article_url": "https://story.example/missing-type-summary",
-            "landing_url": "https://story.example/missing-type-summary",
-            "lead_url_raw": "https://story.example/missing-type-summary",
-            "lead_link_status": "qualified",
-            "lead_link_source": "comment",
-            "likes": 20,
-            "comments": 4,
-            "shares": 2,
-            "article_material": {
-                "ok": True,
-                "title": "Missing type summary source",
-                "text_excerpt": "A family conflict story where the protagonist uncovers a hidden problem.",
-            },
-        }
-    )
-    upsert_post(conn, post, {"quality_audit": {"required_post_types": ["图文", "视频", "仅图片", "仅文字"]}})
-    stored = row_for_post(conn, post)
-    assert stored is not None
-    enqueue_enrichment_tasks_for_posts(conn, [stored], {"quality_audit": {"required_post_types": ["图文", "视频", "仅图片", "仅文字"]}})
-    assert stored["output_status"] != "ready_for_output"
+    try:
+        conn = connect(db_path)
+        post = normalize_post(
+            {
+                "account_name": "Missing Type Summary",
+                "account_url": "https://www.facebook.com/missingtypesummary",
+                "account_type": "competitor",
+                "post_url": "https://www.facebook.com/missingtypesummary/posts/needs-type",
+                "posted_at": "2026年6月3日 12:00",
+                "time_confirmed": True,
+                "time_source": "dom_aria_label",
+                "article_url": article_url,
+                "landing_url": article_url,
+                "lead_url_raw": article_url,
+                "lead_link_status": "qualified",
+                "lead_link_source": "comment",
+                "likes": 20,
+                "comments": 4,
+                "shares": 2,
+            }
+        )
+        upsert_post(conn, post, {"quality_audit": {"required_post_types": ["图文", "视频", "仅图片", "仅文字"]}})
+        stored = row_for_post(conn, post)
+        assert stored is not None
+        enqueue_enrichment_tasks_for_posts(conn, [stored], {"quality_audit": {"required_post_types": ["图文", "视频", "仅图片", "仅文字"]}})
+        assert stored["output_status"] != "ready_for_output"
 
-    job = run(
-        [
-            PYTHON,
-            "scripts/run_account_job.py",
-            "--config",
-            str(config),
-            "--account-url",
-            "https://www.facebook.com/missingtypesummary",
-            "--account-name",
-            "Missing Type Summary",
-            "--target-date",
-            "260603",
-            "--resume-only",
-            "--sync",
-            "--max-resume-passes",
-            "0",
-        ]
-    )
+        job = run(
+            [
+                PYTHON,
+                "scripts/run_account_job.py",
+                "--config",
+                str(config),
+                "--account-url",
+                "https://www.facebook.com/missingtypesummary",
+                "--account-name",
+                "Missing Type Summary",
+                "--target-date",
+                "260603",
+                "--resume-only",
+                "--sync",
+                "--dry-run",
+                "--max-resume-passes",
+                "0",
+            ]
+        )
 
-    assert job.returncode != 0, job.stdout + job.stderr
-    data = json.loads(job.stdout)
-    assert data["run_status"] == "blocked_opencli"
-    assert data["summary_auto_apply"]["ok"] is True
-    assert data["feishu_sync"]["ok"] is True
-    assert data["quality_summary"]["missing_stage_counts"]["post_type"] == 1
-    assert "summary" not in data["quality_summary"]["missing_stage_counts"]
-    assert data["quality_summary"]["final_usable_rate"] == 0.0
-    stored_after = row_for_post(conn, post)
-    assert stored_after is not None
-    assert stored_after["story_summary"]
-    assert stored_after["summary_source"] == "article"
-    assert stored_after["post_type"] == ""
-    assert stored_after["output_status"] != "ready_for_output"
-    assert "post_type" in stored_after["field_audit_reasons"]
-    assert "article_summary" not in stored_after["field_audit_reasons"]
-    writes = json.loads(writes_file.read_text(encoding="utf-8"))
-    values = writes[-1]["values"]
-    headers = values[0]
-    row = values[1]
-    assert row[headers.index("帖子类型")] == ""
-    assert row[headers.index("故事概要")] == stored_after["story_summary"]
-    assert "帖子类型" in row[headers.index("是否采用")]
-    assert "文章概要" not in row[headers.index("是否采用")]
+        assert job.returncode != 0, job.stdout + job.stderr
+        data = json.loads(job.stdout)
+        assert data["run_status"] == "blocked_opencli"
+        assert data["opencli_preflight"]["ok"] is False
+        assert data["preflight_worker_passes"][0]["stages"] == "article_material"
+        assert data["preflight_worker_passes"][0]["ok"] is True
+        assert data["preflight_worker_passes"][0]["results"][0]["completed"] == 1
+        assert data["summary_auto_apply"]["ok"] is True
+        assert data["feishu_sync"]["ok"] is True
+        assert data["feishu_sync"]["dry_run"] is True
+        assert data["feishu_sync"]["output_candidates"] == 1
+        assert data["quality_summary"]["missing_stage_counts"]["post_type"] == 1
+        assert data["quality_summary"]["open_task_stage_counts"]["post_type"] == 1
+        assert "article_material" not in data["quality_summary"]["open_task_stage_counts"]
+        assert "summary" not in data["quality_summary"]["missing_stage_counts"]
+        assert data["quality_summary"]["final_usable_rate"] == 0.0
+        stored_after = row_for_post(conn, post)
+        assert stored_after is not None
+        assert stored_after["story_summary"]
+        assert stored_after["summary_source"] == "article"
+        assert stored_after["post_type"] == ""
+        assert stored_after["output_status"] != "ready_for_output"
+        assert "post_type" in stored_after["field_audit_reasons"]
+        assert "article_summary" not in stored_after["field_audit_reasons"]
+        assert "article_material:done" in data["task_counts"]
+        assert "summary:pending" not in data["task_counts"]
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def assert_run_account_job_applies_partial_generated_summaries() -> None:
