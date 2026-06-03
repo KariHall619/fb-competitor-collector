@@ -45,6 +45,8 @@ AUTO_FOLLOW_REASONS = {
     "pending_enrichment",
     "needs_codex_summary",
     "summary_auto_apply_failed",
+    "captured_not_synced",
+    "resumed_not_synced",
     "quality_threshold_failed",
     "sync_failed",
     "quality_gate",
@@ -55,6 +57,8 @@ AUTO_FOLLOW_REASON_PRIORITY = {
     "pending_enrichment": 10,
     "needs_codex_summary": 20,
     "summary_auto_apply_failed": 30,
+    "captured_not_synced": 35,
+    "resumed_not_synced": 35,
     "sync_failed": 40,
     "quality_gate": 45,
     "audit_output_gate": 46,
@@ -271,6 +275,7 @@ def command_for_current_account(command_text: str, account: dict[str, Any]) -> b
 def next_auto_follow_command(summary: dict[str, Any], account: dict[str, Any]) -> list[str]:
     if summary.get("complete") or str(summary.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS:
         return []
+    original_requested_sync = bool(summary.get("requested_sync"))
     candidates: list[tuple[int, int, str]] = []
     for item in summary.get("next_commands") or []:
         if not isinstance(item, dict):
@@ -278,6 +283,8 @@ def next_auto_follow_command(summary: dict[str, Any], account: dict[str, Any]) -
         reason = str(item.get("reason") or "")
         command_text = str(item.get("command") or "")
         if reason not in AUTO_FOLLOW_REASONS:
+            continue
+        if reason in {"captured_not_synced", "resumed_not_synced"} and not original_requested_sync:
             continue
         if not command_for_current_account(command_text, account):
             continue
@@ -411,6 +418,7 @@ def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any])
         payload.setdefault("account_type", account.get("account_type") or "competitor")
         summary = summarize_account_result(payload, returncode=result.returncode)
         summary["command"] = command_key
+        summary["requested_sync"] = bool(args.sync)
         attempts.append(
             {
                 "attempt": attempt_index,
