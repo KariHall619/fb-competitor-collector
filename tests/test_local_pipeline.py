@@ -2006,7 +2006,7 @@ def assert_completion_summary_uses_quality_audit_config(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
     from sync_status import enrichment_completion_summary
-    from store import connect, row_for_post, upsert_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, pending_enrichment_tasks, row_for_post, upsert_post
 
     conn = connect(tmp_path / "completion-audit-config.sqlite")
     config = {
@@ -2047,6 +2047,11 @@ def assert_completion_summary_uses_quality_audit_config(tmp_path: Path) -> None:
     assert strict_completion["field_gap_counts"]["likes_low"] == 1
     assert strict_completion["field_gap_counts"]["post_type"] == 1
     assert strict_completion["top_field_gaps"][0]["reason"] in {"likes_low", "post_type"}
+    default_tasks = enqueue_enrichment_tasks_for_posts(conn, [stored])
+    assert default_tasks["stage_counts"] == {}
+    strict_tasks = enqueue_enrichment_tasks_for_posts(conn, [stored], config)
+    assert strict_tasks["stage_counts"] == {"engagement": 1, "post_type": 1}
+    assert sorted(task["stage"] for task in pending_enrichment_tasks(conn, limit=20)) == ["engagement", "post_type"]
 
 
 def assert_export_summary_requests_can_scope_account_job(tmp_path: Path) -> None:

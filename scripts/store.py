@@ -350,12 +350,13 @@ def enqueue_enrichment_tasks(
     post: dict[str, Any],
     *,
     stages: list[str] | tuple[str, ...] | None = None,
+    config: dict[str, Any] | None = None,
 ) -> int:
     canonical = post.get("canonical_post_url") or post.get("post_url")
     post_url = post.get("post_url") or canonical
     if not canonical or not post_url:
         return 0
-    wanted = list(stages or missing_enrichment_stages(post))
+    wanted = list(stages or missing_enrichment_stages(post, config))
     for stage in wanted:
         if stage not in ENRICHMENT_STAGES:
             continue
@@ -384,14 +385,18 @@ def enqueue_enrichment_tasks(
     return len([stage for stage in wanted if stage in ENRICHMENT_STAGES])
 
 
-def enqueue_enrichment_tasks_for_posts(conn: sqlite3.Connection, posts: list[dict[str, Any]]) -> dict[str, Any]:
+def enqueue_enrichment_tasks_for_posts(
+    conn: sqlite3.Connection,
+    posts: list[dict[str, Any]],
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     before = conn.total_changes
     planned_stage_counts: dict[str, int] = {}
     for post in posts:
-        for stage in missing_enrichment_stages(post):
+        for stage in missing_enrichment_stages(post, config):
             if stage in ENRICHMENT_STAGES:
                 planned_stage_counts[stage] = planned_stage_counts.get(stage, 0) + 1
-        enqueue_enrichment_tasks(conn, post)
+        enqueue_enrichment_tasks(conn, post, config=config)
     open_stage_counts: dict[str, int] = {}
     scoped_tasks = enrichment_tasks_for_posts(conn, posts)
     for task in scoped_tasks:

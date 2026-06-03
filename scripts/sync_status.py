@@ -354,7 +354,7 @@ def enrichment_completion_summary(conn: Any, posts: list[dict[str, Any]], config
     coverage_incomplete_urls: list[str] = []
     for post in posts:
         key = _post_key(post)
-        missing = missing_enrichment_stages(post)
+        missing = missing_enrichment_stages(post, config)
         if _coverage_incomplete(post) and "coverage" not in missing:
             missing.append("coverage")
         if key and missing:

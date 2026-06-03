@@ -52,7 +52,7 @@ def has_partial_review_signal(post: dict[str, Any]) -> bool:
     )
 
 
-def missing_enrichment_stages(post: dict[str, Any]) -> list[str]:
+def missing_enrichment_stages(post: dict[str, Any], config: dict[str, Any] | None = None) -> list[str]:
     stages: list[str] = []
     if not has_confirmed_time(post):
         stages.append("detail_time")
@@ -63,7 +63,7 @@ def missing_enrichment_stages(post: dict[str, Any]) -> list[str]:
             stages.append("article_material")
     if not has_article_summary(post):
         stages.append("summary")
-    for stage in audit_refetch_stages(post):
+    for stage in audit_refetch_stages(post, config):
         if stage not in stages:
             stages.append(stage)
     return stages

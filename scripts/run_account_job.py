@@ -1708,7 +1708,7 @@ def main() -> int:
         posts,
         stale_running_seconds=stale_running_seconds,
     )
-    enqueue_enrichment_tasks_for_posts(conn, posts)
+    enqueue_enrichment_tasks_for_posts(conn, posts, config)
     completion_before_worker = enrichment_completion_summary(conn, posts, config)
     if args.resume_only and not args.status_only and completion_requires_opencli(completion_before_worker):
         opencli_preflight = check_opencli(
@@ -1767,7 +1767,7 @@ def main() -> int:
             account_type=args.account_type,
             dates=target_dates,
         )
-        enqueue_enrichment_tasks_for_posts(conn, posts)
+        enqueue_enrichment_tasks_for_posts(conn, posts, config)
 
     posts = scoped_posts(
         conn,

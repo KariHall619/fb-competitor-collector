@@ -135,7 +135,12 @@ def run_detail_batch(
         return {"ok": True, "posts": payload.get("posts", []), "payload": payload, "stdout": result.stdout}
 
 
-def apply_detail_results(conn: sqlite3.Connection, original_posts: list[dict[str, Any]], enriched_posts: list[dict[str, Any]]) -> None:
+def apply_detail_results(
+    conn: sqlite3.Connection,
+    original_posts: list[dict[str, Any]],
+    enriched_posts: list[dict[str, Any]],
+    config: dict[str, Any] | None = None,
+) -> None:
     by_key = {
         (post.get("canonical_post_url") or post.get("post_url")): post
         for post in enriched_posts
@@ -150,7 +155,7 @@ def apply_detail_results(conn: sqlite3.Connection, original_posts: list[dict[str
         enriched["crawl_status"] = crawl_status_for(enriched)
         upsert_post(conn, enriched)
         stored = row_for_post(conn, enriched) or enriched
-        enqueue_enrichment_tasks(conn, stored)
+        enqueue_enrichment_tasks(conn, stored, config=config)
 
 
 def article_material_fields(post: dict[str, Any], material: dict[str, Any]) -> dict[str, Any]:
@@ -343,7 +348,7 @@ def main() -> int:
                         if reason not in retry_later_reasons:
                             retry_later_reasons.append(reason)
                     raise RuntimeError(result.get("error") or "detail enrichment failed")
-                apply_detail_results(conn, batch, result.get("posts", []))
+                apply_detail_results(conn, batch, result.get("posts", []), config)
                 batch_succeeded = True
             except Exception as exc:
                 batch_error = str(exc)
@@ -385,7 +390,7 @@ def main() -> int:
                     fields = article_material_fields(post, material)
                     update_post_fields(conn, post, fields)
                     stored = row_for_post(conn, post) or post
-                    enqueue_enrichment_tasks(conn, stored)
+                    enqueue_enrichment_tasks(conn, stored, config=config)
                     mark_task_done(conn, task["id"], duration_ms=duration_ms)
                     completed += 1
                 except Exception as exc:

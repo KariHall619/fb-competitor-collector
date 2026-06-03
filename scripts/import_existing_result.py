@@ -185,7 +185,7 @@ def main() -> int:
             )
         )
         return 1
-    task_result = enqueue_enrichment_tasks_for_posts(conn, result.get("sync_candidates") or posts)
+    task_result = enqueue_enrichment_tasks_for_posts(conn, result.get("sync_candidates") or posts, config)
     import_summary = {
         "input": len(raw_records),
         "inserted": len(result["inserted"]),
