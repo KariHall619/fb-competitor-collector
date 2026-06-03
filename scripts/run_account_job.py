@@ -722,6 +722,27 @@ def append_quality_threshold_args(command: list[Any], args: argparse.Namespace) 
             command.extend([flag, str(value)])
 
 
+def has_scoped_enrichment_resume_work(completion: dict[str, Any]) -> bool:
+    if completion.get("has_summary_only_work") and not _int_metric(completion.get("auto_open_task_count")):
+        return False
+    if _int_metric(completion.get("auto_open_task_count")) > 0:
+        return True
+    for key in ("open_task_stage_counts", "missing_stage_counts"):
+        counts = completion.get(key)
+        if not isinstance(counts, dict):
+            continue
+        for stage, count in counts.items():
+            if str(stage or "") == "coverage":
+                continue
+            if str(stage or "") == "summary":
+                continue
+            if _int_metric(count) > 0:
+                return True
+    if "open_task_stage_counts" not in completion and "missing_stage_counts" not in completion:
+        return _int_metric(completion.get("open_task_count")) > 0
+    return False
+
+
 def append_resume_pass_budget(command: list[Any], args: argparse.Namespace) -> None:
     command.extend(["--max-resume-passes", str(auto_resume_pass_limit(getattr(args, "max_resume_passes", 0)))])
     command.extend(["--enrichment-limit", str(max(1, _int_metric(getattr(args, "enrichment_limit", 50)) or 50))])
@@ -819,8 +840,8 @@ def next_commands_for_status(
     has_auto_work = has_auto_enrichment_work(completion)
     hard_blockers = {"blocked_opencli", "blocked_auth", "human_intervention_required", "worker_failed"}
     if run_status not in hard_blockers and (
-        run_status in {"coverage_incomplete", "incomplete_pending_tasks", "synced_ledger_incomplete"}
-        or has_auto_work
+        run_status in {"incomplete_pending_tasks", "synced_ledger_incomplete"}
+        or has_scoped_enrichment_resume_work(completion)
     ):
         command = resume_command(base, primary_date, force_recover_running=True)
         append_resume_pass_budget(command, args)

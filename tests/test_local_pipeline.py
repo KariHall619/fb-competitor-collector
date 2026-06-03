@@ -5730,6 +5730,56 @@ def assert_run_account_job_recovery_commands_preserve_resume_budget() -> None:
     assert "--resume-only" in human_parts
 
 
+def assert_run_account_job_does_not_resume_empty_coverage_scope() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/emptycoverage",
+            "account_name": "Empty Coverage",
+            "account_type": "competitor",
+            "sync": True,
+            "dry_run": False,
+            "strict_ready_only": False,
+            "resume_only": False,
+            "max_snapshots": 20,
+            "min_snapshots": 6,
+            "max_resume_passes": 2,
+            "enrichment_limit": 25,
+            "resume_stale_running_seconds": 120,
+            "expected_post_count": 13,
+            "expected_labels": "1h,2h",
+            "require_coverage_complete": False,
+            "min_ledger_usable_rate": 0.0,
+            "min_final_usable_rate": 0.0,
+            "min_completion_rate": 0.0,
+            "min_expected_post_coverage_rate": 0.0,
+            "min_expected_label_coverage_rate": 0.0,
+        },
+    )()
+    commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260603"],
+        run_status="coverage_incomplete",
+        completion={
+            "post_count": 0,
+            "open_task_count": 0,
+            "auto_open_task_count": 0,
+            "coverage_incomplete_count": 1,
+            "missing_stage_counts": {"coverage": 1},
+            "open_task_stage_counts": {},
+        },
+        discover_coverage={"source": "discover", "complete": False, "incomplete": True, "reasons": ["coverage_incomplete"]},
+    )
+    assert [item["reason"] for item in commands] == ["coverage_incomplete"]
+    assert "--resume-only" not in commands[0]["command"]
+    assert "--max-snapshots" in commands[0]["command"]
+
+
 def assert_run_account_job_reports_unsynced_local_completion_command() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import run_account_job
@@ -9415,6 +9465,10 @@ def assert_run_account_job_promotes_discover_coverage_status() -> None:
         "requires_codex_summary_count": 0,
         "coverage_incomplete_count": 0,
         "has_incomplete_enrichment": False,
+        "open_task_count": 9,
+        "auto_open_task_count": 6,
+        "open_task_stage_counts": {"detail_time": 6, "post_type": 3},
+        "missing_stage_counts": {"detail_time": 6, "post_type": 3},
     }
     status = run_account_job.summarize_job_status(
         preflight={"ok": True},
@@ -10135,6 +10189,7 @@ def main() -> int:
         assert_run_account_job_does_not_recover_fresh_running_tasks(tmp_path)
         assert_run_account_job_next_commands_force_recover_running()
         assert_run_account_job_recovery_commands_preserve_resume_budget()
+        assert_run_account_job_does_not_resume_empty_coverage_scope()
         assert_run_account_job_reports_unsynced_local_completion_command()
         assert_run_account_job_reports_worker_retry_later()
         assert_run_account_job_summary_only_next_command_exports_requests()
