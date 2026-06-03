@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2212,6 +2213,118 @@ def assert_export_summary_requests_can_scope_account_job(tmp_path: Path) -> None
     assert payload["scope"]["source_post_count"] == 1
     assert payload["count"] == 1
     assert payload["requests"][0]["post_url"] == "https://facebook.com/target/posts/summary-scope"
+
+
+def assert_apply_article_summaries_scopes_account_job(tmp_path: Path) -> None:
+    config = tmp_path / "settings_summary_apply_scope.yaml"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    db_path = tmp_path / "summary-apply-scope.sqlite"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {db_path}"),
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, row_for_post, upsert_post
+
+    conn = connect(db_path)
+    material = {
+        "article_material": {
+            "ok": True,
+            "title": "Scoped apply story",
+            "text_excerpt": "A story with enough article material for a scoped summary application.",
+        }
+    }
+    raw_target = {
+        "account_name": "Target",
+        "account_url": "https://www.facebook.com/target",
+        "account_type": "competitor",
+        "post_url": "https://www.facebook.com/target/posts/summary-apply",
+        "posted_at": "2026年6月2日 12:00",
+        "time_confirmed": True,
+        "time_source": "dom_aria_label",
+        "article_url": "https://story.example/target-apply",
+        "landing_url": "https://story.example/target-apply",
+        "lead_url_raw": "https://story.example/target-apply",
+        "lead_link_status": "qualified",
+        "lead_link_source": "comment",
+        "likes": 20,
+        "comments": 3,
+        "shares": 1,
+        "post_type": "图文",
+        **material,
+    }
+    raw_other = {
+        **raw_target,
+        "account_name": "Other",
+        "account_url": "https://www.facebook.com/other",
+        "post_url": "https://www.facebook.com/other/posts/summary-apply",
+        "article_url": "https://story.example/other-apply",
+        "landing_url": "https://story.example/other-apply",
+        "lead_url_raw": "https://story.example/other-apply",
+    }
+    target = normalize_post(raw_target)
+    other = normalize_post(raw_other)
+    upsert_post(conn, target)
+    upsert_post(conn, other)
+    summaries = tmp_path / "article_summaries.json"
+    summaries.write_text(
+        json.dumps(
+            {
+                "https://story.example/target-apply": "这篇故事围绕家庭资产争夺展开，主角发现亲人试图控制财产后及时反击，适合提炼成短剧素材。",
+                "https://story.example/other-apply": "这篇故事描述另一组家庭矛盾，主角面对亲属压力后选择保护自己的权益。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    applied = run(
+        [
+            PYTHON,
+            "scripts/apply_article_summaries.py",
+            "--config",
+            str(config),
+            "--summaries",
+            str(summaries),
+            "--date",
+            "260602",
+            "--account-url",
+            "https://www.facebook.com/target",
+            "--account-type",
+            "competitor",
+            "--dry-run",
+        ]
+    )
+    assert applied.returncode == 0, applied.stdout
+    data = json.loads(applied.stdout)
+    assert data["mode"] == "sqlite"
+    assert data["applied"] == 1
+    assert data["scope"]["enabled"] is True
+    assert data["scope"]["source_post_count"] == 1
+    assert data["next_commands"][0]["reason"] == "resume_account_job_after_summary_apply"
+    assert "run_account_job.py" in data["next_commands"][0]["command"]
+    assert "--account-url https://www.facebook.com/target" in data["next_commands"][0]["command"]
+    assert "--target-date 260602" in data["next_commands"][0]["command"]
+    assert "--resume-only" in data["next_commands"][0]["command"]
+    assert "--sync" in data["next_commands"][0]["command"]
+    assert "--dry-run" in data["next_commands"][0]["command"]
+
+    target_after = row_for_post(conn, target)
+    other_after = row_for_post(conn, other)
+    assert target_after is not None
+    assert other_after is not None
+    assert target_after["output_status"] == "ready_for_output"
+    assert target_after["summary_source"] == "article"
+    assert not other_after.get("story_summary")
+    assert other_after["output_status"] != "ready_for_output"
+
+    resumed = run(shlex.split(data["next_commands"][0]["command"]))
+    assert resumed.returncode == 0, resumed.stdout
+    resumed_data = json.loads(resumed.stdout)
+    assert resumed_data["run_status"] == "complete"
+    assert resumed_data["quality_summary"]["final_usable_rate"] == 1.0
+    assert resumed_data["quality_summary"]["ledger_usable_rate"] == 1.0
 
 
 def assert_summary_request_prefers_article_material_source() -> None:
@@ -7758,6 +7871,7 @@ def main() -> int:
         assert_completion_summary_uses_quality_audit_config(tmp_path)
         assert_strict_sync_uses_quality_audit_config(tmp_path)
         assert_export_summary_requests_can_scope_account_job(tmp_path)
+        assert_apply_article_summaries_scopes_account_job(tmp_path)
         assert_summary_request_prefers_article_material_source()
         assert_export_summary_requests_skips_rows_without_material(tmp_path)
         assert_enrich_article_summaries_prefers_article_url(tmp_path)

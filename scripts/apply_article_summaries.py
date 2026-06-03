@@ -12,7 +12,7 @@ from typing import Any
 from pipeline_status import crawl_status_for, output_status_for
 from story_summary_policy import story_summary_errors
 from config_loader import load_config
-from store import all_posts, connect, mark_stage_done, update_post_fields
+from store import all_posts, connect, mark_stage_done, query_posts, update_post_fields
 
 
 def summary_apply_failed_result(
@@ -101,6 +101,80 @@ def applied_fields(post: dict[str, Any], summary: str) -> dict[str, Any]:
     }
 
 
+def shell_quote(value: Any) -> str:
+    text = str(value)
+    if not text:
+        return "''"
+    safe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:=@%+-"
+    if all(char in safe for char in text):
+        return text
+    return "'" + text.replace("'", "'\"'\"'") + "'"
+
+
+def command_text(parts: list[Any]) -> str:
+    return " ".join(shell_quote(part) for part in parts)
+
+
+def scope_enabled(args: argparse.Namespace) -> bool:
+    return any([args.date, args.start_date, args.end_date, args.account_name, args.account_url, args.account_type])
+
+
+def scoped_posts(conn: Any, args: argparse.Namespace) -> list[dict[str, Any]]:
+    if not scope_enabled(args):
+        return all_posts(conn)
+    return query_posts(
+        conn,
+        date=args.date,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        include_unknown_date=bool(args.date or args.start_date or args.end_date),
+        account_name=args.account_name,
+        account_url=args.account_url,
+        account_type=args.account_type,
+    )
+
+
+def apply_scope_payload(args: argparse.Namespace, source_post_count: int) -> dict[str, Any]:
+    return {
+        "enabled": scope_enabled(args),
+        "date": args.date,
+        "start_date": args.start_date,
+        "end_date": args.end_date,
+        "account_name": args.account_name,
+        "account_url": args.account_url,
+        "account_type": args.account_type,
+        "source_post_count": source_post_count,
+    }
+
+
+def next_commands_after_sqlite_apply(args: argparse.Namespace) -> list[dict[str, str]]:
+    if not args.config or not args.account_url:
+        return []
+    command: list[Any] = [
+        "python3",
+        "scripts/run_account_job.py",
+        "--config",
+        args.config,
+    ]
+    command.extend(["--account-url", args.account_url])
+    if args.account_name:
+        command.extend(["--account-name", args.account_name])
+    if args.account_type:
+        command.extend(["--account-type", args.account_type])
+    if args.date:
+        command.extend(["--target-date", args.date])
+    command.extend(["--resume-only", "--force-recover-running", "--sync"])
+    if args.dry_run:
+        command.append("--dry-run")
+    return [
+        {
+            "reason": "resume_account_job_after_summary_apply",
+            "description": "中文概要已应用；继续同账号补抓/同步，让最终可用率和飞书台账更新到最新状态。",
+            "command": command_text(command),
+        }
+    ]
+
+
 def apply_to_posts(posts: list[dict[str, Any]], summaries: dict[str, Any]) -> dict[str, Any]:
     applied = 0
     missing = []
@@ -133,6 +207,13 @@ def main() -> int:
     parser.add_argument("--input", default="")
     parser.add_argument("--summaries", required=True, help="JSON object keyed by post_url/canonical_post_url/article_url")
     parser.add_argument("--output", default="")
+    parser.add_argument("--date", default="")
+    parser.add_argument("--start-date", default="")
+    parser.add_argument("--end-date", default="")
+    parser.add_argument("--account-name", default="")
+    parser.add_argument("--account-url", default="")
+    parser.add_argument("--account-type", default="")
+    parser.add_argument("--dry-run", action="store_true", help="Only affects emitted next_commands; summary application still updates SQLite.")
     args = parser.parse_args()
 
     try:
@@ -173,7 +254,7 @@ def main() -> int:
             )
             return 1
         conn = connect(config.get("database_path", "data/posts.sqlite"))
-        posts = all_posts(conn)
+        posts = scoped_posts(conn, args)
         result = apply_to_posts(posts, summaries)
         for post in posts:
             key = str(post.get("canonical_post_url") or post.get("post_url") or "")
@@ -192,6 +273,8 @@ def main() -> int:
                     "rejected": len(result["rejected"]),
                     "article_summary_missing": result["missing"],
                     "article_summary_rejected": result["rejected"],
+                    "scope": apply_scope_payload(args, len(posts)),
+                    "next_commands": next_commands_after_sqlite_apply(args) if result["applied"] else [],
                 },
                 ensure_ascii=False,
                 indent=2,
