@@ -5327,6 +5327,15 @@ def assert_run_account_job_summary_only_next_command_exports_requests() -> None:
     assert "--account-url https://www.facebook.com/example" in commands[0]["command"]
     assert "--account-type competitor" in commands[0]["command"]
     assert "--resume-only" not in commands[0]["command"]
+    range_commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260602", "260603"],
+        run_status=status,
+        completion=completion,
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert "summary_requests_260602_260603.json" in range_commands[0]["command"]
+    assert "--start-date 260602 --end-date 260603" in range_commands[0]["command"]
 
 
 def assert_run_account_job_worker_pass_surfaces_summary_required() -> None:
@@ -5373,6 +5382,103 @@ def assert_run_account_job_worker_pass_surfaces_summary_required() -> None:
     summary_requirement = run_account_job.worker_summary_requirement_summary([worker_pass])
     assert summary_requirement["codex_summary_required"] is True
     assert summary_requirement["codex_summary_required_count"] == 1
+
+
+def assert_run_account_job_auto_exports_summary_requests(tmp_path: Path) -> None:
+    config = tmp_path / "settings_account_summary_export.yaml"
+    db_path = tmp_path / "account-summary-export.sqlite"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {db_path}"),
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, row_for_post, upsert_post
+
+    conn = connect(db_path)
+    post = normalize_post(
+        {
+            "account_name": "Summary Export",
+            "account_url": "https://www.facebook.com/summaryexport",
+            "account_type": "competitor",
+            "post_url": "https://www.facebook.com/summaryexport/posts/needs-summary",
+            "posted_at": "2026年6月2日 12:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/summary-export",
+            "landing_url": "https://story.example/summary-export",
+            "lead_url_raw": "https://story.example/summary-export",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "likes": 20,
+            "comments": 3,
+            "shares": 1,
+            "post_type": "图文",
+            "article_material": {
+                "ok": True,
+                "title": "Auto exported summary request",
+                "text_excerpt": "A complete article material payload exists and only needs a Chinese summary.",
+            },
+        }
+    )
+    upsert_post(conn, post)
+    stored = row_for_post(conn, post)
+    assert stored is not None
+    enqueue_enrichment_tasks_for_posts(conn, [stored])
+
+    status_only = run(
+        [
+            PYTHON,
+            "scripts/run_account_job.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/summaryexport",
+            "--account-name",
+            "Summary Export",
+            "--target-date",
+            "260602",
+            "--resume-only",
+            "--status-only",
+            "--dry-run",
+        ]
+    )
+    assert status_only.returncode == 0, status_only.stdout
+    status_data = json.loads(status_only.stdout)
+    assert status_data["run_status"] == "needs_codex_summary"
+    assert status_data["summary_requests_export"]["skipped"] is True
+    assert status_data["summary_requests_export"]["reason"] == "status_only"
+
+    job = run(
+        [
+            PYTHON,
+            "scripts/run_account_job.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/summaryexport",
+            "--account-name",
+            "Summary Export",
+            "--target-date",
+            "260602",
+            "--resume-only",
+            "--dry-run",
+        ]
+    )
+    assert job.returncode == 0, job.stdout
+    data = json.loads(job.stdout)
+    assert data["run_status"] == "needs_codex_summary"
+    assert data["summary_requests_export"]["ok"] is True
+    assert data["summary_requests_export"]["count"] == 1
+    output_path = Path(data["summary_requests_export"]["output_path"])
+    assert output_path.name == "summary_requests_260602.json"
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["scope"]["enabled"] is True
+    assert payload["scope"]["date"] == "260602"
+    assert payload["scope"]["account_url"] == "https://www.facebook.com/summaryexport"
+    assert payload["count"] == 1
+    assert payload["requests"][0]["article_material"]["title"] == "Auto exported summary request"
 
 
 def assert_run_account_job_worker_pass_reports_non_json_failure() -> None:
@@ -7699,6 +7805,7 @@ def main() -> int:
         assert_run_account_job_reports_worker_retry_later()
         assert_run_account_job_summary_only_next_command_exports_requests()
         assert_run_account_job_worker_pass_surfaces_summary_required()
+        assert_run_account_job_auto_exports_summary_requests(tmp_path)
         assert_run_account_job_worker_pass_reports_non_json_failure()
         assert_run_account_job_prioritizes_auto_work_before_summary_export()
         assert_run_capture_pipeline_uses_completion_status_helpers()

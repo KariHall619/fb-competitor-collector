@@ -621,6 +621,31 @@ def command_text(parts: list[Any]) -> str:
     return " ".join(shell_quote(part) for part in parts)
 
 
+def summary_requests_output_path_for_dates(target_dates: list[str]) -> str:
+    dates = [date for date in target_dates if date]
+    if not dates:
+        suffix = "current"
+    elif len(dates) == 1:
+        suffix = dates[0]
+    else:
+        suffix = f"{dates[0]}_{dates[-1]}"
+    return f"exports/summary_requests_{suffix}.json"
+
+
+def append_summary_scope_args(command: list[Any], args: argparse.Namespace, target_dates: list[str]) -> None:
+    dates = [date for date in target_dates if date]
+    if len(dates) == 1:
+        command.extend(["--date", dates[0]])
+    elif len(dates) > 1:
+        command.extend(["--start-date", dates[0], "--end-date", dates[-1]])
+    if args.account_name:
+        command.extend(["--account-name", args.account_name])
+    if args.account_url:
+        command.extend(["--account-url", args.account_url])
+    if args.account_type:
+        command.extend(["--account-type", args.account_type])
+
+
 def resume_command(base: list[Any], primary_date: str, *, force_recover_running: bool = False) -> list[Any]:
     command = list(base)
     if primary_date:
@@ -796,7 +821,7 @@ def next_commands_for_status(
             }
         )
     if run_status == "needs_codex_summary" or (completion.get("requires_codex_summary_count") and not has_auto_work):
-        output = f"exports/summary_requests_{primary_date or 'current'}.json"
+        output = summary_requests_output_path_for_dates(target_dates)
         command = [
             "python3",
             "scripts/export_summary_requests.py",
@@ -805,14 +830,7 @@ def next_commands_for_status(
             "--output",
             output,
         ]
-        if primary_date:
-            command.extend(["--date", primary_date])
-        if args.account_name:
-            command.extend(["--account-name", args.account_name])
-        if args.account_url:
-            command.extend(["--account-url", args.account_url])
-        if args.account_type:
-            command.extend(["--account-type", args.account_type])
+        append_summary_scope_args(command, args, target_dates)
         commands.append(
             {
                 "reason": "needs_codex_summary",
@@ -1014,6 +1032,40 @@ def worker_failure_summary(worker_passes: list[dict[str, Any]]) -> dict[str, Any
         "worker_failed_pass_count": count,
         "worker_failure_reasons": reasons[:10],
     }
+
+
+def export_summary_requests_for_job(args: argparse.Namespace, target_dates: list[str], completion: dict[str, Any]) -> dict[str, Any]:
+    if getattr(args, "status_only", False):
+        return {"ok": True, "skipped": True, "reason": "status_only"}
+    if not completion.get("requires_codex_summary_count"):
+        return {"ok": True, "skipped": True, "reason": "no_codex_summary_required"}
+    if has_auto_enrichment_work(completion):
+        return {"ok": True, "skipped": True, "reason": "auto_enrichment_still_pending"}
+    output = summary_requests_output_path_for_dates(target_dates)
+    output_path = ROOT / output
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    command: list[str] = [
+        "python3",
+        "scripts/export_summary_requests.py",
+        "--config",
+        args.config,
+        "--output",
+        output,
+    ]
+    append_summary_scope_args(command, args, target_dates)
+    exported = run_command(command)
+    payload = parse_json_output(exported)
+    payload["returncode"] = exported.returncode
+    payload["command"] = command_text(command)
+    payload["output"] = output
+    payload["output_path"] = str(output_path)
+    payload["ok"] = exported.returncode == 0 and bool(payload.get("ok", True))
+    if not payload["ok"]:
+        payload["stdout"] = exported.stdout
+        payload["stderr"] = exported.stderr
+        payload.setdefault("stage", "summary_requests_export")
+        payload.setdefault("run_status", "summary_requests_export_failed")
+    return payload
 
 
 def _count_dict(value: Any) -> dict[str, int]:
@@ -1789,6 +1841,7 @@ def main() -> int:
         sync_result=sync_result,
         completion=completion,
     )
+    summary_requests_export = export_summary_requests_for_job(args, target_dates, completion)
     result = {
         "ok": bool(sync_result.get("ok", True)),
         "run_status": run_status,
@@ -1813,6 +1866,7 @@ def main() -> int:
         "worker_codex_summary_required": summary_requirement["codex_summary_required"],
         "worker_codex_summary_required_count": summary_requirement["codex_summary_required_count"],
         "worker_codex_summary_required_urls": summary_requirement["codex_summary_required_urls"],
+        "summary_requests_export": summary_requests_export,
         "worker_passes": worker_passes,
         "feishu_sync": sync_result,
         "enrichment_completion": completion,
