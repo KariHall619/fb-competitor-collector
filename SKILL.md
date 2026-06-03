@@ -57,7 +57,8 @@ Map common requests as follows:
 
 - “采集全部目标账号/所有账号今天的帖子并写入飞书”
   - Run the batch business entrypoint: `python3 scripts/run_accounts_job.py --config config/settings.yaml --target-date YYMMDD --sync`.
-  - It reads the Feishu account source sheet, calls the full `run_account_job.py` flow for each enabled account, automatically follows same-account machine-runnable recovery commands up to `--auto-follow-attempts`, and aggregates per-account `run_status`, `completion_blockers`, and `next_commands`.
+  - It reads the Feishu account source sheet, calls the full `run_account_job.py` flow for each enabled account, automatically follows same-account machine-runnable recovery commands up to `--auto-follow-attempts` (default 8), and aggregates per-account `run_status`, `completion_blockers`, and `next_commands`.
+  - The batch entrypoint may run the same scoped resume command repeatedly. This is expected when one account needs several passes to clear detail fields, post type, article material, generated summaries, and final sync; do not stop merely because the command text repeats.
   - By default it opens each target account homepage in Chrome through OpenCLI and closes those automation-opened homepage tabs at the end of the batch; use `--no-open-account-tabs` only when matching account tabs are already intentionally open.
   - Non-`complete` batch runs return nonzero by default. Use `--allow-incomplete-success` only for explicit preview/backward-compatibility checks where JSON will be inspected.
   - Do not manually loop account commands in chat; that is how later accounts, detail enrichment, or summary export steps get skipped.

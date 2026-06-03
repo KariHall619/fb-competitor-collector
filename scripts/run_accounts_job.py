@@ -254,7 +254,6 @@ def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any])
     attempts: list[dict[str, Any]] = []
     command = account_job_command(args, account)
     max_attempts = 1 if args.status_only else max(1, int(args.auto_follow_attempts or 0))
-    seen_commands: set[str] = set()
     final_summary: dict[str, Any] | None = None
     for attempt_index in range(1, max_attempts + 1):
         command_key = subprocess.list2cmdline(command)
@@ -280,15 +279,16 @@ def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any])
         if result.returncode not in {0, 2}:
             break
         if attempt_index >= max_attempts:
+            if next_auto_follow_command(summary, account):
+                attempts[-1]["auto_follow_stopped_reason"] = "max_attempts_reached"
+                attempts[-1]["next_auto_follow_available"] = True
             break
         follow = next_auto_follow_command(summary, account)
         if not follow:
             break
         follow_key = subprocess.list2cmdline(follow)
-        if follow_key in seen_commands:
-            attempts[-1]["auto_follow_stopped_reason"] = "repeated_command"
-            break
-        seen_commands.add(command_key)
+        if follow_key == command_key:
+            attempts[-1]["auto_follow_repeated_command"] = True
         command = follow
     if final_summary is None:
         final_summary = {
@@ -312,6 +312,10 @@ def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any])
         }
     final_summary["attempts"] = attempts
     final_summary["auto_follow_attempted"] = len(attempts) > 1
+    final_summary["auto_follow_attempt_limit"] = max_attempts
+    final_summary["auto_follow_exhausted"] = bool(
+        attempts and attempts[-1].get("auto_follow_stopped_reason") == "max_attempts_reached"
+    )
     return final_summary
 
 
@@ -445,7 +449,7 @@ def main() -> int:
     parser.add_argument(
         "--auto-follow-attempts",
         type=int,
-        default=3,
+        default=8,
         help="Maximum run_account_job attempts per account, following machine-runnable next_commands before reporting incomplete.",
     )
     parser.add_argument("--max-snapshots", type=int, default=32)

@@ -6839,6 +6839,10 @@ sys.exit(code)
     no_follow_data = json.loads(no_follow_result.stdout)
     assert no_follow_data["run_status"] == "accounts_need_codex_summary"
     assert no_follow_data["complete"] is False
+    no_follow_internal = next(item for item in no_follow_data["accounts"] if item["account_url"] == "https://www.facebook.com/internalone")
+    assert no_follow_internal["auto_follow_attempt_limit"] == 1
+    assert no_follow_internal["auto_follow_exhausted"] is True
+    assert no_follow_internal["attempts"][-1]["auto_follow_stopped_reason"] == "max_attempts_reached"
 
     calls_file.unlink()
     status_only_result = run(
@@ -7004,6 +7008,141 @@ sys.exit(code)
     assert account["auto_follow_attempted"] is True
     assert [attempt["run_status"] for attempt in account["attempts"]] == ["coverage_incomplete", "complete"]
     assert data["next_commands"] == []
+
+
+def assert_run_accounts_job_repeats_same_resume_until_complete(tmp_path: Path) -> None:
+    config = tmp_path / "settings_batch_repeated_resume.yaml"
+    fake_lark = tmp_path / "fake-lark-cli-repeated-resume"
+    fake_python = tmp_path / "fake-python-repeated-resume"
+    calls_file = tmp_path / "batch-repeated-resume-calls.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch_repeated_resume.sqlite'}")
+    text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/usr/bin/env python3
+import json
+payload = {
+  "data": {
+    "valueRange": {
+      "values": [
+        ["主页名称", "竞品fb账户", "内部FB账户"],
+        ["Slow Field Page", "https://www.facebook.com/slowfieldpage", ""]
+      ]
+    }
+  }
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    fake_python.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+account_url = sys.argv[sys.argv.index("--account-url") + 1]
+account_name = sys.argv[sys.argv.index("--account-name") + 1]
+account_type = sys.argv[sys.argv.index("--account-type") + 1]
+config_path = sys.argv[sys.argv.index("--config") + 1]
+resume_command = "python3 scripts/run_account_job.py --config " + config_path + " --account-url " + account_url + " --account-name '" + account_name + "' --account-type " + account_type + " --target-date 260603 --resume-only --force-recover-running --sync --dry-run --fail-on-incomplete --max-resume-passes 8"
+if len(calls) < 5:
+    remaining = 5 - len(calls)
+    payload = {{
+        "ok": True,
+        "run_status": "incomplete_pending_tasks",
+        "complete": False,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 12,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 12,
+            "final_usable_count": 12 - remaining,
+            "final_usable_rate": round((12 - remaining) / 12, 4),
+            "open_task_count": remaining,
+            "top_field_gaps": [
+                {{"reason": "post_type", "count": remaining}},
+                {{"reason": "article_summary", "count": remaining}}
+            ]
+        }},
+        "completion_blockers": [
+            {{"code": "stage_post_type"}},
+            {{"code": "codex_summary_required"}}
+        ],
+        "next_commands": [{{
+            "reason": "pending_enrichment",
+            "description": "continue same scoped queue",
+            "command": resume_command
+        }}]
+    }}
+    code = 2
+else:
+    payload = {{
+        "ok": True,
+        "run_status": "complete",
+        "complete": True,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 12,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 12,
+            "final_usable_count": 12,
+            "final_usable_rate": 1.0,
+            "open_task_count": 0
+        }},
+        "next_commands": []
+    }}
+    code = 0
+print(json.dumps(payload, ensure_ascii=False))
+sys.exit(code)
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--sync",
+            "--dry-run",
+            "--no-open-account-tabs",
+        ],
+        env={**os.environ, "PYTHON": str(fake_python)},
+    )
+    assert result.returncode == 0, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert len(calls) == 5
+    assert data["run_status"] == "complete"
+    account = data["accounts"][0]
+    assert account["complete"] is True
+    assert account["auto_follow_attempted"] is True
+    assert account["auto_follow_attempt_limit"] == 8
+    assert account["auto_follow_exhausted"] is False
+    assert [attempt["run_status"] for attempt in account["attempts"]] == [
+        "incomplete_pending_tasks",
+        "incomplete_pending_tasks",
+        "incomplete_pending_tasks",
+        "incomplete_pending_tasks",
+        "complete",
+    ]
+    assert any(attempt.get("auto_follow_repeated_command") for attempt in account["attempts"])
 
 
 def assert_run_account_job_structures_prepare_and_import_failures(tmp_path: Path) -> None:
@@ -8730,6 +8869,7 @@ def main() -> int:
         assert_run_account_job_auto_retries_expected_coverage_gap(tmp_path)
         assert_run_accounts_job_runs_all_accounts_and_aggregates_status(tmp_path)
         assert_run_accounts_job_auto_follows_coverage_recovery(tmp_path)
+        assert_run_accounts_job_repeats_same_resume_until_complete(tmp_path)
         assert_run_capture_pipeline_passes_snapshot_budget(tmp_path)
         assert_run_capture_pipeline_auto_retries_snapshot_cap(tmp_path)
         assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path)
