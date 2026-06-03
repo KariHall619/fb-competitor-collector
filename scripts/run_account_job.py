@@ -778,7 +778,8 @@ def next_commands_for_status(
     has_auto_work = has_auto_enrichment_work(completion)
     hard_blockers = {"blocked_opencli", "blocked_auth", "human_intervention_required", "worker_failed"}
     if run_status not in hard_blockers and (
-        run_status in {"coverage_incomplete", "incomplete_pending_tasks", "synced_ledger_incomplete"} or has_auto_work
+        run_status in {"coverage_incomplete", "incomplete_pending_tasks", "synced_ledger_incomplete"}
+        or has_auto_work
     ):
         command = resume_command(base, primary_date, force_recover_running=True)
         command.extend(
@@ -790,7 +791,7 @@ def next_commands_for_status(
         commands.append(
             {
                 "reason": "pending_enrichment",
-                "description": "继续同账号同日期的 SQLite 补抓队列，不重新发现主页；同时恢复上次中断遗留的 running 任务。",
+                "description": "继续同账号同日期的 SQLite 补抓队列，不重新发现主页；同时恢复上次中断遗留的 running 任务。质量门失败但仍有字段缺口时先补抓再同步。",
                 "command": command_text(command),
             }
         )

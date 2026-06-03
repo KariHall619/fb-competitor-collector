@@ -6886,6 +6886,16 @@ def assert_run_account_job_promotes_sync_failure_status() -> None:
         completion=completion,
     )
     assert quality_status == "quality_gate"
+    quality_commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260602"],
+        run_status=quality_status,
+        completion={**completion, "has_auto_enrichment_work": True, "auto_open_task_count": 1},
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert quality_commands[0]["reason"] == "pending_enrichment"
+    assert "先补抓再同步" in quality_commands[0]["description"]
+    assert quality_commands[1]["reason"] == "quality_gate"
 
 
 def assert_run_account_job_blocked_opencli_resume_command_matches_context() -> None:
