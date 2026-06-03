@@ -868,6 +868,15 @@ def next_commands_for_status(
                 "command": command_text(command),
             }
         )
+        retry_command = resume_command(base, primary_date, force_recover_running=True)
+        append_resume_pass_budget(retry_command, args)
+        commands.append(
+            {
+                "reason": "summary_auto_apply_failed",
+                "description": "重新执行同账号概要阶段和同步；批量作业会优先使用这条机器可续跑命令，避免停在概要导出后等待人工追问。",
+                "command": command_text(retry_command),
+            }
+        )
     has_auto_work = has_auto_enrichment_work(completion)
     hard_blockers = {"blocked_opencli", "blocked_auth", "human_intervention_required", "worker_failed"}
     if run_status not in hard_blockers and (
@@ -883,7 +892,9 @@ def next_commands_for_status(
                 "command": command_text(command),
             }
         )
-    if run_status == "needs_codex_summary" or (completion.get("requires_codex_summary_count") and not has_auto_work):
+    if run_status == "needs_codex_summary" or (
+        run_status != "summary_auto_apply_failed" and completion.get("requires_codex_summary_count") and not has_auto_work
+    ):
         output = summary_requests_output_path_for_dates(target_dates)
         command = [
             "python3",
@@ -899,6 +910,15 @@ def next_commands_for_status(
                 "reason": "needs_codex_summary",
                 "description": "导出需要 Codex 中文概要的文章材料。",
                 "command": command_text(command),
+            }
+        )
+        retry_command = resume_command(base, primary_date, force_recover_running=True)
+        append_resume_pass_budget(retry_command, args)
+        commands.append(
+            {
+                "reason": "needs_codex_summary",
+                "description": "继续同账号概要自动生成/应用和同步；如果自动概要失败，再使用上一条导出命令做人工修复。",
+                "command": command_text(retry_command),
             }
         )
     if run_status == "blocked_auth":

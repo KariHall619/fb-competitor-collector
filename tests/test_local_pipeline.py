@@ -5839,12 +5839,17 @@ def assert_run_account_job_summary_only_next_command_exports_requests() -> None:
         discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
     )
     assert status == "needs_codex_summary"
-    assert [item["reason"] for item in commands] == ["needs_codex_summary"]
+    assert [item["reason"] for item in commands] == ["needs_codex_summary", "needs_codex_summary"]
     assert "export_summary_requests.py" in commands[0]["command"]
     assert "--date 260603" in commands[0]["command"]
     assert "--account-url https://www.facebook.com/example" in commands[0]["command"]
     assert "--account-type competitor" in commands[0]["command"]
     assert "--resume-only" not in commands[0]["command"]
+    assert "run_account_job.py" in commands[1]["command"]
+    assert "--resume-only" in commands[1]["command"]
+    assert "--force-recover-running" in commands[1]["command"]
+    assert "--max-resume-passes 2" in commands[1]["command"]
+    assert "--account-url https://www.facebook.com/example" in commands[1]["command"]
     range_commands = run_account_job.next_commands_for_status(
         args=args,
         target_dates=["260602", "260603"],
@@ -5854,6 +5859,20 @@ def assert_run_account_job_summary_only_next_command_exports_requests() -> None:
     )
     assert "summary_requests_260602_260603.json" in range_commands[0]["command"]
     assert "--start-date 260602 --end-date 260603" in range_commands[0]["command"]
+    assert "--target-date 260603" in range_commands[1]["command"]
+
+    failed_commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260603"],
+        run_status="summary_auto_apply_failed",
+        completion=completion,
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert [item["reason"] for item in failed_commands] == ["summary_auto_apply_failed", "summary_auto_apply_failed"]
+    assert "export_summary_requests.py" in failed_commands[0]["command"]
+    assert "run_account_job.py" in failed_commands[1]["command"]
+    assert "--resume-only" in failed_commands[1]["command"]
+    assert "--force-recover-running" in failed_commands[1]["command"]
 
 
 def assert_run_account_job_skips_worker_for_summary_only_completion() -> None:
@@ -7050,6 +7069,8 @@ if account_type == "competitor" or len(account_calls) > 1:
     }}
     code = 0
 else:
+    export_command = "python3 scripts/export_summary_requests.py --config " + sys.argv[sys.argv.index("--config") + 1] + " --output exports/summary_requests_260603.json --date 260603 --account-name '" + account_name + "' --account-url " + account_url + " --account-type " + account_type
+    resume_command = "python3 scripts/run_account_job.py --config " + sys.argv[sys.argv.index("--config") + 1] + " --account-url " + account_url + " --account-name '" + account_name + "' --account-type " + account_type + " --target-date 260603 --resume-only --force-recover-running --sync --dry-run --fail-on-incomplete --max-resume-passes 8"
     payload = {{
         "ok": True,
         "run_status": "needs_codex_summary",
@@ -7067,11 +7088,18 @@ else:
             "top_field_gaps": [{{"reason": "article_summary", "count": 1}}]
         }},
         "completion_blockers": [{{"code": "codex_summary_required"}}],
-        "next_commands": [{{
-            "reason": "pending_enrichment",
-            "description": "continue same account",
-            "command": "python3 scripts/run_account_job.py --config " + sys.argv[sys.argv.index("--config") + 1] + " --account-url " + account_url + " --account-name '" + account_name + "' --account-type " + account_type + " --target-date 260603 --resume-only --force-recover-running --sync --dry-run --fail-on-incomplete"
-        }}]
+        "next_commands": [
+            {{
+                "reason": "needs_codex_summary",
+                "description": "export scoped summary requests",
+                "command": export_command
+            }},
+            {{
+                "reason": "needs_codex_summary",
+                "description": "continue same account",
+                "command": resume_command
+            }}
+        ]
     }}
     code = 2
 print(json.dumps(payload, ensure_ascii=False))
@@ -7112,6 +7140,12 @@ sys.exit(code)
     assert internal["complete"] is True
     assert internal["auto_follow_attempted"] is True
     assert [attempt["run_status"] for attempt in internal["attempts"]] == ["needs_codex_summary", "complete"]
+    internal_calls = [call for call in calls if "--account-url" in call and call[call.index("--account-url") + 1] == "https://www.facebook.com/internalone"]
+    assert len(internal_calls) == 2
+    assert "--resume-only" not in internal_calls[0]
+    assert "--resume-only" in internal_calls[1]
+    assert "--force-recover-running" in internal_calls[1]
+    assert "export_summary_requests.py" not in internal_calls[1]
     opencli_calls = json.loads(opencli_calls_file.read_text(encoding="utf-8"))
     assert len([call for call in opencli_calls if "new" in call]) == 2
     assert len([call for call in opencli_calls if "close" in call]) == 2
