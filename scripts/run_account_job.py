@@ -1139,7 +1139,8 @@ def auto_generate_and_apply_summaries(
 ) -> dict[str, Any]:
     if getattr(args, "status_only", False):
         return {"ok": True, "skipped": True, "reason": "status_only"}
-    if not completion.get("requires_codex_summary_count"):
+    required_summary_count = _int_metric(completion.get("requires_codex_summary_count"))
+    if not required_summary_count:
         return {"ok": True, "skipped": True, "reason": "no_codex_summary_required"}
     if has_pre_summary_auto_enrichment_work(completion):
         return {"ok": True, "skipped": True, "reason": "auto_enrichment_still_pending"}
@@ -1223,7 +1224,12 @@ def auto_generate_and_apply_summaries(
     apply_payload = parse_json_output(applied)
     apply_payload["returncode"] = applied.returncode
     apply_payload["command"] = command_text(apply_command)
-    apply_ok = applied.returncode == 0 and bool(apply_payload.get("ok", True))
+    applied_count = _int_metric(apply_payload.get("applied"))
+    apply_ok = applied.returncode == 0 and bool(apply_payload.get("ok", True)) and applied_count > 0
+    if applied.returncode == 0 and bool(apply_payload.get("ok", True)) and applied_count == 0:
+        apply_payload["ok"] = False
+        apply_payload["run_status"] = "summary_apply_noop"
+        apply_payload["message"] = "概要应用命令成功返回，但没有任何 scoped 帖子被更新；不能把概要阶段视为完成。"
     return {
         "ok": apply_ok,
         "stage": "summary_auto_apply",
@@ -1232,6 +1238,8 @@ def auto_generate_and_apply_summaries(
         "generate": generate_payload,
         "partial_generation": generated.returncode != 0,
         "generated_summary_count": generated_summary_count,
+        "applied_summary_count": applied_count,
+        "required_summary_count": required_summary_count,
         "apply": apply_payload,
         "requests_output": output,
         "summaries_output": summaries_output,

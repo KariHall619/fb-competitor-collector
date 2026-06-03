@@ -6162,6 +6162,72 @@ def assert_run_account_job_applies_partial_generated_summaries() -> None:
     assert result["apply"]["applied"] == 1
 
 
+def assert_run_account_job_rejects_noop_summary_apply() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    original_run_command = run_account_job.run_command
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/noopsummary",
+            "account_name": "Noop Summary",
+            "account_type": "competitor",
+            "status_only": False,
+            "dry_run": True,
+        },
+    )()
+
+    class FakeResult:
+        def __init__(self, returncode: int, payload: dict[str, object]):
+            self.returncode = returncode
+            self.stdout = json.dumps(payload, ensure_ascii=False)
+            self.stderr = ""
+
+    def fake_run(command: list[str]) -> FakeResult:
+        script = command[1] if len(command) > 1 else ""
+        if script.endswith("export_summary_requests.py"):
+            return FakeResult(0, {"ok": True, "count": 1})
+        if script.endswith("generate_article_summaries.py"):
+            return FakeResult(0, {"ok": True, "generated": 1, "summary_key_count": 1, "rejected": []})
+        if script.endswith("apply_article_summaries.py"):
+            return FakeResult(
+                0,
+                {
+                    "ok": True,
+                    "mode": "sqlite",
+                    "applied": 0,
+                    "missing": 1,
+                    "rejected": 0,
+                    "article_summary_missing": ["https://facebook.com/noopsummary/posts/1"],
+                },
+            )
+        return FakeResult(1, {"ok": False, "error": "unexpected command", "command": command})
+
+    try:
+        run_account_job.run_command = fake_run
+        result = run_account_job.auto_generate_and_apply_summaries(
+            args,
+            ["260603"],
+            {
+                "requires_codex_summary_count": 1,
+                "has_auto_enrichment_work": False,
+                "auto_open_task_count": 0,
+            },
+        )
+    finally:
+        run_account_job.run_command = original_run_command
+
+    assert result["ok"] is False
+    assert result["run_status"] == "summary_auto_apply_failed"
+    assert result["applied_summary_count"] == 0
+    assert result["required_summary_count"] == 1
+    assert result["apply"]["run_status"] == "summary_apply_noop"
+    assert "没有任何 scoped 帖子被更新" in result["apply"]["message"]
+
+
 def assert_run_account_job_worker_pass_reports_non_json_failure() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import run_account_job
@@ -9593,6 +9659,7 @@ def main() -> int:
         assert_run_account_job_continues_worker_passes_until_complete()
         assert_run_account_job_auto_exports_summary_requests(tmp_path)
         assert_run_account_job_applies_partial_generated_summaries()
+        assert_run_account_job_rejects_noop_summary_apply()
         assert_run_account_job_worker_pass_reports_non_json_failure()
         assert_run_account_job_prioritizes_auto_work_before_summary_export()
         assert_run_capture_pipeline_uses_completion_status_helpers()
