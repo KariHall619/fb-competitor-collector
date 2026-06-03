@@ -238,6 +238,7 @@ def aggregate_status(account_results: list[dict[str, Any]]) -> dict[str, Any]:
     completed = [item for item in account_results if item.get("complete")]
     hard_blocked = [item for item in account_results if str(item.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS]
     needs_codex_summary = [item for item in account_results if item.get("run_status") == "needs_codex_summary"]
+    summary_failed = [item for item in account_results if item.get("run_status") == "summary_auto_apply_failed"]
     incomplete = [
         item
         for item in account_results
@@ -252,6 +253,8 @@ def aggregate_status(account_results: list[dict[str, Any]]) -> dict[str, Any]:
         run_status = "complete"
     elif hard_blocked:
         run_status = "accounts_blocked"
+    elif summary_failed:
+        run_status = "accounts_summary_failed"
     elif needs_codex_summary:
         run_status = "accounts_need_codex_summary"
     elif incomplete:
@@ -264,6 +267,7 @@ def aggregate_status(account_results: list[dict[str, Any]]) -> dict[str, Any]:
         "account_status_counts": dict(sorted(status_counts.items())),
         "accounts_completed": len(completed),
         "accounts_hard_blocked": len(hard_blocked),
+        "accounts_summary_failed": len(summary_failed),
         "accounts_needing_codex_summary": len(needs_codex_summary),
         "accounts_incomplete": len(incomplete),
         "ledger_candidate_count": sum(int(item.get("ledger_candidate_count") or 0) for item in account_results),

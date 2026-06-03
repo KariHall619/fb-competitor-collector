@@ -841,6 +841,24 @@ def next_commands_for_status(
                 "command": command_text(command),
             }
         )
+    if run_status == "summary_auto_apply_failed":
+        output = summary_requests_output_path_for_dates(target_dates)
+        command = [
+            "python3",
+            "scripts/export_summary_requests.py",
+            "--config",
+            args.config,
+            "--output",
+            output,
+        ]
+        append_summary_scope_args(command, args, target_dates)
+        commands.append(
+            {
+                "reason": "summary_auto_apply_failed",
+                "description": "自动中文概要生成或应用失败；重新导出 scoped summary requests，修复概要 JSON 后应用并续跑。",
+                "command": command_text(command),
+            }
+        )
     has_auto_work = has_auto_enrichment_work(completion)
     hard_blockers = {"blocked_opencli", "blocked_auth", "human_intervention_required", "worker_failed"}
     if run_status not in hard_blockers and (
@@ -957,6 +975,7 @@ def summarize_job_status(
     worker_passes: list[dict[str, Any]],
     sync_result: dict[str, Any],
     completion: dict[str, Any],
+    summary_auto_apply: dict[str, Any] | None = None,
 ) -> str:
     if not preflight.get("ok"):
         return "blocked_opencli"
@@ -969,6 +988,8 @@ def summarize_job_status(
         return "human_intervention_required"
     if any(worker_pass.get("worker_failed") for worker_pass in worker_passes):
         return "worker_failed"
+    if summary_auto_apply and summary_auto_apply.get("ok") is False:
+        return "summary_auto_apply_failed"
     if discover_has_incomplete_coverage(discover_import):
         return "coverage_incomplete"
     if completion.get("coverage_incomplete_count"):
@@ -1092,6 +1113,103 @@ def export_summary_requests_for_job(args: argparse.Namespace, target_dates: list
         payload.setdefault("stage", "summary_requests_export")
         payload.setdefault("run_status", "summary_requests_export_failed")
     return payload
+
+
+def auto_generate_and_apply_summaries(
+    args: argparse.Namespace,
+    target_dates: list[str],
+    completion: dict[str, Any],
+) -> dict[str, Any]:
+    if getattr(args, "status_only", False):
+        return {"ok": True, "skipped": True, "reason": "status_only"}
+    if not completion.get("requires_codex_summary_count"):
+        return {"ok": True, "skipped": True, "reason": "no_codex_summary_required"}
+    if has_auto_enrichment_work(completion):
+        return {"ok": True, "skipped": True, "reason": "auto_enrichment_still_pending"}
+
+    output = summary_requests_output_path_for_dates(target_dates)
+    requests_path = ROOT / output
+    summaries_output = output.replace("summary_requests", "article_summaries")
+    summaries_path = ROOT / summaries_output
+    requests_path.parent.mkdir(parents=True, exist_ok=True)
+    summaries_path.parent.mkdir(parents=True, exist_ok=True)
+
+    export_command: list[str] = [
+        "python3",
+        "scripts/export_summary_requests.py",
+        "--config",
+        args.config,
+        "--output",
+        output,
+    ]
+    append_summary_scope_args(export_command, args, target_dates)
+    exported = run_command(export_command)
+    export_payload = parse_json_output(exported)
+    export_payload["returncode"] = exported.returncode
+    export_payload["command"] = command_text(export_command)
+    export_payload["output"] = output
+    export_payload["output_path"] = str(requests_path)
+    export_ok = exported.returncode == 0 and bool(export_payload.get("ok", True))
+    if not export_ok:
+        return {
+            "ok": False,
+            "stage": "summary_requests_export",
+            "run_status": "summary_auto_apply_failed",
+            "export": export_payload,
+            "message": "概要请求导出失败；未生成或应用中文概要。",
+        }
+
+    generate_command = [
+        "python3",
+        "scripts/generate_article_summaries.py",
+        "--input",
+        output,
+        "--output",
+        summaries_output,
+    ]
+    generated = run_command(generate_command)
+    generate_payload = parse_json_output(generated)
+    generate_payload["returncode"] = generated.returncode
+    generate_payload["command"] = command_text(generate_command)
+    generate_payload["output"] = summaries_output
+    generate_payload["output_path"] = str(summaries_path)
+    generate_ok = generated.returncode == 0 and bool(generate_payload.get("ok", True))
+    if not generate_ok:
+        return {
+            "ok": False,
+            "stage": "summary_generate",
+            "run_status": "summary_auto_apply_failed",
+            "export": export_payload,
+            "generate": generate_payload,
+            "message": "中文概要生成失败；未应用概要。",
+        }
+
+    apply_command: list[str] = [
+        "python3",
+        "scripts/apply_article_summaries.py",
+        "--config",
+        args.config,
+        "--summaries",
+        summaries_output,
+    ]
+    append_summary_scope_args(apply_command, args, target_dates)
+    if args.dry_run:
+        apply_command.append("--dry-run")
+    applied = run_command(apply_command)
+    apply_payload = parse_json_output(applied)
+    apply_payload["returncode"] = applied.returncode
+    apply_payload["command"] = command_text(apply_command)
+    apply_ok = applied.returncode == 0 and bool(apply_payload.get("ok", True))
+    return {
+        "ok": apply_ok,
+        "stage": "summary_auto_apply",
+        "run_status": "summary_applied" if apply_ok else "summary_auto_apply_failed",
+        "export": export_payload,
+        "generate": generate_payload,
+        "apply": apply_payload,
+        "requests_output": output,
+        "summaries_output": summaries_output,
+    }
 
 
 def _count_dict(value: Any) -> dict[str, int]:
@@ -1247,6 +1365,15 @@ def completion_blockers_for_summary(summary: dict[str, Any]) -> list[dict[str, A
                 "worker_failed_pass_count": summary.get("worker_failed_pass_count", 0),
                 "worker_failure_reasons": summary.get("worker_failure_reasons", []),
             },
+        )
+    if summary.get("run_status") == "summary_auto_apply_failed":
+        add(
+            "summary_auto_apply_failed",
+            label="中文概要自动应用失败",
+            severity="summary_failure",
+            priority=18,
+            message="文章素材已进入概要阶段，但自动生成或应用中文概要失败，不能把本次运行当作完整。",
+            next_action="查看 summary_auto_apply 的 export/generate/apply 结果，修复概要 JSON 后重新应用并续跑同步。",
         )
 
     for item in summary.get("stage_pressure") or []:
@@ -1885,6 +2012,16 @@ def main() -> int:
         account_type=args.account_type,
         dates=target_dates,
     )
+    completion_after_worker = enrichment_completion_summary(conn, posts, config)
+    summary_auto_apply = auto_generate_and_apply_summaries(args, target_dates, completion_after_worker)
+    if summary_auto_apply.get("ok") and not summary_auto_apply.get("skipped"):
+        posts = scoped_posts(
+            conn,
+            account_name=args.account_name,
+            account_url=args.account_url,
+            account_type=args.account_type,
+            dates=target_dates,
+        )
     sync_result = run_sync(config, args, posts, conn)
     completion = enrichment_completion_summary(conn, posts, config)
     retry_summary = worker_retry_summary(worker_passes)
@@ -1896,8 +2033,13 @@ def main() -> int:
         worker_passes=worker_passes,
         sync_result=sync_result,
         completion=completion,
+        summary_auto_apply=summary_auto_apply,
     )
-    summary_requests_export = export_summary_requests_for_job(args, target_dates, completion)
+    summary_requests_export = (
+        summary_auto_apply.get("export")
+        if isinstance(summary_auto_apply.get("export"), dict)
+        else export_summary_requests_for_job(args, target_dates, completion)
+    )
     result = {
         "ok": bool(sync_result.get("ok", True)),
         "run_status": run_status,
@@ -1922,6 +2064,7 @@ def main() -> int:
         "worker_codex_summary_required": summary_requirement["codex_summary_required"],
         "worker_codex_summary_required_count": summary_requirement["codex_summary_required_count"],
         "worker_codex_summary_required_urls": summary_requirement["codex_summary_required_urls"],
+        "summary_auto_apply": summary_auto_apply,
         "summary_requests_export": summary_requests_export,
         "worker_passes": worker_passes,
         "feishu_sync": sync_result,

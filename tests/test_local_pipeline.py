@@ -2369,6 +2369,59 @@ def assert_apply_article_summaries_scopes_account_job(tmp_path: Path) -> None:
     assert resumed_data["quality_summary"]["ledger_usable_rate"] == 1.0
 
 
+def assert_generate_article_summaries_from_requests(tmp_path: Path) -> None:
+    requests = tmp_path / "summary_requests.json"
+    output = tmp_path / "article_summaries.json"
+    requests.write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "requests": [
+                    {
+                        "post_url": "https://facebook.com/storyhub/posts/generated",
+                        "canonical_post_url": "https://facebook.com/storyhub/posts/generated",
+                        "article_url": "https://story.example/generated",
+                        "account_name": "Story Hub",
+                        "article_material": {
+                            "title": "Mother discovers the family secret",
+                            "meta_description": "A dramatic family conflict escalates after a hidden plan is exposed.",
+                            "text_excerpt": "The heroine notices suspicious behavior, uncovers a plan, and takes action to protect the newborn.",
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    generated = run([PYTHON, "scripts/generate_article_summaries.py", "--input", str(requests), "--output", str(output)])
+    assert generated.returncode == 0, generated.stdout
+    data = json.loads(generated.stdout)
+    assert data["generated"] == 1
+    assert data["summary_key_count"] == 2
+    summaries = json.loads(output.read_text(encoding="utf-8"))
+    summary = summaries["https://facebook.com/storyhub/posts/generated"]
+    assert "这篇故事讲述" in summary
+    assert "家庭关系" in summary
+    assert "秘密曝光" in summary
+    assert "冲突" in summary
+    assert "Mother discovers the family secret" not in summary
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from story_summary_policy import story_summary_errors
+
+    assert story_summary_errors(
+        {
+            "story_summary": summary,
+            "summary_source": "article",
+            "article_material": {
+                "title": "Mother discovers the family secret",
+                "meta_description": "A dramatic family conflict escalates after a hidden plan is exposed.",
+                "text_excerpt": "The heroine notices suspicious behavior, uncovers a plan, and takes action to protect the newborn.",
+            },
+        }
+    ) == []
+
+
 def assert_summary_request_prefers_article_material_source() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from export_summary_requests import needs_summary, summary_request_for
@@ -5824,12 +5877,16 @@ def assert_run_account_job_auto_exports_summary_requests(tmp_path: Path) -> None
             "--target-date",
             "260602",
             "--resume-only",
+            "--sync",
             "--dry-run",
         ]
     )
     assert job.returncode == 0, job.stdout
     data = json.loads(job.stdout)
-    assert data["run_status"] == "needs_codex_summary"
+    assert data["run_status"] == "complete"
+    assert data["summary_auto_apply"]["ok"] is True
+    assert data["summary_auto_apply"]["generate"]["generated"] >= 1
+    assert data["quality_summary"]["final_usable_rate"] == 1.0
     assert data["summary_requests_export"]["ok"] is True
     assert data["summary_requests_export"]["count"] == 1
     output_path = Path(data["summary_requests_export"]["output_path"])
@@ -5840,6 +5897,11 @@ def assert_run_account_job_auto_exports_summary_requests(tmp_path: Path) -> None
     assert payload["scope"]["account_url"] == "https://www.facebook.com/summaryexport"
     assert payload["count"] == 1
     assert payload["requests"][0]["article_material"]["title"] == "Auto exported summary request"
+    stored_after = row_for_post(conn, post)
+    assert stored_after is not None
+    assert stored_after["summary_source"] == "article"
+    assert stored_after["story_summary"]
+    assert stored_after["output_status"] == "ready_for_output"
 
 
 def assert_run_account_job_worker_pass_reports_non_json_failure() -> None:
@@ -8419,6 +8481,7 @@ def main() -> int:
         assert_strict_sync_uses_quality_audit_config(tmp_path)
         assert_export_summary_requests_can_scope_account_job(tmp_path)
         assert_apply_article_summaries_scopes_account_job(tmp_path)
+        assert_generate_article_summaries_from_requests(tmp_path)
         assert_summary_request_prefers_article_material_source()
         assert_export_summary_requests_skips_rows_without_material(tmp_path)
         assert_enrich_article_summaries_prefers_article_url(tmp_path)
