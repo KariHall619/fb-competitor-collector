@@ -5977,14 +5977,44 @@ def assert_run_account_job_reports_unsynced_local_completion_command() -> None:
         "requested_sync": False,
         "next_commands": captured_commands,
     }
+    batch_args = type(
+        "BatchArgs",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "target_date": "260603",
+            "last_hours": 24,
+            "resume_only": False,
+            "force_recover_running": False,
+            "status_only": False,
+            "sync": True,
+            "dry_run": False,
+            "allow_incomplete_success": False,
+            "require_coverage_complete": False,
+            "max_snapshots": 32,
+            "min_snapshots": 6,
+            "max_resume_passes": 4,
+            "enrichment_limit": 25,
+            "resume_stale_running_seconds": 120,
+            "expected_post_count": 0,
+            "expected_labels": "",
+            "min_ledger_usable_rate": 0.0,
+            "min_final_usable_rate": 0.0,
+            "min_completion_rate": 0.0,
+            "min_expected_post_coverage_rate": 0.0,
+            "min_expected_label_coverage_rate": 0.0,
+        },
+    )()
     assert run_accounts_job.next_auto_follow_command(
         account_summary,
         {"account_url": "https://www.facebook.com/unsyncedpage"},
+        batch_args,
     ) == []
     sync_account_summary = {**account_summary, "requested_sync": True}
     sync_follow = run_accounts_job.next_auto_follow_command(
         sync_account_summary,
         {"account_url": "https://www.facebook.com/unsyncedpage"},
+        batch_args,
     )
     assert sync_follow
     assert "--sync" in sync_follow
@@ -8393,6 +8423,135 @@ sys.exit(code)
     assert account["attempts"][1]["auto_follow_extended_after_budget"] is True
     assert account["attempts"][1]["auto_follow_extended_reason"] == "followable_next_command"
     assert "quality_improved" not in account["attempts"][1]
+
+
+def assert_run_accounts_job_synthesizes_resume_when_child_omits_next_commands(tmp_path: Path) -> None:
+    config = tmp_path / "settings_batch_synthesize_resume.yaml"
+    fake_lark = tmp_path / "fake-lark-cli-synthesize-resume"
+    fake_python = tmp_path / "fake-python-synthesize-resume"
+    calls_file = tmp_path / "batch-synthesize-resume-calls.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch_synthesize_resume.sqlite'}")
+    text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/usr/bin/env python3
+import json
+payload = {
+  "data": {
+    "valueRange": {
+      "values": [
+        ["主页名称", "竞品fb账户", "内部FB账户"],
+        ["No Command Page", "https://www.facebook.com/nocommandpage", ""]
+      ]
+    }
+  }
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    fake_python.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+account_url = sys.argv[sys.argv.index("--account-url") + 1]
+account_name = sys.argv[sys.argv.index("--account-name") + 1]
+account_type = sys.argv[sys.argv.index("--account-type") + 1]
+is_resume = "--resume-only" in sys.argv and "--force-recover-running" in sys.argv
+if not is_resume:
+    payload = {{
+        "ok": True,
+        "run_status": "incomplete_pending_tasks",
+        "complete": False,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 5,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 5,
+            "final_usable_count": 1,
+            "final_usable_rate": 0.2,
+            "open_task_count": 4,
+            "open_task_stage_counts": {{"post_type": 2, "summary": 2}},
+            "missing_stage_counts": {{"post_type": 2, "summary": 2}},
+            "top_field_gaps": [
+                {{"reason": "post_type", "stage": "post_type", "count": 2}},
+                {{"reason": "article_summary", "stage": "summary", "count": 2}}
+            ]
+        }},
+        "completion_blockers": [
+            {{"code": "stage_post_type"}},
+            {{"code": "codex_summary_required"}}
+        ],
+        "next_commands": []
+    }}
+    code = 2
+else:
+    payload = {{
+        "ok": True,
+        "run_status": "complete",
+        "complete": True,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 5,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 5,
+            "final_usable_count": 5,
+            "final_usable_rate": 1.0,
+            "open_task_count": 0,
+            "open_task_stage_counts": {{}},
+            "missing_stage_counts": {{}},
+            "top_field_gaps": []
+        }},
+        "next_commands": []
+    }}
+    code = 0
+print(json.dumps(payload, ensure_ascii=False))
+sys.exit(code)
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--sync",
+            "--dry-run",
+            "--no-open-account-tabs",
+            "--auto-follow-attempts",
+            "2",
+        ],
+        env={**os.environ, "PYTHON": str(fake_python)},
+    )
+    assert result.returncode == 0, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert len(calls) == 2
+    assert "--resume-only" in calls[1]
+    assert "--force-recover-running" in calls[1]
+    assert calls[1][calls[1].index("--max-resume-passes") + 1] == "8"
+    assert calls[1][calls[1].index("--enrichment-limit") + 1] == "50"
+    account = data["accounts"][0]
+    assert account["complete"] is True
+    assert [attempt["run_status"] for attempt in account["attempts"]] == ["incomplete_pending_tasks", "complete"]
 
 
 def assert_run_accounts_job_treats_stage_progress_as_quality_improvement(tmp_path: Path) -> None:
@@ -10906,6 +11065,7 @@ def main() -> int:
         assert_run_accounts_job_repeats_same_resume_until_complete(tmp_path)
         assert_run_accounts_job_extends_attempts_while_quality_improves(tmp_path)
         assert_run_accounts_job_extends_attempts_for_followable_commands_without_metric_progress(tmp_path)
+        assert_run_accounts_job_synthesizes_resume_when_child_omits_next_commands(tmp_path)
         assert_run_accounts_job_treats_stage_progress_as_quality_improvement(tmp_path)
         assert_run_accounts_job_follows_recoverable_exit_one_commands(tmp_path)
         assert_run_accounts_job_follows_prepare_and_import_recovery(tmp_path)

@@ -19,6 +19,21 @@ from read_accounts import read_accounts
 
 ACCOUNT_HARD_BLOCKERS = {"blocked_auth", "blocked_opencli", "human_intervention_required"}
 MAX_AUTO_FOLLOW_ATTEMPTS = 50
+MACHINE_RECOVERABLE_STATUSES = {
+    "coverage_incomplete",
+    "incomplete_pending_tasks",
+    "needs_codex_summary",
+    "summary_auto_apply_failed",
+    "captured_not_synced",
+    "resumed_not_synced",
+    "synced_ledger_incomplete",
+    "sync_failed",
+    "quality_gate",
+    "audit_output_gate",
+    "partial_gate",
+    "quality_threshold_failed",
+    "no_work",
+}
 STAGE_REMAINING_WEIGHTS = {
     "coverage": 700,
     "detail_time": 600,
@@ -280,7 +295,103 @@ def command_for_current_account(command_text: str, account: dict[str, Any]) -> b
         return False
 
 
-def next_auto_follow_command(summary: dict[str, Any], account: dict[str, Any]) -> list[str]:
+def _set_arg_value(command: list[str], flag: str, value: str) -> None:
+    if flag in command:
+        try:
+            command[command.index(flag) + 1] = value
+            return
+        except IndexError:
+            pass
+    command.extend([flag, value])
+
+
+def _append_flag(command: list[str], flag: str) -> None:
+    if flag not in command:
+        command.append(flag)
+
+
+def _remove_flag(command: list[str], flag: str) -> None:
+    while flag in command:
+        command.pop(command.index(flag))
+
+
+def _counted_stage(summary: dict[str, Any], stages: set[str]) -> bool:
+    for source_key in ("open_task_stage_counts", "missing_stage_counts"):
+        source = summary.get(source_key)
+        if not isinstance(source, dict):
+            continue
+        for stage, count in source.items():
+            if str(stage or "") in stages and _int_value(count) > 0:
+                return True
+    for item in summary.get("top_field_gaps") or []:
+        if not isinstance(item, dict):
+            continue
+        stage = str(item.get("stage") or FIELD_REASON_STAGES.get(str(item.get("reason") or ""), "") or "")
+        if stage in stages and _int_value(item.get("count")) > 0:
+            return True
+    return False
+
+
+def synthesized_resume_command(args: argparse.Namespace, account: dict[str, Any]) -> list[str]:
+    command = account_job_command(args, account)
+    _append_flag(command, "--resume-only")
+    _append_flag(command, "--force-recover-running")
+    _set_arg_value(command, "--max-resume-passes", str(max(1, int(args.max_resume_passes or 0))))
+    _set_arg_value(command, "--enrichment-limit", str(max(1, int(args.enrichment_limit or 0))))
+    return command
+
+
+def synthesized_full_capture_command(args: argparse.Namespace, account: dict[str, Any], *, increase_snapshot_budget: bool = False) -> list[str]:
+    command = account_job_command(args, account)
+    if not args.resume_only:
+        _remove_flag(command, "--resume-only")
+        _remove_flag(command, "--force-recover-running")
+    if increase_snapshot_budget:
+        next_max = max(int(args.max_snapshots or 0) + 12, 32)
+        next_min = max(int(args.min_snapshots or 0), 6)
+        _set_arg_value(command, "--max-snapshots", str(next_max))
+        _set_arg_value(command, "--min-snapshots", str(next_min))
+    return command
+
+
+def synthesized_auto_follow_command(summary: dict[str, Any], account: dict[str, Any], args: argparse.Namespace) -> list[str]:
+    """Create a same-account recovery command when a child omitted next_commands.
+
+    The child account job should normally emit next_commands. This fallback keeps
+    batch jobs from handing machine-runnable missing fields back to the operator
+    merely because an older or failed child path forgot to include the command.
+    """
+
+    if summary.get("complete"):
+        return []
+    run_status = str(summary.get("run_status") or "")
+    if run_status in ACCOUNT_HARD_BLOCKERS or run_status == "worker_failed":
+        return []
+    if run_status in {"captured_not_synced", "resumed_not_synced"} and not bool(summary.get("requested_sync")):
+        return []
+    if run_status and run_status not in MACHINE_RECOVERABLE_STATUSES and not summary.get("open_task_count"):
+        return []
+
+    auto_stages = {"detail_time", "lead_link", "engagement", "post_type", "article_material", "summary"}
+    if _int_value(summary.get("open_task_count")) > 0 or _counted_stage(summary, auto_stages):
+        return synthesized_resume_command(args, account)
+    if bool(summary.get("requested_sync")) and run_status in {
+        "captured_not_synced",
+        "resumed_not_synced",
+        "sync_failed",
+        "quality_gate",
+        "audit_output_gate",
+        "partial_gate",
+    }:
+        return synthesized_resume_command(args, account)
+    if str(summary.get("coverage_health") or "") == "incomplete" or run_status == "coverage_incomplete":
+        return synthesized_full_capture_command(args, account, increase_snapshot_budget=True)
+    if run_status in {"no_work", "quality_threshold_failed"}:
+        return synthesized_full_capture_command(args, account)
+    return []
+
+
+def next_auto_follow_command(summary: dict[str, Any], account: dict[str, Any], args: argparse.Namespace) -> list[str]:
     if summary.get("complete") or str(summary.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS:
         return []
     original_requested_sync = bool(summary.get("requested_sync"))
@@ -298,7 +409,7 @@ def next_auto_follow_command(summary: dict[str, Any], account: dict[str, Any]) -
             continue
         candidates.append((AUTO_FOLLOW_REASON_PRIORITY.get(reason, 100), len(candidates), command_text))
     if not candidates:
-        return []
+        return synthesized_auto_follow_command(summary, account, args)
     command_text = sorted(candidates, key=lambda item: (item[0], item[1]))[0][2]
     try:
         command = shlex.split(command_text)
@@ -447,7 +558,7 @@ def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any])
             attempts[-1]["quality_improved"] = True
         if summary.get("complete") or str(summary.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS:
             break
-        follow = next_auto_follow_command(summary, account)
+        follow = next_auto_follow_command(summary, account, args)
         if not follow:
             if result.returncode not in {0, 2}:
                 attempts[-1]["auto_follow_stopped_reason"] = "non_followable_returncode"
