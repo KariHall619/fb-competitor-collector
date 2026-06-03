@@ -42,7 +42,7 @@ def sync_posts(
             if conn is not None:
                 return annotate_sync_result(
                     result,
-                    enrichment_completion_summary(conn, completion_scope),
+                    enrichment_completion_summary(conn, completion_scope, config),
                     ledger_mode=True,
                 )
             return annotate_sync_failure(result)
@@ -56,7 +56,7 @@ def sync_posts(
         if conn is not None:
             return annotate_sync_result(
                 result,
-                enrichment_completion_summary(conn, completion_scope),
+                enrichment_completion_summary(conn, completion_scope, config),
                 ledger_mode=True,
             )
         return annotate_sync_failure(result)
@@ -75,7 +75,7 @@ def sync_posts(
             if conn is not None:
                 return annotate_sync_result(
                     result,
-                    enrichment_completion_summary(conn, completion_scope),
+                    enrichment_completion_summary(conn, completion_scope, config),
                     ledger_mode=True,
                 )
             return annotate_sync_failure(result)
@@ -90,7 +90,7 @@ def sync_posts(
         if conn is not None:
             return annotate_sync_result(
                 result,
-                enrichment_completion_summary(conn, completion_scope),
+                enrichment_completion_summary(conn, completion_scope, config),
                 ledger_mode=True,
             )
         return annotate_sync_failure(result)
@@ -102,7 +102,7 @@ def sync_posts(
         if conn is not None:
             return annotate_sync_result(
                 result,
-                enrichment_completion_summary(conn, completion_scope),
+                enrichment_completion_summary(conn, completion_scope, config),
                 ledger_mode=False,
             )
         return annotate_sync_failure(result)
@@ -117,7 +117,7 @@ def sync_posts(
         if conn is not None:
             return annotate_sync_result(
                 result,
-                enrichment_completion_summary(conn, completion_scope),
+                enrichment_completion_summary(conn, completion_scope, config),
                 ledger_mode=False,
             )
         return annotate_sync_failure(result)
@@ -132,7 +132,7 @@ def sync_posts(
     if conn is not None:
         return annotate_sync_result(
             result,
-            enrichment_completion_summary(conn, completion_scope),
+            enrichment_completion_summary(conn, completion_scope, config),
             ledger_mode=False,
         )
     return annotate_sync_failure(result)

@@ -2002,6 +2002,53 @@ def assert_sync_status_prioritizes_auto_work_over_summary(tmp_path: Path) -> Non
     assert result["complete"] is False
 
 
+def assert_completion_summary_uses_quality_audit_config(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from sync_status import enrichment_completion_summary
+    from store import connect, row_for_post, upsert_post
+
+    conn = connect(tmp_path / "completion-audit-config.sqlite")
+    config = {
+        "quality_audit": {
+            "required_engagement_fields": ["likes"],
+            "low_like_threshold": 10,
+            "required_post_types": ["视频"],
+        }
+    }
+    post = normalize_post(
+        {
+            "account_name": "Example Page",
+            "account_url": "https://www.facebook.com/example",
+            "post_url": "https://www.facebook.com/example/posts/config-gap",
+            "posted_at": "2026年6月2日 12:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/config-gap",
+            "landing_url": "https://story.example/config-gap",
+            "lead_url_raw": "https://story.example/config-gap",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "story_summary": VALID_CN_SUMMARY,
+            "summary_source": "article",
+            "likes": 8,
+            "comments": 3,
+            "shares": 1,
+            "post_type": "图文",
+        }
+    )
+    upsert_post(conn, post)
+    stored = row_for_post(conn, post)
+    assert stored is not None
+    default_completion = enrichment_completion_summary(conn, [stored])
+    strict_completion = enrichment_completion_summary(conn, [stored], config)
+    assert "likes_low" not in default_completion["field_gap_counts"]
+    assert "post_type" not in default_completion["field_gap_counts"]
+    assert strict_completion["field_gap_counts"]["likes_low"] == 1
+    assert strict_completion["field_gap_counts"]["post_type"] == 1
+    assert strict_completion["top_field_gaps"][0]["reason"] in {"likes_low", "post_type"}
+
+
 def assert_export_summary_requests_can_scope_account_job(tmp_path: Path) -> None:
     config = tmp_path / "settings_summary_scope.yaml"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
@@ -7475,6 +7522,7 @@ def main() -> int:
         assert_sync_status_marks_incomplete_ledger(tmp_path)
         assert_sync_status_promotes_summary_only_work(tmp_path)
         assert_sync_status_prioritizes_auto_work_over_summary(tmp_path)
+        assert_completion_summary_uses_quality_audit_config(tmp_path)
         assert_export_summary_requests_can_scope_account_job(tmp_path)
         assert_summary_request_prefers_article_material_source()
         assert_export_summary_requests_skips_rows_without_material(tmp_path)

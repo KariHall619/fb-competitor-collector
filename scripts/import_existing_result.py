@@ -210,7 +210,7 @@ def main() -> int:
                     "partial_review": 0,
                     "skipped": len(skipped_posts),
                 },
-                enrichment_completion_summary(conn, sync_candidates),
+                enrichment_completion_summary(conn, sync_candidates, config),
                 ledger_mode=True,
             )
             print(
@@ -236,7 +236,7 @@ def main() -> int:
         sync_result["formal_output_unchanged"] = True
         sync_result = annotate_sync_result(
             sync_result,
-            enrichment_completion_summary(conn, sync_candidates),
+            enrichment_completion_summary(conn, sync_candidates, config),
             ledger_mode=True,
         )
         print(json.dumps({**import_summary, "feishu_sync": sync_result}, ensure_ascii=False, indent=2))
@@ -255,7 +255,7 @@ def main() -> int:
                     "output_candidates": 0,
                     "skipped": len(skipped_posts),
                 },
-                enrichment_completion_summary(conn, sync_candidates),
+                enrichment_completion_summary(conn, sync_candidates, config),
                 ledger_mode=True,
             )
             print(
@@ -283,7 +283,7 @@ def main() -> int:
         sync_result["audit_missing_field_notes"] = audit_reason_notes(output_posts, config)
         sync_result = annotate_sync_result(
             sync_result,
-            enrichment_completion_summary(conn, sync_candidates),
+            enrichment_completion_summary(conn, sync_candidates, config),
             ledger_mode=True,
         )
         print(json.dumps({**import_summary, "feishu_sync": sync_result}, ensure_ascii=False, indent=2))
@@ -301,7 +301,7 @@ def main() -> int:
                     "message": "同步已停止：存在完全缺失发帖时间、未生成文章来源中文概要，或缺少评论/回复引流落地链接的记录。",
                     "errors": quality_errors,
                 },
-                enrichment_completion_summary(conn, sync_candidates),
+                enrichment_completion_summary(conn, sync_candidates, config),
                 ledger_mode=False,
             )
             print(
@@ -322,7 +322,7 @@ def main() -> int:
                     "ready_for_output": 0,
                     "needs_enrichment_skipped": skipped,
                 },
-                enrichment_completion_summary(conn, sync_candidates),
+                enrichment_completion_summary(conn, sync_candidates, config),
                 ledger_mode=False,
             )
             print(
@@ -349,7 +349,7 @@ def main() -> int:
         sync_result["needs_enrichment_skipped"] = skipped
         sync_result = annotate_sync_result(
             sync_result,
-            enrichment_completion_summary(conn, sync_candidates),
+            enrichment_completion_summary(conn, sync_candidates, config),
             ledger_mode=False,
         )
         print(json.dumps({**import_summary, "feishu_sync": sync_result}, ensure_ascii=False, indent=2))

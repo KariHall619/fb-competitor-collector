@@ -530,7 +530,7 @@ def run_sync(
     conn: Any,
 ) -> dict[str, Any]:
     if not args.sync:
-        completion = enrichment_completion_summary(conn, posts)
+        completion = enrichment_completion_summary(conn, posts, config)
         return {
             "ok": True,
             "skipped": True,
@@ -1563,7 +1563,7 @@ def main() -> int:
             }
             setattr(args, "feishu_preflight_done", True)
         except RuntimeError as exc:
-            completion = enrichment_completion_summary(conn, current_posts)
+            completion = enrichment_completion_summary(conn, current_posts, config)
             run_status = "blocked_auth"
             partial_result = {
                 "ok": False,
@@ -1619,7 +1619,7 @@ def main() -> int:
                 account_type=args.account_type,
                 dates=target_dates,
             )
-            completion = enrichment_completion_summary(conn, current_posts)
+            completion = enrichment_completion_summary(conn, current_posts, config)
             run_status = "blocked_opencli"
             partial_result = {
                 "ok": False,
@@ -1656,7 +1656,7 @@ def main() -> int:
                 account_type=args.account_type,
                 dates=target_dates,
             )
-            completion = enrichment_completion_summary(conn, current_posts)
+            completion = enrichment_completion_summary(conn, current_posts, config)
             run_status = (
                 "human_intervention_required"
                 if needs_human_intervention(discover_import)
@@ -1709,7 +1709,7 @@ def main() -> int:
         stale_running_seconds=stale_running_seconds,
     )
     enqueue_enrichment_tasks_for_posts(conn, posts)
-    completion_before_worker = enrichment_completion_summary(conn, posts)
+    completion_before_worker = enrichment_completion_summary(conn, posts, config)
     if args.resume_only and not args.status_only and completion_requires_opencli(completion_before_worker):
         opencli_preflight = check_opencli(
             config.get("opencli_command") or [config.get("opencli_path", "opencli")],
@@ -1753,7 +1753,7 @@ def main() -> int:
     worker_passes: list[dict[str, Any]] = []
     resume_passes = 0 if args.status_only else max(0, args.max_resume_passes)
     for index in range(resume_passes):
-        completion_before = enrichment_completion_summary(conn, posts)
+        completion_before = enrichment_completion_summary(conn, posts, config)
         if not completion_before.get("open_task_count"):
             break
         worker_pass = run_worker_pass(args, target_dates=target_dates, pass_index=index + 1)
@@ -1777,7 +1777,7 @@ def main() -> int:
         dates=target_dates,
     )
     sync_result = run_sync(config, args, posts, conn)
-    completion = enrichment_completion_summary(conn, posts)
+    completion = enrichment_completion_summary(conn, posts, config)
     retry_summary = worker_retry_summary(worker_passes)
     failure_summary = worker_failure_summary(worker_passes)
     summary_requirement = worker_summary_requirement_summary(worker_passes)

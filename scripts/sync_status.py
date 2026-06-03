@@ -101,19 +101,27 @@ def _requires_codex_summary(post: dict[str, Any]) -> bool:
     return bool(not has_valid_story_summary(post) and article_material_for_post(post))
 
 
-def _field_gap_reasons(post: dict[str, Any]) -> list[str]:
+def _field_gap_reasons(post: dict[str, Any], config: dict[str, Any] | None = None) -> list[str]:
     stored_reasons = parse_reasons(post.get("field_audit_reasons"))
-    if stored_reasons:
+    if stored_reasons and config is None:
         return stored_reasons
-    return audit_post_fields(post).get("field_audit_reasons", [])
+    return audit_post_fields(post, config).get("field_audit_reasons", [])
 
 
-def _field_gap_counts(posts: list[dict[str, Any]]) -> dict[str, int]:
-    counts: dict[str, int] = {}
+def _field_gaps_by_post(posts: list[dict[str, Any]], config: dict[str, Any] | None = None) -> dict[str, list[str]]:
+    gaps: dict[str, list[str]] = {}
     for post in posts:
-        if post.get("output_status") in FINAL_OUTPUT_STATUSES:
-            continue
-        for reason in _field_gap_reasons(post):
+        key = _post_key(post)
+        reasons = _field_gap_reasons(post, config)
+        if key and reasons:
+            gaps[key] = reasons
+    return gaps
+
+
+def _field_gap_counts(field_gaps_by_post: dict[str, list[str]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for reasons in field_gaps_by_post.values():
+        for reason in reasons:
             counts[reason] = counts.get(reason, 0) + 1
     return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
@@ -330,7 +338,7 @@ def _next_actions(
     return actions[:4]
 
 
-def enrichment_completion_summary(conn: Any, posts: list[dict[str, Any]]) -> dict[str, Any]:
+def enrichment_completion_summary(conn: Any, posts: list[dict[str, Any]], config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return a business-facing completion summary for a scoped set of posts."""
 
     tasks = enrichment_tasks_for_posts(conn, posts)
@@ -357,6 +365,8 @@ def enrichment_completion_summary(conn: Any, posts: list[dict[str, Any]]) -> dic
     incomplete_keys = set(missing_by_post)
     incomplete_keys.update(_task_key(task) for task in open_tasks if _task_key(task))
     incomplete_keys.update(coverage_incomplete_urls)
+    field_gaps_by_post = _field_gaps_by_post(posts, config)
+    incomplete_keys.update(field_gaps_by_post)
     auto_open_tasks = [task for task in open_tasks if task.get("stage") in AUTO_ENRICHMENT_STAGES]
     summary_open_tasks = [task for task in open_tasks if task.get("stage") == "summary"]
     summary_task_blockers = [
@@ -382,13 +392,13 @@ def enrichment_completion_summary(conn: Any, posts: list[dict[str, Any]]) -> dic
     final_usable_posts = [
         post
         for post in ready_or_synced_posts
-        if _post_key(post) not in incomplete_keys and not _coverage_incomplete(post)
+        if _post_key(post) not in incomplete_keys
     ]
     ledger_candidate_count = sum(1 for post in posts if _is_ledger_candidate(post))
     missing_stage_counts = _stage_counts(missing_by_post)
     open_stage_counts = _open_task_stage_counts(open_tasks)
     coverage_incomplete_count = len(set(coverage_incomplete_urls))
-    field_gap_counts = _field_gap_counts(posts)
+    field_gap_counts = _field_gap_counts(field_gaps_by_post)
 
     return {
         "post_count": post_count,

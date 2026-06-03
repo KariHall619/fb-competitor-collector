@@ -104,7 +104,7 @@ def main() -> int:
                     "partial_review": 0,
                     "skipped": len(skipped_posts),
                 },
-                enrichment_completion_summary(conn, posts),
+                enrichment_completion_summary(conn, posts, config),
                 ledger_mode=True,
             )
             print(
@@ -129,7 +129,7 @@ def main() -> int:
         result["formal_output_unchanged"] = True
         result = annotate_sync_result(
             result,
-            enrichment_completion_summary(conn, posts),
+            enrichment_completion_summary(conn, posts, config),
             ledger_mode=True,
         )
         print(json.dumps({**base_summary, "feishu_sync": result}, ensure_ascii=False, indent=2))
@@ -147,7 +147,7 @@ def main() -> int:
                     "output_candidates": 0,
                     "skipped": len(skipped_posts),
                 },
-                enrichment_completion_summary(conn, posts),
+                enrichment_completion_summary(conn, posts, config),
                 ledger_mode=True,
             )
             print(
@@ -175,7 +175,7 @@ def main() -> int:
         result["audit_missing_field_notes"] = audit_reason_notes(output_posts, config)
         result = annotate_sync_result(
             result,
-            enrichment_completion_summary(conn, posts),
+            enrichment_completion_summary(conn, posts, config),
             ledger_mode=True,
         )
         print(json.dumps({**base_summary, "feishu_sync": result}, ensure_ascii=False, indent=2))
@@ -192,7 +192,7 @@ def main() -> int:
                     "stage": "quality_gate",
                     "errors": errors,
                 },
-                enrichment_completion_summary(conn, posts),
+                enrichment_completion_summary(conn, posts, config),
                 ledger_mode=False,
             )
             print(
@@ -212,7 +212,7 @@ def main() -> int:
                     "ready_for_output": 0,
                     "needs_enrichment_skipped": len(skipped_posts),
                 },
-                enrichment_completion_summary(conn, posts),
+                enrichment_completion_summary(conn, posts, config),
                 ledger_mode=False,
             )
             print(
@@ -236,7 +236,7 @@ def main() -> int:
         result["needs_enrichment_skipped"] = len(skipped_posts)
         result = annotate_sync_result(
             result,
-            enrichment_completion_summary(conn, posts),
+            enrichment_completion_summary(conn, posts, config),
             ledger_mode=False,
         )
         print(json.dumps({**base_summary, "feishu_sync": result}, ensure_ascii=False, indent=2))

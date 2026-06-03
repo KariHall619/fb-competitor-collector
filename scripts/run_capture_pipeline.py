@@ -451,7 +451,7 @@ def main() -> int:
             account_url=args.account_url,
             account_type=args.account_type,
         )
-        completion = enrichment_completion_summary(conn, scoped_posts)
+        completion = enrichment_completion_summary(conn, scoped_posts, config)
         run_status = capture_pipeline_run_status(discover_payload, completion)
         sync_result = sync_result_from_import_payload(import_payload, dry_run=args.dry_run)
         quality_summary = account_job_quality_summary(
