@@ -792,6 +792,64 @@ def _batch_next_command_entry(account: dict[str, Any], item: dict[str, Any]) -> 
     }
 
 
+def _append_batch_next_command(
+    commands: list[dict[str, Any]],
+    account: dict[str, Any],
+    item: dict[str, Any],
+    *,
+    limit: int,
+) -> bool:
+    if len(commands) >= limit:
+        return True
+    commands.append(_batch_next_command_entry(account, item))
+    return len(commands) >= limit
+
+
+def _batch_opencli_recovery_items(args: argparse.Namespace) -> list[dict[str, Any]]:
+    return [
+        {
+            "reason": "blocked_opencli",
+            "description": "先检查并尝试修复 OpenCLI Browser Bridge。",
+            "command": command_text(["python3", "scripts/check_env.py", "--config", args.config, "--fix-opencli"]),
+        },
+        {
+            "reason": "rerun_batch_after_opencli",
+            "description": "OpenCLI Browser Bridge 恢复后，按原批量范围重新运行所有目标账号，避免只续跑单个账号而漏掉后续采集、补抓或同步。",
+            "command": command_text(batch_retry_command(args, fix_opencli=True)),
+        },
+    ]
+
+
+def _append_blocked_opencli_commands(
+    commands: list[dict[str, Any]],
+    account: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    limit: int,
+) -> bool:
+    child_items = [
+        item
+        for item in account.get("next_commands") or []
+        if isinstance(item, dict) and item.get("command")
+    ]
+    fallback_items = _batch_opencli_recovery_items(args)
+    env_item = next((item for item in child_items if str(item.get("reason") or "") == "blocked_opencli"), fallback_items[0])
+    batch_item = next((item for item in child_items if str(item.get("reason") or "") == "rerun_batch_after_opencli"), fallback_items[1])
+    if _append_batch_next_command(commands, account, env_item, limit=limit):
+        return True
+    if _append_batch_next_command(commands, account, batch_item, limit=limit):
+        return True
+    for item in child_items:
+        reason = str(item.get("reason") or "")
+        if reason == "blocked_opencli":
+            continue
+        if reason == "rerun_batch_after_opencli":
+            continue
+        if _append_batch_next_command(commands, account, item, limit=limit):
+            return True
+    return len(commands) >= limit
+
+
 def synthesized_batch_next_command(account: dict[str, Any], args: argparse.Namespace) -> dict[str, Any] | None:
     if account.get("complete") or str(account.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS:
         return None
@@ -814,6 +872,10 @@ def next_commands_for_batch(account_results: list[dict[str, Any]], args: argpars
     commands: list[dict[str, Any]] = []
     for account in account_results:
         if account.get("complete"):
+            continue
+        if str(account.get("run_status") or "") == "blocked_opencli":
+            if _append_blocked_opencli_commands(commands, account, args, limit=limit):
+                return commands
             continue
         added_for_account = False
         for item in account.get("next_commands") or []:
