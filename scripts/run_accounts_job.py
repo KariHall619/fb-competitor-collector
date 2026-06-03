@@ -41,6 +41,7 @@ FIELD_REASON_STAGES = {
 }
 AUTO_FOLLOW_REASONS = {
     "coverage_incomplete",
+    "no_local_work",
     "pending_enrichment",
     "needs_codex_summary",
     "summary_auto_apply_failed",
@@ -410,11 +411,14 @@ def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any])
             attempts[-1]["quality_improved"] = True
         if summary.get("complete") or str(summary.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS:
             break
-        if result.returncode not in {0, 2}:
-            break
         follow = next_auto_follow_command(summary, account)
         if not follow:
+            if result.returncode not in {0, 2}:
+                attempts[-1]["auto_follow_stopped_reason"] = "non_followable_returncode"
+                attempts[-1]["non_followable_returncode"] = result.returncode
             break
+        if result.returncode not in {0, 2}:
+            attempts[-1]["auto_follow_nonstandard_returncode"] = result.returncode
         if attempt_index >= base_attempt_limit:
             if improved and attempt_index < hard_attempt_limit:
                 attempts[-1]["auto_follow_extended_after_budget"] = True
