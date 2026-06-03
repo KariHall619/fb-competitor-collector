@@ -4353,6 +4353,27 @@ def assert_enrichment_worker_lead_stage_requires_external_landing_url() -> None:
     assert enrichment_worker.detail_stage_satisfied(estimated_time, "detail_time") is False
     assert enrichment_worker.detail_stage_satisfied(exact_time, "detail_time") is True
 
+    low_quality_engagement = {
+        "likes": 2,
+        "comments": 3,
+        "shares": 1,
+    }
+    complete_engagement = {
+        "likes": 8,
+        "comments": 3,
+        "shares": 1,
+    }
+    missing_engagement = {
+        "likes": 8,
+    }
+    invalid_post_type = {"post_type": "文本"}
+    valid_post_type = {"post_type": "图文"}
+    assert enrichment_worker.detail_stage_satisfied(low_quality_engagement, "engagement") is False
+    assert enrichment_worker.detail_stage_satisfied(missing_engagement, "engagement") is False
+    assert enrichment_worker.detail_stage_satisfied(complete_engagement, "engagement") is True
+    assert enrichment_worker.detail_stage_satisfied(invalid_post_type, "post_type") is False
+    assert enrichment_worker.detail_stage_satisfied(valid_post_type, "post_type") is True
+
     internal_lead = {
         "lead_link_status": "qualified",
         "lead_link_source": "comment",

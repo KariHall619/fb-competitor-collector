@@ -14,6 +14,7 @@ import sqlite3
 from typing import Any
 
 from config_loader import deep_get, load_config
+from field_audit import audit_post_fields
 from fetch_article_material import extract_material
 from models import has_qualified_comment_lead_link
 from pipeline_status import crawl_status_for, has_confirmed_time, output_status_for
@@ -203,9 +204,10 @@ def detail_stage_satisfied(post: dict[str, Any], stage: str) -> bool:
     if stage == "lead_link":
         return has_qualified_comment_lead_link(post)
     if stage == "engagement":
-        return all(post.get(field) is not None for field in ("likes", "comments", "shares"))
+        reasons = set(audit_post_fields(post).get("field_audit_reasons", []))
+        return not reasons.intersection({"likes", "comments", "shares", "likes_low"})
     if stage == "post_type":
-        return post.get("post_type") in {"图文", "视频", "仅图片", "仅文字"}
+        return "post_type" not in set(audit_post_fields(post).get("field_audit_reasons", []))
     return True
 
 
