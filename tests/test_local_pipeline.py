@@ -5582,6 +5582,88 @@ def assert_run_account_job_next_commands_force_recover_running() -> None:
     pending = next(item for item in commands if item["reason"] == "pending_enrichment")
     assert "--resume-only" in pending["command"]
     assert "--force-recover-running" in pending["command"]
+    assert "--max-resume-passes 2" in pending["command"]
+
+
+def assert_run_account_job_recovery_commands_preserve_resume_budget() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    base_attrs = {
+        "config": "config/settings.yaml",
+        "account_url": "https://www.facebook.com/budgetpage",
+        "account_name": "Budget Page",
+        "account_type": "competitor",
+        "sync": True,
+        "dry_run": True,
+        "strict_ready_only": False,
+        "max_snapshots": 32,
+        "min_snapshots": 6,
+        "max_resume_passes": 4,
+        "expected_post_count": 13,
+        "expected_labels": "1h,2h",
+        "require_coverage_complete": False,
+        "min_ledger_usable_rate": 0.0,
+        "min_final_usable_rate": 0.0,
+        "min_completion_rate": 0.0,
+        "min_expected_post_coverage_rate": 0.0,
+        "min_expected_label_coverage_rate": 0.0,
+    }
+    completion = {"post_count": 3, "open_task_count": 2, "has_auto_enrichment_work": True}
+    discover = {"source": "discover", "complete": False, "incomplete": True, "reasons": ["coverage_incomplete"]}
+
+    capture_args = type("Args", (), {**base_attrs, "resume_only": False})()
+    coverage_commands = run_account_job.next_commands_for_status(
+        args=capture_args,
+        target_dates=["260603"],
+        run_status="coverage_incomplete",
+        completion=completion,
+        discover_coverage=discover,
+    )
+    coverage_parts = shlex.split(coverage_commands[0]["command"])
+    assert coverage_parts[coverage_parts.index("--max-resume-passes") + 1] == "4"
+    assert coverage_parts[coverage_parts.index("--expected-post-count") + 1] == "13"
+    assert coverage_parts[coverage_parts.index("--expected-labels") + 1] == "1h,2h"
+    assert coverage_parts[coverage_parts.index("--max-snapshots") + 1] == "44"
+
+    sync_commands = run_account_job.next_commands_for_status(
+        args=capture_args,
+        target_dates=["260603"],
+        run_status="sync_failed",
+        completion=completion,
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert sync_commands[0]["reason"] == "pending_enrichment"
+    assert sync_commands[1]["reason"] == "sync_failed"
+    sync_parts = shlex.split(sync_commands[1]["command"])
+    assert sync_parts[sync_parts.index("--max-resume-passes") + 1] == "4"
+    assert "--resume-only" in sync_parts
+    assert "--force-recover-running" in sync_parts
+
+    resume_args = type("Args", (), {**base_attrs, "resume_only": True})()
+    blocked_auth_commands = run_account_job.next_commands_for_status(
+        args=resume_args,
+        target_dates=["260603"],
+        run_status="blocked_auth",
+        completion=completion,
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert blocked_auth_commands[0]["reason"] == "blocked_auth"
+    blocked_auth_parts = shlex.split(blocked_auth_commands[0]["command"])
+    assert blocked_auth_parts[blocked_auth_parts.index("--max-resume-passes") + 1] == "4"
+    assert "--resume-only" in blocked_auth_parts
+
+    human_commands = run_account_job.next_commands_for_status(
+        args=resume_args,
+        target_dates=["260603"],
+        run_status="human_intervention_required",
+        completion=completion,
+        discover_coverage={"source": "worker", "complete": True, "incomplete": False, "reasons": ["visitor_preview"]},
+    )
+    assert human_commands[0]["reason"] == "human_intervention_required"
+    human_parts = shlex.split(human_commands[0]["command"])
+    assert human_parts[human_parts.index("--max-resume-passes") + 1] == "4"
+    assert "--resume-only" in human_parts
 
 
 def assert_run_account_job_reports_worker_retry_later() -> None:
@@ -8853,6 +8935,7 @@ def main() -> int:
         assert_run_account_job_recovers_scoped_running_tasks(tmp_path)
         assert_run_account_job_does_not_recover_fresh_running_tasks(tmp_path)
         assert_run_account_job_next_commands_force_recover_running()
+        assert_run_account_job_recovery_commands_preserve_resume_budget()
         assert_run_account_job_reports_worker_retry_later()
         assert_run_account_job_summary_only_next_command_exports_requests()
         assert_run_account_job_worker_pass_surfaces_summary_required()

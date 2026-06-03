@@ -739,6 +739,7 @@ def full_capture_command(
         command.extend(["--expected-post-count", str(args.expected_post_count)])
     if getattr(args, "expected_labels", ""):
         command.extend(["--expected-labels", args.expected_labels])
+    append_resume_pass_budget(command, args)
     return command
 
 
@@ -895,6 +896,7 @@ def next_commands_for_status(
     if run_status == "blocked_auth":
         if getattr(args, "resume_only", False):
             command = resume_command(base, primary_date, force_recover_running=True)
+            append_resume_pass_budget(command, args)
             description = "完成飞书用户授权后，继续同账号同日期的本地补抓/同步队列。"
         else:
             command = full_capture_command(base, primary_date, args)
@@ -907,11 +909,13 @@ def next_commands_for_status(
             }
         )
     if run_status in {"sync_failed", "quality_gate", "audit_output_gate", "partial_gate"}:
+        command = resume_command(base, primary_date, force_recover_running=True)
+        append_resume_pass_budget(command, args)
         commands.append(
             {
                 "reason": run_status,
                 "description": "同步或输出门未完成；保留本地 SQLite 结果，修复对应问题后续跑同一账号同日期同步。",
-                "command": command_text(resume_command(base, primary_date, force_recover_running=True)),
+                "command": command_text(command),
             }
         )
     if run_status == "quality_threshold_failed":
@@ -957,6 +961,7 @@ def next_commands_for_status(
             description = "登录/Profile/主页可见性恢复后，从账号主页顶部重新发现候选并继续补抓/同步。"
         else:
             command = resume_command(base, primary_date, force_recover_running=True)
+            append_resume_pass_budget(command, args)
             description = "先在正常 Chrome 里确认 Facebook 已登录、账号主页帖子列表可见，再从本地 SQLite 续跑剩余补抓和同步。"
         commands.append(
             {
