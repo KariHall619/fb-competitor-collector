@@ -34,6 +34,7 @@ from sync_status import completion_run_status, enrichment_completion_summary, ha
 ROOT = Path(__file__).resolve().parents[1]
 ENRICHMENT_STAGES = "detail_time,lead_link,engagement,post_type,article_material"
 HUMAN_INTERVENTION_STATUSES = {"human_intervention_required", "login_required", "visitor_preview", "facebook_tab_missing"}
+WORKER_OPERATIONAL_STATUSES = {"complete", "failed", "human_intervention_required", "incomplete_pending_tasks", "needs_codex_summary"}
 DEFAULT_RESUME_STALE_RUNNING_SECONDS = 1800
 OPENCLI_REQUIRED_STAGES = {"detail_time", "lead_link", "engagement", "post_type"}
 STAGE_LABELS = {
@@ -65,6 +66,34 @@ def parse_json_output(result: subprocess.CompletedProcess[str]) -> dict[str, Any
         return json.loads(result.stdout)
     except json.JSONDecodeError:
         return {"ok": False, "stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode}
+
+
+def worker_result_is_operational(payload: dict[str, Any]) -> bool:
+    """Return True when enrichment_worker returned a structured operational state."""
+
+    status = str(payload.get("run_status") or payload.get("status") or "")
+    if status not in WORKER_OPERATIONAL_STATUSES:
+        return False
+    return payload.get("returncode") in {0, 1, 2}
+
+
+def worker_failure_reasons(payload: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    status = str(payload.get("run_status") or payload.get("status") or "").strip()
+    if status and status not in WORKER_OPERATIONAL_STATUSES:
+        reasons.append(f"unknown_status:{status}")
+    if not status:
+        reasons.append("non_json_worker_output")
+    for key in ("error", "stderr", "stdout"):
+        text = str(payload.get(key) or "").strip()
+        if not text:
+            continue
+        first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        if first_line and first_line not in reasons:
+            reasons.append(first_line[:240])
+    if not reasons:
+        reasons.append(str(payload.get("run_status") or payload.get("status") or "worker_failed"))
+    return reasons[:5]
 
 
 def needs_human_intervention(payload: dict[str, Any] | None) -> bool:
@@ -447,10 +476,15 @@ def run_worker_pass(args: argparse.Namespace, *, target_dates: list[str], pass_i
     failed = [
         item
         for item in results
-        if item.get("returncode") not in {0, 1}
-        and item.get("run_status") != "needs_codex_summary"
+        if not worker_result_is_operational(item)
     ]
     human_intervention = [item for item in results if needs_human_intervention(item)]
+    worker_failed = bool(failed)
+    failure_reasons: list[str] = []
+    for item in failed:
+        for reason in worker_failure_reasons(item):
+            if reason and reason not in failure_reasons:
+                failure_reasons.append(reason)
     retry_later_seen = any(bool(item.get("retry_later")) for item in results)
     retry_later_count = sum(_int_metric(item.get("requeued")) for item in results if item.get("retry_later"))
     retry_later_reasons: list[str] = []
@@ -470,6 +504,8 @@ def run_worker_pass(args: argparse.Namespace, *, target_dates: list[str], pass_i
     return {
         "ok": not failed and not human_intervention,
         "pass": pass_index,
+        "worker_failed": worker_failed,
+        "worker_failure_reasons": failure_reasons[:10],
         "human_intervention_required": bool(human_intervention),
         "human_intervention_reasons": [
             reason
@@ -724,8 +760,23 @@ def next_commands_for_status(
                 "command": command_text(full_capture_command(base, primary_date, args)),
             }
         )
+    if run_status == "worker_failed":
+        command = resume_command(base, primary_date, force_recover_running=True)
+        command.extend(
+            [
+                "--max-resume-passes",
+                str(max(int(args.max_resume_passes or 0), 2)),
+            ]
+        )
+        commands.append(
+            {
+                "reason": "worker_failed",
+                "description": "补抓执行器返回了非结构化失败；修复脚本或环境错误后继续同账号队列，不重新发现主页。",
+                "command": command_text(command),
+            }
+        )
     has_auto_work = has_auto_enrichment_work(completion)
-    hard_blockers = {"blocked_opencli", "blocked_auth", "human_intervention_required"}
+    hard_blockers = {"blocked_opencli", "blocked_auth", "human_intervention_required", "worker_failed"}
     if run_status not in hard_blockers and (
         run_status in {"coverage_incomplete", "incomplete_pending_tasks", "synced_ledger_incomplete"} or has_auto_work
     ):
@@ -871,6 +922,8 @@ def summarize_job_status(
         return "human_intervention_required"
     if any(worker_pass.get("human_intervention_required") for worker_pass in worker_passes):
         return "human_intervention_required"
+    if any(worker_pass.get("worker_failed") for worker_pass in worker_passes):
+        return "worker_failed"
     if discover_has_incomplete_coverage(discover_import):
         return "coverage_incomplete"
     if completion.get("coverage_incomplete_count"):
@@ -941,6 +994,24 @@ def worker_summary_requirement_summary(worker_passes: list[dict[str, Any]]) -> d
         "codex_summary_required": count > 0,
         "codex_summary_required_count": count,
         "codex_summary_required_urls": urls[:10],
+    }
+
+
+def worker_failure_summary(worker_passes: list[dict[str, Any]]) -> dict[str, Any]:
+    count = 0
+    reasons: list[str] = []
+    for worker_pass in worker_passes:
+        if not worker_pass.get("worker_failed"):
+            continue
+        count += 1
+        for reason in worker_pass.get("worker_failure_reasons") or []:
+            text = str(reason or "").strip()
+            if text and text not in reasons:
+                reasons.append(text)
+    return {
+        "worker_failed": count > 0,
+        "worker_failed_pass_count": count,
+        "worker_failure_reasons": reasons[:10],
     }
 
 
@@ -1083,6 +1154,19 @@ def completion_blockers_for_summary(summary: dict[str, Any]) -> list[dict[str, A
             metrics={
                 "retry_later_count": summary.get("worker_retry_later_count", 0),
                 "retry_later_reasons": summary.get("worker_retry_later_reasons", []),
+            },
+        )
+    if summary.get("worker_failed"):
+        add(
+            "worker_failed",
+            label="补抓执行器异常",
+            severity="worker_failure",
+            priority=16,
+            message="补抓执行器没有返回可识别的结构化状态，不能把本次运行当作正常补抓未完成。",
+            next_action="先查看 worker_failure_reasons，修复脚本或环境错误后按 next_commands 继续同账号队列。",
+            metrics={
+                "worker_failed_pass_count": summary.get("worker_failed_pass_count", 0),
+                "worker_failure_reasons": summary.get("worker_failure_reasons", []),
             },
         )
 
@@ -1261,6 +1345,7 @@ def account_job_quality_summary(
     sync_result: dict[str, Any] | None = None,
     thresholds: dict[str, Any] | None = None,
     worker_retry: dict[str, Any] | None = None,
+    worker_failure: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the small business-facing quality summary for an account job."""
 
@@ -1268,6 +1353,7 @@ def account_job_quality_summary(
     completion = completion or {}
     sync_result = sync_result or {}
     worker_retry = worker_retry or {}
+    worker_failure = worker_failure or {}
     coverage_source = str(discover_coverage.get("source") or "unknown")
     coverage_incomplete = bool(discover_coverage.get("incomplete")) or str(completion.get("coverage_health") or "") == "incomplete"
     coverage_health = "incomplete" if coverage_incomplete else ("not_run" if coverage_source == "not_run" else "complete")
@@ -1321,6 +1407,9 @@ def account_job_quality_summary(
         "worker_retry_later": bool(worker_retry.get("retry_later")),
         "worker_retry_later_count": _int_metric(worker_retry.get("retry_later_count")),
         "worker_retry_later_reasons": worker_retry.get("retry_later_reasons") if isinstance(worker_retry.get("retry_later_reasons"), list) else [],
+        "worker_failed": bool(worker_failure.get("worker_failed")),
+        "worker_failed_pass_count": _int_metric(worker_failure.get("worker_failed_pass_count")),
+        "worker_failure_reasons": worker_failure.get("worker_failure_reasons") if isinstance(worker_failure.get("worker_failure_reasons"), list) else [],
         "open_task_stage_counts": open_task_stage_counts,
         "missing_stage_counts": missing_stage_counts,
         "stage_pressure": stage_pressure,
@@ -1690,6 +1779,7 @@ def main() -> int:
     sync_result = run_sync(config, args, posts, conn)
     completion = enrichment_completion_summary(conn, posts)
     retry_summary = worker_retry_summary(worker_passes)
+    failure_summary = worker_failure_summary(worker_passes)
     summary_requirement = worker_summary_requirement_summary(worker_passes)
     run_status = summarize_job_status(
         preflight=opencli_preflight,
@@ -1716,6 +1806,9 @@ def main() -> int:
         "worker_retry_later": retry_summary["retry_later"],
         "worker_retry_later_count": retry_summary["retry_later_count"],
         "worker_retry_later_reasons": retry_summary["retry_later_reasons"],
+        "worker_failed": failure_summary["worker_failed"],
+        "worker_failed_pass_count": failure_summary["worker_failed_pass_count"],
+        "worker_failure_reasons": failure_summary["worker_failure_reasons"],
         "worker_codex_summary_required": summary_requirement["codex_summary_required"],
         "worker_codex_summary_required_count": summary_requirement["codex_summary_required_count"],
         "worker_codex_summary_required_urls": summary_requirement["codex_summary_required_urls"],
@@ -1731,6 +1824,7 @@ def main() -> int:
         sync_result=sync_result,
         thresholds=quality_thresholds_from_args(args),
         worker_retry=retry_summary,
+        worker_failure=failure_summary,
     )
     if not result["quality_summary"]["quality_thresholds"]["ok"]:
         result["complete"] = False

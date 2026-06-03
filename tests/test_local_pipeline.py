@@ -5194,6 +5194,82 @@ def assert_run_account_job_worker_pass_surfaces_summary_required() -> None:
     assert summary_requirement["codex_summary_required_count"] == 1
 
 
+def assert_run_account_job_worker_pass_reports_non_json_failure() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    original_run_command = run_account_job.run_command
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/example",
+            "account_name": "Example Page",
+            "account_type": "competitor",
+            "enrichment_limit": 50,
+            "sync": True,
+            "dry_run": False,
+            "max_resume_passes": 2,
+            "strict_ready_only": False,
+            "max_snapshots": 32,
+            "min_snapshots": 6,
+            "expected_post_count": 0,
+            "expected_labels": "",
+            "require_coverage_complete": False,
+            "min_ledger_usable_rate": 0.0,
+            "min_final_usable_rate": 0.0,
+            "min_completion_rate": 0.0,
+            "min_expected_post_coverage_rate": 0.0,
+            "min_expected_label_coverage_rate": 0.0,
+        },
+    )()
+
+    class FakeBrokenWorker:
+        returncode = 2
+        stdout = "Traceback: worker crashed before JSON\n"
+        stderr = "boom\n"
+
+    try:
+        run_account_job.run_command = lambda _command: FakeBrokenWorker()
+        worker_pass = run_account_job.run_worker_pass(args, target_dates=["260603"], pass_index=1)
+    finally:
+        run_account_job.run_command = original_run_command
+
+    assert worker_pass["ok"] is False
+    assert worker_pass["worker_failed"] is True
+    assert "non_json_worker_output" in worker_pass["worker_failure_reasons"]
+    failure_summary = run_account_job.worker_failure_summary([worker_pass])
+    assert failure_summary["worker_failed"] is True
+    assert failure_summary["worker_failed_pass_count"] == 1
+    status = run_account_job.summarize_job_status(
+        preflight={"ok": True},
+        discover_import=None,
+        worker_passes=[worker_pass],
+        sync_result={"ok": True},
+        completion={"post_count": 1, "open_task_count": 1, "has_auto_enrichment_work": True},
+    )
+    assert status == "worker_failed"
+    quality = run_account_job.account_job_quality_summary(
+        run_status=status,
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+        completion={"post_count": 1, "open_task_count": 1, "has_auto_enrichment_work": True},
+        sync_result={"ok": True, "skipped": True, "run_status": "not_synced"},
+        worker_failure=failure_summary,
+    )
+    assert quality["completion_blockers"][0]["code"] == "worker_failed"
+    commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260603"],
+        run_status=status,
+        completion={"post_count": 1, "open_task_count": 1, "has_auto_enrichment_work": True},
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert commands[0]["reason"] == "worker_failed"
+    assert "--resume-only" in commands[0]["command"]
+    assert "--force-recover-running" in commands[0]["command"]
+
+
 def assert_run_account_job_prioritizes_auto_work_before_summary_export() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import run_account_job
@@ -7405,6 +7481,7 @@ def main() -> int:
         assert_run_account_job_reports_worker_retry_later()
         assert_run_account_job_summary_only_next_command_exports_requests()
         assert_run_account_job_worker_pass_surfaces_summary_required()
+        assert_run_account_job_worker_pass_reports_non_json_failure()
         assert_run_account_job_prioritizes_auto_work_before_summary_export()
         assert_run_capture_pipeline_uses_completion_status_helpers()
         assert_run_capture_pipeline_blocks_auth_before_opencli(tmp_path)
