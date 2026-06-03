@@ -22,6 +22,7 @@ from run_account_job import (
     completion_blockers_for_summary,
     discover_coverage_summary,
     discover_homepage_with_retry,
+    next_commands_for_status,
     quality_thresholds_from_args,
 )
 from store import connect, query_posts
@@ -78,6 +79,34 @@ def capture_pipeline_next_actions(run_status: str, completion: dict) -> list[str
     return list(completion.get("next_actions") or [])
 
 
+def capture_pipeline_command_args(args: argparse.Namespace) -> argparse.Namespace:
+    values = vars(args).copy()
+    values["sync"] = bool(args.sync_partial)
+    values["strict_ready_only"] = False
+    values["resume_only"] = False
+    values["max_resume_passes"] = 2
+    return argparse.Namespace(**values)
+
+
+def capture_pipeline_next_commands(
+    args: argparse.Namespace,
+    *,
+    run_status: str,
+    completion: dict,
+    discover_coverage: dict | None = None,
+) -> list[dict]:
+    if run_status == "complete":
+        return []
+    command_status = "no_work" if run_status == "discover_failed" else run_status
+    return next_commands_for_status(
+        args=capture_pipeline_command_args(args),
+        target_dates=[normalize_date(args.target_date) if args.target_date else ""],
+        run_status=command_status,
+        completion=completion,
+        discover_coverage=discover_coverage or {},
+    )
+
+
 def sync_result_from_import_payload(import_payload: dict, *, dry_run: bool) -> dict:
     if isinstance(import_payload.get("feishu_sync"), dict):
         return import_payload["feishu_sync"]
@@ -124,6 +153,7 @@ def capture_pipeline_failed_result(
     message: str,
     error: str = "",
     next_actions: list[str] | None = None,
+    next_commands: list[dict] | None = None,
     **extra: object,
 ) -> dict:
     payload = {
@@ -136,6 +166,8 @@ def capture_pipeline_failed_result(
     }
     if error:
         payload["error"] = error
+    if next_commands is not None:
+        payload["next_commands"] = next_commands
     payload.update(extra)
     payload["completion_blockers"] = [
         {
@@ -248,6 +280,12 @@ def main() -> int:
                         message=auth_blocker["message"],
                         error=auth_blocker.get("error", ""),
                         next_actions=capture_pipeline_next_actions("blocked_auth", {}),
+                        next_commands=capture_pipeline_next_commands(
+                            args,
+                            run_status="blocked_auth",
+                            completion={},
+                            discover_coverage={"source": "not_run", "complete": False, "incomplete": True, "reasons": []},
+                        ),
                     ),
                     ensure_ascii=False,
                     indent=2,
@@ -266,6 +304,12 @@ def main() -> int:
                     stage="opencli_preflight",
                     run_status="blocked_opencli",
                     message="OpenCLI Browser Bridge 未就绪；已在 Facebook 采集前停止。",
+                    next_commands=capture_pipeline_next_commands(
+                        args,
+                        run_status="blocked_opencli",
+                        completion={},
+                        discover_coverage={"source": "not_run", "complete": False, "incomplete": True, "reasons": []},
+                    ),
                     opencli_browser_bridge=opencli_preflight,
                 ),
                 ensure_ascii=False,
@@ -283,6 +327,14 @@ def main() -> int:
         discover, discover_payload, discover_retry = discover_homepage_with_retry(args)
         if discover.returncode != 0 or not discover_payload.get("ok"):
             run_status = "human_intervention_required" if needs_human_intervention(discover_payload) else "discover_failed"
+            discover_coverage = {
+                "source": "discover",
+                "complete": False,
+                "incomplete": True,
+                "reasons": ["human_intervention_required" if run_status == "human_intervention_required" else "discover_failed_before_import"],
+                "raw_candidate_count": discover_payload.get("raw_candidate_count", 0),
+                "post_count": discover_payload.get("post_count", 0),
+            }
             print(
                 json.dumps(
                     capture_pipeline_failed_result(
@@ -296,6 +348,12 @@ def main() -> int:
                         discover_elapsed_ms=int((time.monotonic() - discover_started) * 1000),
                         result=discover_payload,
                         discover_retry=discover_retry,
+                        next_commands=capture_pipeline_next_commands(
+                            args,
+                            run_status=run_status,
+                            completion={},
+                            discover_coverage=discover_coverage,
+                        ),
                     ),
                     ensure_ascii=False,
                     indent=2,
@@ -329,6 +387,7 @@ def main() -> int:
             ]
         )
         if prepare.returncode != 0:
+            discover_coverage = discover_coverage_summary(discover_report_for_quality(discover_payload))
             print(
                 json.dumps(
                     capture_pipeline_failed_result(
@@ -348,6 +407,12 @@ def main() -> int:
                         stdout=prepare.stdout,
                         stderr=prepare.stderr,
                         returncode=prepare.returncode,
+                        next_commands=capture_pipeline_next_commands(
+                            args,
+                            run_status="prepare_failed",
+                            completion={},
+                            discover_coverage=discover_coverage,
+                        ),
                     ),
                     ensure_ascii=False,
                     indent=2,
@@ -357,6 +422,7 @@ def main() -> int:
         try:
             prepared_payload = json.loads(prepared_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, JSONDecodeError, UnicodeDecodeError) as exc:
+            discover_coverage = discover_coverage_summary(discover_report_for_quality(discover_payload))
             print(
                 json.dumps(
                     capture_pipeline_failed_result(
@@ -375,6 +441,12 @@ def main() -> int:
                             "auto_retry": (discover_payload.get("coverage") or {}).get("auto_retry", {}),
                         },
                         output_path=str(prepared_path),
+                        next_commands=capture_pipeline_next_commands(
+                            args,
+                            run_status="prepare_failed",
+                            completion={},
+                            discover_coverage=discover_coverage,
+                        ),
                     ),
                     ensure_ascii=False,
                     indent=2,
@@ -406,6 +478,7 @@ def main() -> int:
         imported = run_command(import_command)
         import_payload = parse_stdout_json(imported)
         if imported.returncode != 0:
+            discover_coverage = discover_coverage_summary(discover_report_for_quality(discover_payload))
             print(
                 json.dumps(
                     capture_pipeline_failed_result(
@@ -417,6 +490,12 @@ def main() -> int:
                         stdout=imported.stdout,
                         stderr=imported.stderr,
                         returncode=imported.returncode,
+                        next_commands=capture_pipeline_next_commands(
+                            args,
+                            run_status="import_failed",
+                            completion={},
+                            discover_coverage=discover_coverage,
+                        ),
                     ),
                     ensure_ascii=False,
                     indent=2,
@@ -428,6 +507,7 @@ def main() -> int:
         try:
             conn = connect(database_path)
         except sqlite3.Error as exc:
+            discover_coverage = discover_coverage_summary(discover_report_for_quality(discover_payload))
             print(
                 json.dumps(
                     capture_pipeline_failed_result(
@@ -438,6 +518,12 @@ def main() -> int:
                         elapsed_ms=int((time.monotonic() - started) * 1000),
                         database_path=str(database_path),
                         prepared=prepared_payload.get("prepared", 0),
+                        next_commands=capture_pipeline_next_commands(
+                            args,
+                            run_status="import_failed",
+                            completion={},
+                            discover_coverage=discover_coverage,
+                        ),
                     ),
                     ensure_ascii=False,
                     indent=2,
@@ -454,9 +540,10 @@ def main() -> int:
         completion = enrichment_completion_summary(conn, scoped_posts, config)
         run_status = capture_pipeline_run_status(discover_payload, completion)
         sync_result = sync_result_from_import_payload(import_payload, dry_run=args.dry_run)
+        discover_coverage = discover_coverage_summary(discover_report_for_quality(discover_payload))
         quality_summary = account_job_quality_summary(
             run_status=run_status,
-            discover_coverage=discover_coverage_summary(discover_report_for_quality(discover_payload)),
+            discover_coverage=discover_coverage,
             completion=completion,
             sync_result=sync_result,
             thresholds=quality_thresholds_from_args(args),
@@ -487,6 +574,12 @@ def main() -> int:
             "complete": run_status == "complete",
             "run_status": run_status,
             "next_actions": next_actions[:4],
+            "next_commands": capture_pipeline_next_commands(
+                args,
+                run_status=run_status,
+                completion=completion,
+                discover_coverage=discover_coverage,
+            ),
             "timing_ms": {
                 "discover": int((time.monotonic() - discover_started) * 1000),
                 "prepare": int((time.monotonic() - prepare_started) * 1000),
@@ -505,6 +598,12 @@ def main() -> int:
                 result["quality_summary"]["run_status"] = "quality_threshold_failed"
                 result["quality_summary"]["complete"] = False
             result["quality_summary"]["completion_blockers"] = completion_blockers_for_summary(result["quality_summary"])
+            result["next_commands"] = capture_pipeline_next_commands(
+                args,
+                run_status=result["run_status"],
+                completion=completion,
+                discover_coverage=discover_coverage,
+            )
         if args.fail_on_incomplete and result["run_status"] != "complete":
             result["exit_status_reason"] = "incomplete_run_status"
         if result.get("quality_threshold_failed"):

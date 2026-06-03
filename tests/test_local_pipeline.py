@@ -5598,6 +5598,10 @@ exit 0
     assert data["run_status"] == "blocked_auth"
     assert data["complete"] is False
     assert any("飞书用户授权" in action for action in data["next_actions"])
+    assert data["next_commands"][0]["reason"] == "blocked_auth"
+    assert "run_account_job.py" in data["next_commands"][0]["command"]
+    assert "--resume-only" not in data["next_commands"][0]["command"]
+    assert "--sync" in data["next_commands"][0]["command"]
     assert data["completion_blockers"][0]["code"] == "blocked_auth"
     assert "飞书授权" in data["completion_blockers"][0]["label"]
     assert not opencli_called.exists()
@@ -5638,6 +5642,10 @@ exit 1
     assert data["run_status"] == "blocked_opencli"
     assert data["complete"] is False
     assert any("--fix-opencli" in action for action in data["next_actions"])
+    assert [item["reason"] for item in data["next_commands"][:2]] == ["blocked_opencli", "rerun_full_capture"]
+    assert "--fix-opencli" in data["next_commands"][0]["command"]
+    assert "run_account_job.py" in data["next_commands"][1]["command"]
+    assert "--resume-only" not in data["next_commands"][1]["command"]
     assert data["completion_blockers"][0]["code"] == "blocked_opencli"
     assert data["completion_blockers"][0]["severity"] == "hard_blocker"
 
@@ -5763,6 +5771,12 @@ print(json.dumps(payload, ensure_ascii=False))
     assert "field_gaps" in blocker_codes
     assert data["completion_blockers"] == data["quality_summary"]["completion_blockers"]
     assert any("覆盖未完成" in action for action in data["next_actions"])
+    command_reasons = [item["reason"] for item in data["next_commands"]]
+    assert command_reasons[:2] == ["coverage_incomplete", "pending_enrichment"]
+    assert "--max-snapshots 44" in data["next_commands"][0]["command"]
+    assert "--expected-post-count 13" in data["next_commands"][0]["command"]
+    assert "--resume-only" in data["next_commands"][1]["command"]
+    assert "--force-recover-running" in data["next_commands"][1]["command"]
     assert strict_result.returncode == 2, strict_result.stdout
     strict_data = json.loads(strict_result.stdout)
     assert strict_data["run_status"] == "coverage_incomplete"
@@ -5771,6 +5785,8 @@ print(json.dumps(payload, ensure_ascii=False))
     assert strict_data["exit_status_reason"] == "quality_threshold_failed"
     assert [failure["metric"] for failure in strict_data["quality_threshold_failures"]] == ["final_usable_rate"]
     assert "quality_threshold_failed" in [item["code"] for item in strict_data["completion_blockers"]]
+    strict_command_reasons = [item["reason"] for item in strict_data["next_commands"]]
+    assert strict_command_reasons[:2] == ["coverage_incomplete", "pending_enrichment"]
 
 
 def assert_run_account_job_passes_snapshot_budget(tmp_path: Path) -> None:
@@ -6462,6 +6478,9 @@ raise SystemExit(3)
     assert data["complete"] is False
     assert data["human_intervention_required"] is True
     assert any("登录态" in action or "Chrome Profile" in action for action in data["next_actions"])
+    assert data["next_commands"][0]["reason"] == "human_intervention_required"
+    assert "run_account_job.py" in data["next_commands"][0]["command"]
+    assert "--resume-only" not in data["next_commands"][0]["command"]
 
 
 def assert_run_capture_pipeline_structures_prepare_and_import_failures(tmp_path: Path) -> None:
@@ -6516,6 +6535,9 @@ print(json.dumps(payload, ensure_ascii=False))
         assert prepare_data["complete"] is False
         assert prepare_data["discover"]["post_count"] == 1
         assert any("标准化失败" in action for action in prepare_data["next_actions"])
+        assert prepare_data["next_commands"][0]["reason"] == "prepare_failed"
+        assert "run_account_job.py" in prepare_data["next_commands"][0]["command"]
+        assert "--resume-only" not in prepare_data["next_commands"][0]["command"]
 
         import_config = tmp_path / "settings_capture_import_fail.yaml"
         import_bin = tmp_path / "bin-import-fail"
@@ -6573,6 +6595,9 @@ print(json.dumps(payload, ensure_ascii=False))
         assert import_data["complete"] is False
         assert import_data["prepared"] == 1
         assert any("本地入库失败" in action for action in import_data["next_actions"])
+        assert import_data["next_commands"][0]["reason"] == "import_failed"
+        assert "run_account_job.py" in import_data["next_commands"][0]["command"]
+        assert "--resume-only" not in import_data["next_commands"][0]["command"]
     finally:
         opencli_status.shutdown()
         opencli_status.server_close()
