@@ -698,6 +698,48 @@ def assert_opencli_runtime_keeps_current_bound_tab() -> None:
     assert "tabs.reverse()" in script_text
 
 
+def assert_opencli_runtime_requires_matching_account_tab() -> None:
+    script = """
+import { ensureFacebookTab } from './scripts/opencli_runtime.mjs';
+
+const calls = [];
+async function runCommand(args) {
+  calls.push(args);
+  if (args.slice(0, 3).join(' ') === 'browser fb-competitor bind') {
+    return { ok: true, stdout: '{}', stderr: '' };
+  }
+  if (args.slice(0, 4).join(' ') === 'browser fb-competitor tab list') {
+    return {
+      ok: true,
+      stdout: JSON.stringify([
+        { page: 'wrong-page', url: 'https://www.facebook.com/wrongaccount', title: 'Wrong Account' }
+      ]),
+      stderr: ''
+    };
+  }
+  return { ok: false, stdout: '', stderr: 'unexpected command' };
+}
+
+const result = await ensureFacebookTab({
+  opencliCommand: ['opencli'],
+  session: 'fb-competitor',
+  accountUrl: 'https://www.facebook.com/targetaccount',
+  runCommand,
+});
+
+if (result.ok || result.status !== 'facebook_tab_missing' || !result.account_url.includes('targetaccount')) {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(2);
+}
+if (!/目标账号/.test(result.message)) {
+  console.error(result.message);
+  process.exit(3);
+}
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_opencli_tab_tracker_closes_only_registered_tabs() -> None:
     script = """
 import { createOpenedTabTracker } from './scripts/opencli_runtime.mjs';
@@ -6532,6 +6574,191 @@ print(json.dumps(payload, ensure_ascii=False))
     assert data["quality_summary"]["coverage_health"] == "complete"
 
 
+def assert_run_accounts_job_runs_all_accounts_and_aggregates_status(tmp_path: Path) -> None:
+    config = tmp_path / "settings_batch_accounts.yaml"
+    fake_lark = tmp_path / "fake-lark-cli"
+    fake_python = tmp_path / "fake-python"
+    fake_opencli = tmp_path / "fake-opencli"
+    calls_file = tmp_path / "batch-account-calls.json"
+    opencli_calls_file = tmp_path / "batch-opencli-calls.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch.sqlite'}")
+    text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/usr/bin/env python3
+import json
+payload = {
+  "data": {
+    "valueRange": {
+      "values": [
+        ["主页名称", "竞品fb账户", "内部FB账户"],
+        ["Competitor One", "https://www.facebook.com/competitorone", ""],
+        ["Internal One", "", "https://www.facebook.com/internalone"]
+      ]
+    }
+  }
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    fake_opencli.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{opencli_calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+if sys.argv[1:4] == ["browser", "fb-competitor", "tab"] and len(sys.argv) >= 6 and sys.argv[4] == "new":
+    print(json.dumps({{"page": "opened-" + str(len(calls)), "url": sys.argv[5]}}))
+    sys.exit(0)
+if sys.argv[1:4] == ["browser", "fb-competitor", "tab"] and len(sys.argv) >= 6 and sys.argv[4] == "close":
+    print(json.dumps({{"ok": True, "closed": sys.argv[5]}}))
+    sys.exit(0)
+print("unexpected opencli call", sys.argv, file=sys.stderr)
+sys.exit(1)
+""",
+        encoding="utf-8",
+    )
+    fake_opencli.chmod(0o755)
+    fake_python.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+account_url = sys.argv[sys.argv.index("--account-url") + 1]
+account_name = sys.argv[sys.argv.index("--account-name") + 1]
+account_type = sys.argv[sys.argv.index("--account-type") + 1]
+if account_type == "competitor":
+    payload = {{
+        "ok": True,
+        "run_status": "complete",
+        "complete": True,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 2,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 2,
+            "final_usable_count": 2,
+            "final_usable_rate": 1.0,
+            "open_task_count": 0
+        }},
+        "next_commands": []
+    }}
+    code = 0
+else:
+    payload = {{
+        "ok": True,
+        "run_status": "needs_codex_summary",
+        "complete": False,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 1,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 1,
+            "final_usable_count": 0,
+            "final_usable_rate": 0.0,
+            "open_task_count": 1,
+            "top_field_gaps": [{{"reason": "article_summary", "count": 1}}]
+        }},
+        "completion_blockers": [{{"code": "codex_summary_required"}}],
+        "next_commands": [{{
+            "reason": "codex_summary_required",
+            "description": "export summaries",
+            "command": "python3 scripts/export_summary_requests.py --account-url " + account_url
+        }}]
+    }}
+    code = 0
+print(json.dumps(payload, ensure_ascii=False))
+sys.exit(code)
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--sync",
+            "--dry-run",
+            "--max-resume-passes",
+            "8",
+        ],
+        env={**os.environ, "PYTHON": str(fake_python)},
+    )
+    assert result.returncode == 0, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert len(calls) == 2
+    assert data["account_count"] == 2
+    assert data["run_status"] == "accounts_need_codex_summary"
+    assert data["complete"] is False
+    assert data["accounts_completed"] == 1
+    assert data["accounts_needing_codex_summary"] == 1
+    assert data["ledger_candidate_count"] == 3
+    assert data["final_usable_count"] == 2
+    assert data["next_commands"][0]["account_url"] == "https://www.facebook.com/internalone"
+    opencli_calls = json.loads(opencli_calls_file.read_text(encoding="utf-8"))
+    assert len([call for call in opencli_calls if "new" in call]) == 2
+    assert len([call for call in opencli_calls if "close" in call]) == 2
+    assert all("--target-date" in call and "260603" in call for call in calls)
+    assert all("--sync" in call and "--dry-run" in call for call in calls)
+
+    strict_result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--dry-run",
+            "--fail-on-incomplete",
+        ],
+        env={**os.environ, "PYTHON": str(fake_python)},
+    )
+    assert strict_result.returncode == 2, strict_result.stdout
+
+    previous_opencli_call_count = len(json.loads(opencli_calls_file.read_text(encoding="utf-8")))
+    no_open_result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--dry-run",
+            "--no-open-account-tabs",
+            "--limit",
+            "1",
+        ],
+        env={**os.environ, "PYTHON": str(fake_python)},
+    )
+    assert no_open_result.returncode == 0, no_open_result.stdout
+    assert len(json.loads(opencli_calls_file.read_text(encoding="utf-8"))) == previous_opencli_call_count
+
+
 def assert_run_account_job_structures_prepare_and_import_failures(tmp_path: Path) -> None:
     opencli_status = start_opencli_status_server()
     try:
@@ -8123,6 +8350,7 @@ def main() -> int:
     assert_opencli_extract_stable_end_is_complete_coverage()
     assert_opencli_extract_script_requires_human_intervention()
     assert_opencli_runtime_keeps_current_bound_tab()
+    assert_opencli_runtime_requires_matching_account_tab()
     assert_opencli_tab_tracker_closes_only_registered_tabs()
     assert_opencli_detail_session_lock_recovers_stale_files()
     assert_opencli_detail_enrichment_reuses_tab_with_fallback()
@@ -8251,6 +8479,7 @@ def main() -> int:
         assert_run_account_job_passes_snapshot_budget(tmp_path)
         assert_run_account_job_auto_retries_snapshot_cap(tmp_path)
         assert_run_account_job_auto_retries_expected_coverage_gap(tmp_path)
+        assert_run_accounts_job_runs_all_accounts_and_aggregates_status(tmp_path)
         assert_run_capture_pipeline_passes_snapshot_budget(tmp_path)
         assert_run_capture_pipeline_auto_retries_snapshot_cap(tmp_path)
         assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path)

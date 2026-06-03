@@ -16,7 +16,8 @@ This file is the first-stop project memory for future agents working in this rep
   7. Normal `--sync` upserts all auditable candidates to the formal Feishu table by post URL and marks missing/suspicious fields in `是否采用` as `待补抓：...`.
   8. Use `--strict-ready-only` only when the operator explicitly wants the legacy ready-only gate.
   9. Business “抓取并写入飞书” runs should use `scripts/run_account_job.py`, which persists progress in SQLite, resumes scoped enrichment after interruptions, and reports `run_status`. A ledger write with pending enrichment is not a completed job.
-  10. If homepage discovery or detail enrichment sees `login_required`, `visitor_preview`, `facebook_tab_missing`, or `human_intervention_required`, the account job must stop with `run_status=human_intervention_required`; do not import/sync visitor-preview rows or hide this as a generic failed enrichment task.
+  10. Business “抓取全部/所有目标账号并写入飞书” runs should use `scripts/run_accounts_job.py`, which reads the Feishu account source sheet and runs the full `run_account_job.py` flow for each enabled account. Do not hand-stitch per-account commands in chat and then forget later accounts or pending detail fields.
+  11. If homepage discovery or detail enrichment sees `login_required`, `visitor_preview`, `facebook_tab_missing`, or `human_intervention_required`, the account job must stop with `run_status=human_intervention_required`; do not import/sync visitor-preview rows or hide this as a generic failed enrichment task.
 
 ## Important User Feedback Already Incorporated
 
@@ -59,6 +60,7 @@ This file is the first-stop project memory for future agents working in this rep
 - For `blocked_opencli`, account-job `next_commands` must preserve context: pre-discovery blockers rerun full capture from the homepage top after OpenCLI is fixed, while `--resume-only` detail blockers resume the scoped SQLite queue with `--force-recover-running`.
 - `run_account_job.py --resume-only` recovers scoped stale `running` enrichment tasks before worker passes. The default is intentionally conservative at 30 minutes to avoid duplicate detail navigation; account-job `next_commands` use `--force-recover-running` after known interruptions so the operator can continue immediately without waiting.
 - `run_account_job.py` defaults to multiple automatic enrichment passes (`--max-resume-passes 8`, capped at 20) before reporting status. This is intentional: one pass may only import candidates or fetch article material, while later passes clear `post_type`, engagement, lead-link, and article-material gaps. Generated resume commands must preserve this budget so business runs are not truncated after the first ledger write.
+- `run_accounts_job.py` is the batch orchestration entrypoint for “all target accounts.” It must continue iterating through the configured account list even when one account returns an incomplete ledger state, and it must aggregate each account's `run_status`, `completion_blockers`, and first `next_commands`. By default it opens each target account homepage through OpenCLI and closes those automation-opened homepage tabs at the end of the batch; `--no-open-account-tabs` is only for cases where the operator intentionally pre-opened matching account tabs. Hard blockers such as Feishu auth, OpenCLI not connected, login/profile issues, or account-tab mismatch remain explicit per-account blockers; do not silently switch to another Facebook tab.
 - `run_account_job.py` emits a top-level `quality_summary` so business status is readable without digging through nested JSON. Report `coverage_health`, `ledger_candidate_count` / `ledger_usable_rate`, `final_usable_count` / `final_usable_rate`, `top_field_gaps`, `stage_pressure_notes`, and `feishu_sync.run_status` together. `ledger_usable_rate` means candidates are visible in the Feishu ledger; `final_usable_rate` means rows passed the strict completeness bar. A high ledger rate with a low final rate is a normal补抓 state, not a completed run. Use `open_task_stage_counts`, `missing_stage_counts`, and `stage_pressure` to identify whether the remaining work is exact time, lead link, engagement, post type, article material, summary, or coverage.
 - `run_account_job.py` also mirrors `quality_summary.completion_blockers` to top-level `completion_blockers`. This ordered list is the preferred explanation of why the scoped job is not done and what to do next; it covers hard blockers, coverage gaps, OpenCLI retry-later contention, automatic enrichment stages, Codex summary requirements, final field gaps, Feishu sync failure, and explicit quality-threshold failures.
 - `run_account_job.py` supports explicit quality threshold gates for acceptance/automation: `--require-coverage-complete`, `--min-ledger-usable-rate`, `--min-final-usable-rate`, `--min-completion-rate`, `--min-expected-post-coverage-rate`, and `--min-expected-label-coverage-rate`. Defaults are zero/off so normal ledger sync still writes auditable candidates; when thresholds are supplied, failures emit `quality_threshold_failed`, `exit_status_reason=quality_threshold_failed`, and recovery hints without hiding the underlying `run_status`.
@@ -130,6 +132,7 @@ Rows that fail the gate remain local `needs_enrichment`. Do not force-sync them.
 - `scripts/discovery_retry.py`: shared homepage discovery retry helpers. Use it for bounded automatic snapshot-budget retries; do not add separate retry policies in account or pipeline entrypoints.
 - `scripts/models.py`: shared normalization logic. `facebook_content_key()` owns Facebook content identity for SQLite dedupe and Feishu upsert; `canonicalize_post_url()` turns that identity into a readable canonical URL.
 - `scripts/read_accounts.py`: reads source Feishu accounts. It supports competitor/internal columns and generic account columns through `field_schema.py`.
+- `scripts/run_accounts_job.py`: preferred batch business entrypoint for all configured accounts. It reads the Feishu account source sheet, calls `run_account_job.py` for each enabled target account, aggregates account-level status, and returns nonzero with `--fail-on-incomplete` if any account is incomplete or blocked.
 - `scripts/opencli_runtime.mjs`: shared OpenCLI command/session/tab/eval helpers.
 - `scripts/check_opencli_runtime_backend.mjs`: OpenCLI backend readiness check.
 - `scripts/opencli_extract_current_tab.mjs`: current-tab extraction reference route. It defaults to `--max-snapshots 32` and `--min-snapshots 6` to reduce under-capture from early stable virtualized-feed snapshots.
@@ -171,6 +174,18 @@ Preferred resumable account capture and ledger sync:
 
 ```bash
 python3 scripts/run_account_job.py --config config/settings.yaml --account-url <facebook-account-url> --account-name "<account-name>" --last-hours 24 --sync
+```
+
+Preferred batch capture for all configured target accounts:
+
+```bash
+python3 scripts/run_accounts_job.py --config config/settings.yaml --last-hours 24 --sync
+```
+
+Batch acceptance gate, fail the shell command unless every configured account is fully complete:
+
+```bash
+python3 scripts/run_accounts_job.py --config config/settings.yaml --target-date YYMMDD --sync --fail-on-incomplete
 ```
 
 If the operator can see a known number of target-window posts or a visible label checklist, include the expected coverage signal:

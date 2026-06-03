@@ -206,8 +206,8 @@ function normalizeTabs(payload) {
   }));
 }
 
-async function ensureFacebookTab({ opencliCommand, session, accountUrl }) {
-  const bind = await runOpencli(["browser", session, "bind"], { command: opencliCommand });
+async function ensureFacebookTab({ opencliCommand, session, accountUrl, runCommand = runOpencli }) {
+  const bind = await runCommand(["browser", session, "bind"], { command: opencliCommand });
   if (!bind.ok) {
     return {
       ok: false,
@@ -219,19 +219,23 @@ async function ensureFacebookTab({ opencliCommand, session, accountUrl }) {
     };
   }
 
-  const tabsResult = await runOpencli(["browser", session, "tab", "list"], { command: opencliCommand });
+  const tabsResult = await runCommand(["browser", session, "tab", "list"], { command: opencliCommand });
   const tabsPayload = parseJsonOutput(tabsResult);
   const tabs = normalizeTabs(tabsPayload);
   const facebookTabs = tabs.filter(facebookTab);
-  const selected = facebookTabs.find((tab) => matchesAccount(tab, accountUrl)) || facebookTabs[0];
+  const selected = facebookTabs.find((tab) => matchesAccount(tab, accountUrl)) || (!accountUrl ? facebookTabs[0] : null);
   if (!selected) {
     return {
       ok: false,
       status: "facebook_tab_missing",
       exit_code: 5,
       action_required: "human_intervention_required",
-      message: "未发现已打开的 Facebook 标签页。请先在正常 Chrome 中打开业务人员肉眼可见帖子列表的 Facebook 页面。",
+      message: accountUrl
+        ? "未发现与目标账号匹配的 Facebook 标签页。请先在正常 Chrome 中打开该账号主页，并确认业务人员肉眼可见帖子列表。"
+        : "未发现已打开的 Facebook 标签页。请先在正常 Chrome 中打开业务人员肉眼可见帖子列表的 Facebook 页面。",
+      account_url: accountUrl || "",
       open_tab_count: tabs.length,
+      facebook_tab_count: facebookTabs.length,
       tabs: tabs.slice(0, 10),
     };
   }

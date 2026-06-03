@@ -55,6 +55,13 @@ Map common requests as follows:
   - If the run is interrupted by token refresh, OpenCLI recovery, or Codex context changes, use the emitted `next_commands` first, or run the same `run_account_job.py` command again with `--resume-only --force-recover-running` when appropriate. Do not manually write ledger rows and call the job finished while enrichment is still pending.
   - For automation or Codex-driven chaining, add `--fail-on-incomplete` so a non-`complete` `run_status` returns a nonzero exit code instead of being mistaken for a finished job.
 
+- “采集全部目标账号/所有账号今天的帖子并写入飞书”
+  - Run the batch business entrypoint: `python3 scripts/run_accounts_job.py --config config/settings.yaml --target-date YYMMDD --sync`.
+  - It reads the Feishu account source sheet, calls the full `run_account_job.py` flow for each enabled account, and aggregates per-account `run_status`, `completion_blockers`, and `next_commands`.
+  - By default it opens each target account homepage in Chrome through OpenCLI and closes those automation-opened homepage tabs at the end of the batch; use `--no-open-account-tabs` only when matching account tabs are already intentionally open.
+  - Use `--fail-on-incomplete` for automation or Codex chaining that must fail unless every account is fully complete.
+  - Do not manually loop account commands in chat; that is how later accounts, detail enrichment, or summary export steps get skipped.
+
 - “把这份抓取结果导入内容库”
   - Use `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --no-sync`.
   - If no file is provided, ask for the JSON/CSV file or pasted rows.
@@ -86,6 +93,7 @@ Run all commands from the skill root.
 | Import existing JSON/CSV | `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --no-sync` |
 | Import and sync new rows | `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --sync` |
 | Resumable account capture + sync | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --last-hours 24 --sync` |
+| Batch all configured accounts + sync | `python3 scripts/run_accounts_job.py --config config/settings.yaml --last-hours 24 --sync` |
 | Capture with visible checklist | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --sync --expected-post-count 13 --expected-labels "38m,1h,2h"` |
 | Resume interrupted account job | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --resume-only --force-recover-running --sync` |
 | Status-only account check | `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --resume-only --status-only --sync --dry-run` |
@@ -163,6 +171,7 @@ Rules:
 - Short posts must be kept if they have a valid FB content URL. If comment/reply lead link, landing URL, article summary, engagement, or exact time is missing, keep them as `needs_enrichment` instead of dropping them.
 - For scale-out runs, first import visible candidates as `partial_review`, then resume queued enrichment stages in SQLite. Normal formal `--sync` upserts auditable candidates by post URL and fills missing-field reasons in `是否采用`; use `--strict-ready-only` only when the operator explicitly wants the legacy ready-only gate.
 - For business capture-and-write requests, prefer `run_account_job.py` over manual stage stitching. The job result must be interpreted by `run_status`: `complete` means the scoped job finished; `synced_ledger_incomplete`, `incomplete_pending_tasks`, `coverage_incomplete`, or `needs_codex_summary` means Feishu may have ledger rows but the capture job is not done.
+- For “all target accounts” capture-and-write requests, prefer `run_accounts_job.py` over manual loops. The batch result is complete only when every account-level `run_status` is `complete`; otherwise report the affected accounts and the emitted per-account `next_commands`.
 - Report the account-job `quality_summary` in user-facing updates: `coverage_health`, `ledger_candidate_count` / `ledger_usable_rate`, `final_usable_count` / `final_usable_rate`, `top_field_gaps`, `stage_pressure_notes`, and `feishu_sync.run_status`. Treat a high ledger rate with a low final rate as an explicit补抓 state, not as bad write quality or full completion. Use `open_task_stage_counts`, `missing_stage_counts`, and `stage_pressure` to say which stage should resume next.
 - `run_account_job.py` also exposes top-level `completion_blockers` mirrored from `quality_summary.completion_blockers`. Use this ordered list as the first human/automation explanation of why the scoped job is not complete: coverage, OpenCLI/auth/login blockers, queued enrichment, Codex summary, field gaps, Feishu sync, or explicit quality threshold failures.
 - For acceptance/automation runs, add explicit quality thresholds such as `--require-coverage-complete --min-ledger-usable-rate 1 --min-final-usable-rate 0.9 --min-completion-rate 0.9`. Threshold failures return `quality_threshold_failed` / `exit_status_reason=quality_threshold_failed` while preserving the underlying补抓 `run_status` and `next_commands`.
