@@ -6883,6 +6883,129 @@ sys.exit(code)
     assert len(json.loads(opencli_calls_file.read_text(encoding="utf-8"))) == previous_opencli_call_count
 
 
+def assert_run_accounts_job_auto_follows_coverage_recovery(tmp_path: Path) -> None:
+    config = tmp_path / "settings_batch_coverage.yaml"
+    fake_lark = tmp_path / "fake-lark-cli-coverage"
+    fake_python = tmp_path / "fake-python-coverage"
+    calls_file = tmp_path / "batch-coverage-calls.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch_coverage.sqlite'}")
+    text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/usr/bin/env python3
+import json
+payload = {
+  "data": {
+    "valueRange": {
+      "values": [
+        ["主页名称", "竞品fb账户", "内部FB账户"],
+        ["Coverage Page", "https://www.facebook.com/coveragepage", ""]
+      ]
+    }
+  }
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    fake_python.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+account_url = sys.argv[sys.argv.index("--account-url") + 1]
+account_name = sys.argv[sys.argv.index("--account-name") + 1]
+account_type = sys.argv[sys.argv.index("--account-type") + 1]
+config_path = sys.argv[sys.argv.index("--config") + 1]
+if len(calls) == 1:
+    payload = {{
+        "ok": True,
+        "run_status": "coverage_incomplete",
+        "complete": False,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 3,
+        "quality_summary": {{
+            "coverage_health": "incomplete",
+            "ledger_candidate_count": 3,
+            "final_usable_count": 0,
+            "final_usable_rate": 0.0,
+            "open_task_count": 3,
+            "top_field_gaps": [
+                {{"reason": "post_type", "count": 3}},
+                {{"reason": "article_summary", "count": 3}}
+            ]
+        }},
+        "completion_blockers": [{{"code": "coverage_incomplete"}}],
+        "next_commands": [{{
+            "reason": "coverage_incomplete",
+            "description": "rerun from top with larger snapshot budget",
+            "command": "python3 scripts/run_account_job.py --config " + config_path + " --account-url " + account_url + " --account-name '" + account_name + "' --account-type " + account_type + " --target-date 260603 --sync --dry-run --fail-on-incomplete --max-snapshots 44 --min-snapshots 6"
+        }}]
+    }}
+    code = 2
+else:
+    payload = {{
+        "ok": True,
+        "run_status": "complete",
+        "complete": True,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 3,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 3,
+            "final_usable_count": 3,
+            "final_usable_rate": 1.0,
+            "open_task_count": 0
+        }},
+        "next_commands": []
+    }}
+    code = 0
+print(json.dumps(payload, ensure_ascii=False))
+sys.exit(code)
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--sync",
+            "--dry-run",
+            "--no-open-account-tabs",
+        ],
+        env={**os.environ, "PYTHON": str(fake_python)},
+    )
+    assert result.returncode == 0, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert len(calls) == 2
+    assert calls[1][calls[1].index("--max-snapshots") + 1] == "44"
+    assert data["run_status"] == "complete"
+    assert data["complete"] is True
+    account = data["accounts"][0]
+    assert account["auto_follow_attempted"] is True
+    assert [attempt["run_status"] for attempt in account["attempts"]] == ["coverage_incomplete", "complete"]
+    assert data["next_commands"] == []
+
+
 def assert_run_account_job_structures_prepare_and_import_failures(tmp_path: Path) -> None:
     opencli_status = start_opencli_status_server()
     try:
@@ -8606,6 +8729,7 @@ def main() -> int:
         assert_run_account_job_auto_retries_snapshot_cap(tmp_path)
         assert_run_account_job_auto_retries_expected_coverage_gap(tmp_path)
         assert_run_accounts_job_runs_all_accounts_and_aggregates_status(tmp_path)
+        assert_run_accounts_job_auto_follows_coverage_recovery(tmp_path)
         assert_run_capture_pipeline_passes_snapshot_budget(tmp_path)
         assert_run_capture_pipeline_auto_retries_snapshot_cap(tmp_path)
         assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path)

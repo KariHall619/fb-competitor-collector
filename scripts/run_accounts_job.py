@@ -19,6 +19,7 @@ from read_accounts import read_accounts
 
 ACCOUNT_HARD_BLOCKERS = {"blocked_auth", "blocked_opencli", "human_intervention_required"}
 AUTO_FOLLOW_REASONS = {
+    "coverage_incomplete",
     "pending_enrichment",
     "needs_codex_summary",
     "summary_auto_apply_failed",
