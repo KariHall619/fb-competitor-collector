@@ -541,6 +541,7 @@ def main() -> int:
                 "auth_recovery": auth_payload.get("_auth_recovery", {}),
             }
         except RuntimeError as exc:
+            retry_command = command_text(batch_retry_command(args))
             print(
                 json.dumps(
                     {
@@ -554,6 +555,13 @@ def main() -> int:
                             "error": str(exc),
                         },
                         "next_actions": ["完成飞书用户授权后，重新运行同一批量账号作业。"],
+                        "next_commands": [
+                            {
+                                "reason": "blocked_auth",
+                                "description": "完成飞书用户授权后，按原批量范围继续采集、补抓和同步。",
+                                "command": retry_command,
+                            }
+                        ],
                     },
                     ensure_ascii=False,
                     indent=2,

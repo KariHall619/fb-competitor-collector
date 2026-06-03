@@ -7378,6 +7378,83 @@ sys.exit(0)
     assert len([call for call in opencli_calls if "close" in call]) == 1
 
 
+def assert_run_accounts_job_auth_blocker_preserves_batch_retry(tmp_path: Path) -> None:
+    config = tmp_path / "settings_batch_auth_blocker.yaml"
+    fake_lark = tmp_path / "fake-lark-cli-batch-auth"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch_auth_blocker.sqlite'}")
+    text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/bin/sh
+if [ "$1" = "config" ]; then
+  echo "$2: user"
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo '{"identity":"bot","tokenStatus":"valid"}'
+  exit 0
+fi
+echo '{}'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--account-type",
+            "competitor",
+            "--limit",
+            "2",
+            "--sync",
+            "--auto-follow-attempts",
+            "6",
+            "--max-snapshots",
+            "40",
+            "--min-snapshots",
+            "8",
+            "--max-resume-passes",
+            "9",
+            "--enrichment-limit",
+            "25",
+            "--require-coverage-complete",
+            "--min-final-usable-rate",
+            "0.9",
+        ]
+    )
+    assert result.returncode == 1, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    assert data["run_status"] == "blocked_auth"
+    assert data["complete"] is False
+    assert data["feishu_auth_preflight"]["stage"] == "feishu_auth_preflight"
+    assert data["next_commands"][0]["reason"] == "blocked_auth"
+    rerun = shlex.split(data["next_commands"][0]["command"])
+    assert "scripts/run_accounts_job.py" in rerun
+    assert rerun[rerun.index("--config") + 1] == str(config)
+    assert rerun[rerun.index("--target-date") + 1] == "260603"
+    assert rerun[rerun.index("--account-type") + 1] == "competitor"
+    assert rerun[rerun.index("--limit") + 1] == "2"
+    assert "--sync" in rerun
+    assert "--dry-run" not in rerun
+    assert rerun[rerun.index("--auto-follow-attempts") + 1] == "6"
+    assert rerun[rerun.index("--max-snapshots") + 1] == "40"
+    assert rerun[rerun.index("--min-snapshots") + 1] == "8"
+    assert rerun[rerun.index("--max-resume-passes") + 1] == "9"
+    assert rerun[rerun.index("--enrichment-limit") + 1] == "25"
+    assert "--require-coverage-complete" in rerun
+    assert rerun[rerun.index("--min-final-usable-rate") + 1] == "0.9"
+
+
 def assert_run_account_job_structures_prepare_and_import_failures(tmp_path: Path) -> None:
     opencli_status = start_opencli_status_server()
     try:
@@ -9105,6 +9182,7 @@ def main() -> int:
         assert_run_accounts_job_auto_follows_coverage_recovery(tmp_path)
         assert_run_accounts_job_repeats_same_resume_until_complete(tmp_path)
         assert_run_accounts_job_opencli_blocker_preserves_batch_retry(tmp_path)
+        assert_run_accounts_job_auth_blocker_preserves_batch_retry(tmp_path)
         assert_run_capture_pipeline_passes_snapshot_budget(tmp_path)
         assert_run_capture_pipeline_auto_retries_snapshot_cap(tmp_path)
         assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path)

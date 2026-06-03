@@ -61,6 +61,7 @@ Map common requests as follows:
   - The batch entrypoint may run the same scoped resume command repeatedly. This is expected when one account needs several passes to clear detail fields, post type, article material, generated summaries, and final sync; do not stop merely because the command text repeats.
   - By default it opens each target account homepage in Chrome through OpenCLI and closes those automation-opened homepage tabs at the end of the batch; use `--no-open-account-tabs` only when matching account tabs are already intentionally open.
   - If an account homepage cannot be opened through OpenCLI, the batch must still continue later accounts. Report both emitted top-level recovery commands: first the OpenCLI environment fix, then the original scoped batch rerun command with date/filter/sync/budget flags preserved.
+  - If real Feishu write auth blocks before account reading or Facebook capture, report the emitted `blocked_auth` batch rerun command after the user restores authorization; it must preserve the original date/filter/sync/budget flags.
   - Non-`complete` batch runs return nonzero by default. Use `--allow-incomplete-success` only for explicit preview/backward-compatibility checks where JSON will be inspected.
   - Do not manually loop account commands in chat; that is how later accounts, detail enrichment, or summary export steps get skipped.
 
