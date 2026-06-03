@@ -31,6 +31,10 @@ AUTO_FOLLOW_REASONS = {
 }
 
 
+def command_text(command: list[Any]) -> str:
+    return " ".join(shlex.quote(str(part)) for part in command)
+
+
 def run_command(command: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, text=True, capture_output=True, check=False, timeout=timeout)
 
@@ -250,6 +254,60 @@ def next_auto_follow_command(summary: dict[str, Any], account: dict[str, Any]) -
     return []
 
 
+def batch_retry_command(args: argparse.Namespace, *, fix_opencli: bool = False) -> list[Any]:
+    command: list[Any] = [
+        os.environ.get("PYTHON") or sys.executable,
+        "scripts/run_accounts_job.py",
+        "--config",
+        args.config,
+    ]
+    if args.target_date:
+        command.extend(["--target-date", args.target_date])
+    else:
+        command.extend(["--last-hours", str(args.last_hours)])
+    if args.account_type:
+        command.extend(["--account-type", args.account_type])
+    if args.account_url:
+        command.extend(["--account-url", args.account_url])
+    if args.account_name:
+        command.extend(["--account-name", args.account_name])
+    if int(args.limit or 0) > 0:
+        command.extend(["--limit", str(args.limit)])
+    if args.resume_only:
+        command.append("--resume-only")
+    if args.force_recover_running:
+        command.append("--force-recover-running")
+    if args.sync:
+        command.append("--sync")
+    if args.dry_run:
+        command.append("--dry-run")
+    if args.allow_incomplete_success:
+        command.append("--allow-incomplete-success")
+    if not args.open_account_tabs:
+        command.append("--no-open-account-tabs")
+    elif fix_opencli:
+        command.append("--open-account-tabs")
+    command.extend(["--auto-follow-attempts", str(args.auto_follow_attempts)])
+    command.extend(["--max-snapshots", str(args.max_snapshots)])
+    command.extend(["--min-snapshots", str(args.min_snapshots)])
+    command.extend(["--max-resume-passes", str(args.max_resume_passes)])
+    command.extend(["--enrichment-limit", str(args.enrichment_limit)])
+    command.extend(["--resume-stale-running-seconds", str(args.resume_stale_running_seconds)])
+    if args.require_coverage_complete:
+        command.append("--require-coverage-complete")
+    threshold_args = {
+        "--min-ledger-usable-rate": args.min_ledger_usable_rate,
+        "--min-final-usable-rate": args.min_final_usable_rate,
+        "--min-completion-rate": args.min_completion_rate,
+        "--min-expected-post-coverage-rate": args.min_expected_post_coverage_rate,
+        "--min-expected-label-coverage-rate": args.min_expected_label_coverage_rate,
+    }
+    for flag, value in threshold_args.items():
+        if float(value or 0.0) > 0:
+            command.extend([flag, str(value)])
+    return command
+
+
 def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any]) -> dict[str, Any]:
     attempts: list[dict[str, Any]] = []
     command = account_job_command(args, account)
@@ -319,7 +377,7 @@ def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any])
     return final_summary
 
 
-def account_open_blocker(account: dict[str, Any], open_result: dict[str, Any]) -> dict[str, Any]:
+def account_open_blocker(account: dict[str, Any], open_result: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     return {
         "account_name": account.get("account_name") or "",
         "account_url": account.get("account_url") or "",
@@ -350,6 +408,11 @@ def account_open_blocker(account: dict[str, Any], open_result: dict[str, Any]) -
                 "reason": "blocked_opencli",
                 "description": "OpenCLI Browser Bridge 恢复后重新运行批量账号作业。",
                 "command": "python3 scripts/check_env.py --config config/settings.yaml --fix-opencli",
+            },
+            {
+                "reason": "rerun_batch_after_opencli",
+                "description": "OpenCLI Browser Bridge 恢复后，按原批量范围重新运行所有目标账号，避免只修环境但忘记继续采集/补抓/同步。",
+                "command": command_text(batch_retry_command(args, fix_opencli=True)),
             }
         ],
         "open_account_tab": open_result,
@@ -417,9 +480,8 @@ def next_commands_for_batch(account_results: list[dict[str, Any]], *, limit: int
                     "command": item.get("command"),
                 }
             )
-            break
-        if len(commands) >= limit:
-            break
+            if len(commands) >= limit:
+                return commands
     return commands
 
 
@@ -527,7 +589,7 @@ def main() -> int:
     for account in accounts:
         open_result = prepare_account_tab(config, account, enabled=bool(args.open_account_tabs) and not args.resume_only and not args.status_only)
         if not open_result.get("ok"):
-            account_results.append(account_open_blocker(account, open_result))
+            account_results.append(account_open_blocker(account, open_result, args))
             continue
         if isinstance(open_result.get("tab"), dict) and open_result["tab"].get("page"):
             opened_account_tabs.append((len(account_results), open_result["tab"]))
