@@ -209,6 +209,10 @@ def account_job_command(args: argparse.Namespace, account: dict[str, Any]) -> li
         command.append("--force-recover-running")
     if args.status_only:
         command.append("--status-only")
+    if int(getattr(args, "expected_post_count", 0) or 0) > 0:
+        command.extend(["--expected-post-count", str(args.expected_post_count)])
+    if getattr(args, "expected_labels", ""):
+        command.extend(["--expected-labels", str(args.expected_labels)])
     if args.sync:
         command.append("--sync")
     if args.dry_run:
@@ -390,6 +394,10 @@ def batch_retry_command(args: argparse.Namespace, *, fix_opencli: bool = False) 
     command.extend(["--max-resume-passes", str(args.max_resume_passes)])
     command.extend(["--enrichment-limit", str(args.enrichment_limit)])
     command.extend(["--resume-stale-running-seconds", str(args.resume_stale_running_seconds)])
+    if int(getattr(args, "expected_post_count", 0) or 0) > 0:
+        command.extend(["--expected-post-count", str(args.expected_post_count)])
+    if getattr(args, "expected_labels", ""):
+        command.extend(["--expected-labels", str(args.expected_labels)])
     if args.require_coverage_complete:
         command.append("--require-coverage-complete")
     threshold_args = {
@@ -639,6 +647,8 @@ def main() -> int:
     parser.add_argument("--max-resume-passes", type=int, default=8)
     parser.add_argument("--enrichment-limit", type=int, default=50)
     parser.add_argument("--resume-stale-running-seconds", type=int, default=1800)
+    parser.add_argument("--expected-post-count", type=int, default=0)
+    parser.add_argument("--expected-labels", default="")
     parser.add_argument("--require-coverage-complete", action="store_true")
     parser.add_argument("--min-ledger-usable-rate", type=float, default=0.0)
     parser.add_argument("--min-final-usable-rate", type=float, default=0.0)

@@ -12,7 +12,7 @@ from typing import Any
 from pipeline_status import crawl_status_for, output_status_for
 from story_summary_policy import story_summary_errors
 from config_loader import load_config
-from store import all_posts, connect, mark_stage_done, query_posts, update_post_fields
+from store import all_posts, connect, mark_stage_done, query_posts, update_post_fields_with_audit
 
 
 def summary_apply_failed_result(
@@ -261,7 +261,7 @@ def main() -> int:
             fields = result["fields_by_key"].get(key)
             if not fields:
                 continue
-            update_post_fields(conn, post, fields)
+            update_post_fields_with_audit(conn, post, fields, config=config)
             mark_stage_done(conn, post, "summary")
         print(
             json.dumps(

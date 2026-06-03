@@ -61,6 +61,8 @@ POST_COLUMNS = [
 
 ENRICHMENT_STAGES = ("detail_time", "lead_link", "engagement", "post_type", "article_material", "summary")
 TASK_OPEN_STATUSES = ("pending", "failed")
+TASK_STAGE_ORDER = {stage: index for index, stage in enumerate(ENRICHMENT_STAGES, 1)}
+TASK_FETCH_LIMIT_MULTIPLIER = 2
 
 
 SCHEMA_COLUMNS: dict[str, str] = {
@@ -455,6 +457,89 @@ def enqueue_enrichment_tasks_for_posts(
     }
 
 
+def order_pending_tasks(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            TASK_STAGE_ORDER.get(str(row.get("stage") or ""), 99),
+            int(row.get("attempts") or 0),
+            int(row.get("id") or 0),
+        ),
+    )
+
+
+def limit_pending_tasks(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    ordered = order_pending_tasks(rows)
+    if len(ordered) <= limit:
+        return ordered
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in ordered:
+        stage = str(row.get("stage") or "")
+        grouped.setdefault(stage, []).append(row)
+    stage_order = [
+        stage
+        for stage in ENRICHMENT_STAGES
+        if grouped.get(stage)
+    ]
+    stage_order.extend(
+        sorted(stage for stage in grouped if stage not in set(stage_order))
+    )
+
+    selected: list[dict[str, Any]] = []
+    indexes = {stage: 0 for stage in stage_order}
+    while len(selected) < limit:
+        made_progress = False
+        for stage in stage_order:
+            index = indexes[stage]
+            bucket = grouped[stage]
+            if index >= len(bucket):
+                continue
+            selected.append(bucket[index])
+            indexes[stage] = index + 1
+            made_progress = True
+            if len(selected) >= limit:
+                break
+        if not made_progress:
+            break
+    return selected
+
+
+def pending_task_fetch_limit(limit: int) -> int:
+    return max(1, limit) * TASK_FETCH_LIMIT_MULTIPLIER
+
+
+def fetch_pending_task_rows(
+    conn: sqlite3.Connection,
+    *,
+    clauses: list[str],
+    params: list[Any],
+    stages: list[str] | tuple[str, ...] | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    wanted_stages = [stage for stage in ENRICHMENT_STAGES if not stages or stage in stages]
+    if stages:
+        wanted_stages.extend(str(stage) for stage in stages if str(stage) not in set(wanted_stages))
+    rows: list[dict[str, Any]] = []
+    per_stage_limit = pending_task_fetch_limit(limit)
+    for stage in wanted_stages:
+        stage_clauses = [*clauses, "stage = ?"]
+        stage_params = [*params, stage]
+        stage_rows = conn.execute(
+            f"""
+            SELECT * FROM enrichment_tasks
+            WHERE {' AND '.join(stage_clauses)}
+            ORDER BY attempts ASC, id ASC
+            LIMIT ?
+            """,
+            [*stage_params, per_stage_limit],
+        ).fetchall()
+        rows.extend(dict(row) for row in stage_rows)
+    return rows
+
+
 def pending_enrichment_tasks(
     conn: sqlite3.Connection,
     *,
@@ -465,31 +550,8 @@ def pending_enrichment_tasks(
     recover_stale_running_tasks(conn, stale_running_seconds=stale_running_seconds)
     clauses = ["status IN ('pending', 'failed')", "(next_run_at IS NULL OR next_run_at <= CURRENT_TIMESTAMP)"]
     params: list[Any] = []
-    if stages:
-        placeholders = ", ".join("?" for _ in stages)
-        clauses.append(f"stage IN ({placeholders})")
-        params.extend(stages)
-    rows = conn.execute(
-        f"""
-        SELECT * FROM enrichment_tasks
-        WHERE {' AND '.join(clauses)}
-        ORDER BY
-            CASE stage
-                WHEN 'detail_time' THEN 1
-                WHEN 'lead_link' THEN 2
-                WHEN 'engagement' THEN 3
-                WHEN 'post_type' THEN 4
-                WHEN 'article_material' THEN 5
-                WHEN 'summary' THEN 6
-                ELSE 7
-            END,
-            attempts ASC,
-            id ASC
-        LIMIT ?
-        """,
-        [*params, limit],
-    ).fetchall()
-    return [dict(row) for row in rows]
+    rows = fetch_pending_task_rows(conn, clauses=clauses, params=params, stages=stages, limit=limit)
+    return limit_pending_tasks(rows, limit)
 
 
 def recover_stale_running_tasks(conn: sqlite3.Connection, *, stale_running_seconds: int = 1800) -> int:
@@ -588,31 +650,8 @@ def pending_enrichment_tasks_for_posts(
     recover_stale_running_tasks_for_posts(conn, posts, stale_running_seconds=stale_running_seconds)
     clauses = ["status IN ('pending', 'failed')", "(next_run_at IS NULL OR next_run_at <= CURRENT_TIMESTAMP)"]
     clauses.append(scope_clause)
-    if stages:
-        placeholders = ", ".join("?" for _ in stages)
-        clauses.append(f"stage IN ({placeholders})")
-        params.extend(stages)
-    rows = conn.execute(
-        f"""
-        SELECT * FROM enrichment_tasks
-        WHERE {' AND '.join(clauses)}
-        ORDER BY
-            CASE stage
-                WHEN 'detail_time' THEN 1
-                WHEN 'lead_link' THEN 2
-                WHEN 'engagement' THEN 3
-                WHEN 'post_type' THEN 4
-                WHEN 'article_material' THEN 5
-                WHEN 'summary' THEN 6
-                ELSE 7
-            END,
-            attempts ASC,
-            id ASC
-        LIMIT ?
-        """,
-        [*params, limit],
-    ).fetchall()
-    return [dict(row) for row in rows]
+    rows = fetch_pending_task_rows(conn, clauses=clauses, params=params, stages=stages, limit=limit)
+    return limit_pending_tasks(rows, limit)
 
 
 def enrichment_tasks_for_posts(conn: sqlite3.Connection, posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -777,6 +816,40 @@ def update_post_fields(conn: sqlite3.Connection, post: dict[str, Any], fields: d
         values,
     )
     conn.commit()
+
+
+def update_post_fields_with_audit(
+    conn: sqlite3.Connection,
+    post: dict[str, Any],
+    fields: dict[str, Any],
+    *,
+    config: dict[str, Any] | None = None,
+) -> None:
+    """Update a post and refresh status/audit columns from the stored row."""
+
+    if not fields:
+        return
+    update_post_fields(conn, post, fields)
+    stored = row_for_post(conn, post)
+    if not stored:
+        return
+    refreshed = {
+        **stored,
+        "output_status": output_status_for(stored),
+        "crawl_status": crawl_status_for(stored),
+    }
+    refreshed.update(audit_fields_for_storage(refreshed, config))
+    update_post_fields(
+        conn,
+        stored,
+        {
+            "output_status": refreshed["output_status"],
+            "crawl_status": refreshed["crawl_status"],
+            "field_audit_status": refreshed["field_audit_status"],
+            "field_audit_reasons": refreshed["field_audit_reasons"],
+            "field_audit_note": refreshed["field_audit_note"],
+        },
+    )
 
 
 def cached_article_material(conn: sqlite3.Connection, url: str) -> dict[str, Any] | None:

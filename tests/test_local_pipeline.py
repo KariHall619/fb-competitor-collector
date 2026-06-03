@@ -4790,6 +4790,39 @@ def assert_partial_review_status_and_task_queue(tmp_path: Path) -> None:
     assert repeat_summary["open_stage_counts"] == task_summary["stage_counts"]
 
 
+def assert_enrichment_queue_limit_keeps_article_material_moving(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, pending_enrichment_tasks, upsert_post
+
+    conn = connect(tmp_path / "queue-fairness.sqlite")
+    posts = []
+    for index in range(4):
+        post = normalize_post(
+            {
+                "account_name": "Queue Fairness",
+                "account_url": "https://www.facebook.com/queuefairness",
+                "post_url": f"https://www.facebook.com/queuefairness/posts/{index}",
+                "post_time_text": f"{index + 1}h",
+                "article_url": f"https://story.example/queue/{index}",
+                "landing_url": f"https://story.example/queue/{index}",
+                "lead_url_raw": f"https://story.example/queue/{index}",
+                "lead_link_status": "qualified",
+                "lead_link_source": "comment",
+                "crawled_at": "2026-06-03T12:00:00",
+            },
+            {"source_skill": "test"},
+        )
+        upsert_post(conn, post)
+        posts.append(post)
+    enqueue_enrichment_tasks_for_posts(conn, posts)
+
+    tasks = pending_enrichment_tasks(conn, limit=6)
+    stages = [task["stage"] for task in tasks]
+    assert "post_type" in stages
+    assert "article_material" in stages
+
+
 def assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
@@ -6396,6 +6429,133 @@ def assert_run_account_job_auto_exports_summary_requests(tmp_path: Path) -> None
     assert stored_after["output_status"] == "ready_for_output"
 
 
+def assert_run_account_job_syncs_refreshed_summary_and_type_after_auto_apply(tmp_path: Path) -> None:
+    config = tmp_path / "settings_account_summary_sync_refresh.yaml"
+    db_path = tmp_path / "account-summary-sync-refresh.sqlite"
+    fake_lark = tmp_path / "fake-lark-cli-summary-refresh"
+    writes_file = tmp_path / "summary-refresh-writes.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config_text = config.read_text(encoding="utf-8")
+    config_text = config_text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
+    config_text = config_text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    config_text = config_text.replace('output_spreadsheet_url: ""', 'output_spreadsheet_url: "https://fake.feishu.cn/sheets/output"')
+    config.write_text(config_text, encoding="utf-8")
+    fake_lark.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+writes_path = pathlib.Path(r"{writes_file}")
+args = sys.argv[1:]
+if args[:2] == ["config", "default-as"]:
+    if len(args) > 2:
+        print("default-as: user")
+    else:
+        print("default-as: user")
+    sys.exit(0)
+if args[:2] == ["config", "strict-mode"]:
+    if len(args) > 2:
+        print("strict-mode: user")
+    else:
+        print("strict-mode: user")
+    sys.exit(0)
+if args[:2] == ["auth", "status"]:
+    print(json.dumps({{"identity": "user", "tokenStatus": "valid", "userName": "Test User"}}))
+    sys.exit(0)
+if args[:2] == ["sheets", "+info"]:
+    print(json.dumps({{"data": {{"sheets": {{"sheets": [{{"title": "全量内容库", "sheet_id": "sheet1"}}, {{"title": "FB竞品帖子链接", "sheet_id": "sheet2"}}]}}}}}}))
+    sys.exit(0)
+if args[:2] == ["sheets", "+read"]:
+    print(json.dumps({{"data": {{"valueRange": {{"values": []}}}}}}))
+    sys.exit(0)
+if args[:2] == ["sheets", "+write"]:
+    range_value = args[args.index("--range") + 1]
+    values = json.loads(args[args.index("--values") + 1])
+    existing = json.loads(writes_path.read_text(encoding="utf-8")) if writes_path.exists() else []
+    existing.append({{"range": range_value, "values": values}})
+    writes_path.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
+    print(json.dumps({{"ok": True, "rows": len(values)}}))
+    sys.exit(0)
+print("unexpected lark call: " + " ".join(args), file=sys.stderr)
+sys.exit(1)
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, mark_stage_done, row_for_post, update_post_fields_with_audit, upsert_post
+
+    conn = connect(db_path)
+    post = normalize_post(
+        {
+            "account_name": "Summary Refresh",
+            "account_url": "https://www.facebook.com/summaryrefresh",
+            "account_type": "competitor",
+            "post_url": "https://www.facebook.com/summaryrefresh/posts/needs-refresh",
+            "posted_at": "2026年6月3日 12:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/summary-refresh",
+            "landing_url": "https://story.example/summary-refresh",
+            "lead_url_raw": "https://story.example/summary-refresh",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "likes": 20,
+            "comments": 4,
+            "shares": 2,
+            "article_material": {
+                "ok": True,
+                "title": "Summary refresh source",
+                "text_excerpt": "A family conflict story where the protagonist uncovers a hidden problem.",
+            },
+        }
+    )
+    upsert_post(conn, post)
+    stored = row_for_post(conn, post)
+    assert stored is not None
+    enqueue_enrichment_tasks_for_posts(conn, [stored])
+    update_post_fields_with_audit(conn, stored, {"post_type": "图文"}, config={})
+    mark_stage_done(conn, stored, "post_type")
+
+    job = run(
+        [
+            PYTHON,
+            "scripts/run_account_job.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/summaryrefresh",
+            "--account-name",
+            "Summary Refresh",
+            "--target-date",
+            "260603",
+            "--resume-only",
+            "--sync",
+        ]
+    )
+
+    assert job.returncode == 0, job.stdout + job.stderr
+    data = json.loads(job.stdout)
+    assert data["run_status"] == "complete"
+    assert data["summary_auto_apply"]["ok"] is True
+    stored_after = row_for_post(conn, post)
+    assert stored_after is not None
+    assert stored_after["post_type"] == "图文"
+    assert stored_after["summary_source"] == "article"
+    assert stored_after["story_summary"]
+    assert "article_summary" not in stored_after["field_audit_reasons"]
+    assert "post_type" not in stored_after["field_audit_reasons"]
+    writes = json.loads(writes_file.read_text(encoding="utf-8"))
+    values = writes[-1]["values"]
+    headers = values[0]
+    row = values[1]
+    assert row[headers.index("帖子类型")] == "图文"
+    assert row[headers.index("故事概要")] == stored_after["story_summary"]
+    assert "文章概要" not in row[headers.index("是否采用")]
+    assert "帖子类型" not in row[headers.index("是否采用")]
+
+
 def assert_run_account_job_applies_partial_generated_summaries() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import run_account_job
@@ -7681,6 +7841,10 @@ sys.exit(code)
             "--sync",
             "--dry-run",
             "--no-open-account-tabs",
+            "--expected-post-count",
+            "13",
+            "--expected-labels",
+            "38m,1h,2h",
         ],
         env={**os.environ, "PYTHON": str(fake_python)},
     )
@@ -7688,6 +7852,8 @@ sys.exit(code)
     data = json.loads(result.stdout)
     calls = json.loads(calls_file.read_text(encoding="utf-8"))
     assert len(calls) == 2
+    assert calls[0][calls[0].index("--expected-post-count") + 1] == "13"
+    assert calls[0][calls[0].index("--expected-labels") + 1] == "38m,1h,2h"
     assert calls[1][calls[1].index("--max-snapshots") + 1] == "44"
     assert data["run_status"] == "complete"
     assert data["complete"] is True
@@ -8866,6 +9032,10 @@ sys.exit(0)
             "9",
             "--enrichment-limit",
             "25",
+            "--expected-post-count",
+            "13",
+            "--expected-labels",
+            "38m,1h,2h",
             "--require-coverage-complete",
             "--min-final-usable-rate",
             "0.9",
@@ -8896,6 +9066,8 @@ sys.exit(0)
     assert rerun[rerun.index("--min-snapshots") + 1] == "8"
     assert rerun[rerun.index("--max-resume-passes") + 1] == "9"
     assert rerun[rerun.index("--enrichment-limit") + 1] == "25"
+    assert rerun[rerun.index("--expected-post-count") + 1] == "13"
+    assert rerun[rerun.index("--expected-labels") + 1] == "38m,1h,2h"
     assert "--require-coverage-complete" in rerun
     assert rerun[rerun.index("--min-final-usable-rate") + 1] == "0.9"
     opencli_calls = json.loads(opencli_calls_file.read_text(encoding="utf-8"))
@@ -8952,6 +9124,10 @@ exit 0
             "9",
             "--enrichment-limit",
             "25",
+            "--expected-post-count",
+            "13",
+            "--expected-labels",
+            "38m,1h,2h",
             "--require-coverage-complete",
             "--min-final-usable-rate",
             "0.9",
@@ -8976,6 +9152,8 @@ exit 0
     assert rerun[rerun.index("--min-snapshots") + 1] == "8"
     assert rerun[rerun.index("--max-resume-passes") + 1] == "9"
     assert rerun[rerun.index("--enrichment-limit") + 1] == "25"
+    assert rerun[rerun.index("--expected-post-count") + 1] == "13"
+    assert rerun[rerun.index("--expected-labels") + 1] == "38m,1h,2h"
     assert "--require-coverage-complete" in rerun
     assert rerun[rerun.index("--min-final-usable-rate") + 1] == "0.9"
 
@@ -10679,6 +10857,7 @@ def main() -> int:
         assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp_path)
         assert_article_material_extractor(tmp_path)
         assert_partial_review_status_and_task_queue(tmp_path)
+        assert_enrichment_queue_limit_keeps_article_material_moving(tmp_path)
         assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path)
         assert_enrichment_worker_requeues_opencli_session_busy(tmp_path)
         assert_enrichment_worker_lead_stage_requires_external_landing_url()
@@ -10708,6 +10887,7 @@ def main() -> int:
         assert_run_account_job_continues_worker_passes_until_complete()
         assert_run_account_job_does_not_stop_after_no_progress_worker_passes()
         assert_run_account_job_auto_exports_summary_requests(tmp_path)
+        assert_run_account_job_syncs_refreshed_summary_and_type_after_auto_apply(tmp_path)
         assert_run_account_job_applies_partial_generated_summaries()
         assert_run_account_job_generates_summary_while_post_type_pending()
         assert_run_account_job_rejects_noop_summary_apply()

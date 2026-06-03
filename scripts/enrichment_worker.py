@@ -35,6 +35,7 @@ from store import (
     task_counts,
     task_counts_for_posts,
     update_post_fields,
+    update_post_fields_with_audit,
     upsert_article_material,
     upsert_post,
 )
@@ -388,7 +389,7 @@ def main() -> int:
                     if not material.get("ok"):
                         raise RuntimeError(material.get("error") or "article_material_fetch_failed")
                     fields = article_material_fields(post, material)
-                    update_post_fields(conn, post, fields)
+                    update_post_fields_with_audit(conn, post, fields, config=config)
                     stored = row_for_post(conn, post) or post
                     enqueue_enrichment_tasks(conn, stored, config=config)
                     mark_task_done(conn, task["id"], duration_ms=duration_ms)

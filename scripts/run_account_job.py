@@ -2146,7 +2146,15 @@ def main() -> int:
             account_type=args.account_type,
             dates=target_dates,
         )
+        enqueue_enrichment_tasks_for_posts(conn, posts, config)
     sync_result = run_sync(config, args, posts, conn)
+    posts = scoped_posts(
+        conn,
+        account_name=args.account_name,
+        account_url=args.account_url,
+        account_type=args.account_type,
+        dates=target_dates,
+    )
     completion = enrichment_completion_summary(conn, posts, config)
     retry_summary = worker_retry_summary(worker_passes)
     failure_summary = worker_failure_summary(worker_passes)
