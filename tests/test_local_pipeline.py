@@ -5856,6 +5856,30 @@ def assert_run_account_job_summary_only_next_command_exports_requests() -> None:
     assert "--start-date 260602 --end-date 260603" in range_commands[0]["command"]
 
 
+def assert_run_account_job_skips_worker_for_summary_only_completion() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    summary_only = {
+        "open_task_count": 2,
+        "summary_open_task_count": 2,
+        "auto_open_task_count": 0,
+        "requires_codex_summary_count": 2,
+        "has_summary_only_work": True,
+        "has_auto_enrichment_work": False,
+    }
+    mixed = {
+        **summary_only,
+        "auto_open_task_count": 1,
+        "has_auto_enrichment_work": True,
+        "open_task_stage_counts": {"article_material": 1, "summary": 2},
+    }
+    no_work = {**summary_only, "open_task_count": 0}
+    assert run_account_job.should_run_worker_for_completion(summary_only) is False
+    assert run_account_job.should_run_worker_for_completion(mixed) is True
+    assert run_account_job.should_run_worker_for_completion(no_work) is False
+
+
 def assert_run_account_job_worker_pass_surfaces_summary_required() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import run_account_job
@@ -9556,6 +9580,7 @@ def main() -> int:
         assert_run_account_job_recovery_commands_preserve_resume_budget()
         assert_run_account_job_reports_worker_retry_later()
         assert_run_account_job_summary_only_next_command_exports_requests()
+        assert_run_account_job_skips_worker_for_summary_only_completion()
         assert_run_account_job_worker_pass_surfaces_summary_required()
         assert_run_account_job_continues_worker_passes_until_complete()
         assert_run_account_job_auto_exports_summary_requests(tmp_path)

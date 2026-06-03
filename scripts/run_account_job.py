@@ -463,6 +463,14 @@ def completion_requires_opencli(completion: dict[str, Any]) -> bool:
     return any(stage in OPENCLI_REQUIRED_STAGES and int(count or 0) > 0 for stage, count in stage_counts.items())
 
 
+def should_run_worker_for_completion(completion: dict[str, Any]) -> bool:
+    if not completion.get("open_task_count"):
+        return False
+    if completion.get("has_summary_only_work") and not has_auto_enrichment_work(completion):
+        return False
+    return True
+
+
 def run_worker_pass(args: argparse.Namespace, *, target_dates: list[str], pass_index: int) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     for target_date in target_dates:
@@ -1985,7 +1993,7 @@ def main() -> int:
     no_progress_streak = 0
     for index in range(resume_passes):
         completion_before = enrichment_completion_summary(conn, posts, config)
-        if not completion_before.get("open_task_count"):
+        if not should_run_worker_for_completion(completion_before):
             break
         worker_pass = run_worker_pass(args, target_dates=target_dates, pass_index=index + 1)
         worker_passes.append(worker_pass)
