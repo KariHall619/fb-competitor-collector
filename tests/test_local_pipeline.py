@@ -5728,6 +5728,99 @@ def assert_run_account_job_recovery_commands_preserve_resume_budget() -> None:
     assert "--resume-only" in human_parts
 
 
+def assert_run_account_job_reports_unsynced_local_completion_command() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+    import run_accounts_job
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/unsyncedpage",
+            "account_name": "Unsynced Page",
+            "account_type": "competitor",
+            "sync": False,
+            "dry_run": False,
+            "strict_ready_only": False,
+            "resume_only": False,
+            "max_snapshots": 32,
+            "min_snapshots": 6,
+            "max_resume_passes": 4,
+            "enrichment_limit": 25,
+            "resume_stale_running_seconds": 120,
+            "expected_post_count": 0,
+            "expected_labels": "",
+            "require_coverage_complete": False,
+            "min_ledger_usable_rate": 0.0,
+            "min_final_usable_rate": 0.0,
+            "min_completion_rate": 0.0,
+            "min_expected_post_coverage_rate": 0.0,
+            "min_expected_label_coverage_rate": 0.0,
+        },
+    )()
+    completion = {
+        "post_count": 2,
+        "has_incomplete_enrichment": False,
+        "requires_codex_summary_count": 0,
+        "coverage_incomplete_count": 0,
+    }
+    captured_status = run_account_job.summarize_job_status(
+        preflight={"ok": True},
+        discover_import={"ok": True},
+        worker_passes=[],
+        sync_result={"ok": True, "skipped": True, "run_status": "not_synced", "stage": "sync_disabled"},
+        completion=completion,
+    )
+    assert captured_status == "captured_not_synced"
+    captured_commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260603"],
+        run_status=captured_status,
+        completion=completion,
+        discover_coverage={"source": "discover", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert captured_commands[0]["reason"] == "captured_not_synced"
+    captured_parts = shlex.split(captured_commands[0]["command"])
+    assert "scripts/run_account_job.py" in captured_parts
+    assert "--sync" in captured_parts
+    assert "--resume-only" in captured_parts
+    assert "--force-recover-running" in captured_parts
+    assert captured_parts[captured_parts.index("--target-date") + 1] == "260603"
+    assert captured_parts[captured_parts.index("--max-resume-passes") + 1] == "4"
+    assert captured_parts[captured_parts.index("--enrichment-limit") + 1] == "25"
+    assert captured_parts[captured_parts.index("--resume-stale-running-seconds") + 1] == "120"
+
+    resumed_status = run_account_job.summarize_job_status(
+        preflight={"ok": True},
+        discover_import=None,
+        worker_passes=[{"ok": True, "run_status": "complete"}],
+        sync_result={"ok": True, "skipped": True, "run_status": "not_synced", "stage": "sync_disabled"},
+        completion=completion,
+    )
+    assert resumed_status == "resumed_not_synced"
+    resumed_commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260603"],
+        run_status=resumed_status,
+        completion=completion,
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert resumed_commands[0]["reason"] == "resumed_not_synced"
+    assert "--sync" in shlex.split(resumed_commands[0]["command"])
+
+    account_summary = {
+        "complete": False,
+        "run_status": captured_status,
+        "next_commands": captured_commands,
+    }
+    assert run_accounts_job.next_auto_follow_command(
+        account_summary,
+        {"account_url": "https://www.facebook.com/unsyncedpage"},
+    ) == []
+
+
 def assert_run_account_job_reports_worker_retry_later() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import run_account_job
@@ -6195,6 +6288,64 @@ def assert_run_account_job_applies_partial_generated_summaries() -> None:
     assert result["apply"]["applied"] == 1
 
 
+def assert_run_account_job_generates_summary_while_post_type_pending() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    calls: list[list[str]] = []
+    original_run_command = run_account_job.run_command
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/summarywithtypegap",
+            "account_name": "Summary With Type Gap",
+            "account_type": "competitor",
+            "dry_run": False,
+            "status_only": False,
+        },
+    )()
+
+    class FakeResult:
+        def __init__(self, returncode: int, payload: dict) -> None:
+            self.returncode = returncode
+            self.stdout = json.dumps(payload, ensure_ascii=False)
+            self.stderr = ""
+
+    def fake_run(command: list[str]) -> FakeResult:
+        calls.append(command)
+        script = command[1] if len(command) > 1 else ""
+        if script.endswith("export_summary_requests.py"):
+            return FakeResult(0, {"ok": True, "count": 1})
+        if script.endswith("generate_article_summaries.py"):
+            return FakeResult(0, {"ok": True, "generated": 1, "summary_key_count": 1, "rejected": []})
+        if script.endswith("apply_article_summaries.py"):
+            return FakeResult(0, {"ok": True, "applied": 1, "missing": 0, "rejected": 0})
+        return FakeResult(1, {"ok": False, "error": "unexpected command", "command": command})
+
+    completion = {
+        "requires_codex_summary_count": 1,
+        "has_auto_enrichment_work": True,
+        "auto_open_task_count": 1,
+        "open_task_stage_counts": {"post_type": 1, "summary": 1},
+        "missing_stage_counts": {"post_type": 1, "summary": 1},
+    }
+    try:
+        run_account_job.run_command = fake_run
+        result = run_account_job.auto_generate_and_apply_summaries(args, ["260603"], completion)
+    finally:
+        run_account_job.run_command = original_run_command
+
+    assert run_account_job.has_pre_summary_auto_enrichment_work(completion) is False
+    assert result["ok"] is True
+    assert result["applied_summary_count"] == 1
+    scripts = [call[1] for call in calls]
+    assert any(script.endswith("export_summary_requests.py") for script in scripts)
+    assert any(script.endswith("generate_article_summaries.py") for script in scripts)
+    assert any(script.endswith("apply_article_summaries.py") for script in scripts)
+
+
 def assert_run_account_job_rejects_noop_summary_apply() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import run_account_job
@@ -6337,7 +6488,7 @@ def assert_run_account_job_worker_pass_reports_non_json_failure() -> None:
     assert "--force-recover-running" in commands[0]["command"]
 
 
-def assert_run_account_job_prioritizes_auto_work_before_summary_export() -> None:
+def assert_run_account_job_waits_for_article_material_before_summary_export() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import run_account_job
 
@@ -6365,6 +6516,8 @@ def assert_run_account_job_prioritizes_auto_work_before_summary_export() -> None
         "requires_codex_summary_count": 1,
         "has_summary_only_work": False,
         "has_auto_enrichment_work": True,
+        "open_task_stage_counts": {"article_material": 1, "summary": 1},
+        "missing_stage_counts": {"article_material": 1, "summary": 1},
         "has_incomplete_enrichment": True,
     }
     status = run_account_job.summarize_job_status(
@@ -6383,6 +6536,7 @@ def assert_run_account_job_prioritizes_auto_work_before_summary_export() -> None
     )
     assert status == "incomplete_pending_tasks"
     assert [item["reason"] for item in commands] == ["pending_enrichment"]
+    assert run_account_job.has_pre_summary_auto_enrichment_work(completion) is True
     assert "--resume-only" in commands[0]["command"]
     assert "export_summary_requests.py" not in commands[0]["command"]
 
@@ -9844,6 +9998,7 @@ def main() -> int:
         assert_run_account_job_does_not_recover_fresh_running_tasks(tmp_path)
         assert_run_account_job_next_commands_force_recover_running()
         assert_run_account_job_recovery_commands_preserve_resume_budget()
+        assert_run_account_job_reports_unsynced_local_completion_command()
         assert_run_account_job_reports_worker_retry_later()
         assert_run_account_job_summary_only_next_command_exports_requests()
         assert_run_account_job_skips_worker_for_summary_only_completion()
@@ -9851,9 +10006,10 @@ def main() -> int:
         assert_run_account_job_continues_worker_passes_until_complete()
         assert_run_account_job_auto_exports_summary_requests(tmp_path)
         assert_run_account_job_applies_partial_generated_summaries()
+        assert_run_account_job_generates_summary_while_post_type_pending()
         assert_run_account_job_rejects_noop_summary_apply()
         assert_run_account_job_worker_pass_reports_non_json_failure()
-        assert_run_account_job_prioritizes_auto_work_before_summary_export()
+        assert_run_account_job_waits_for_article_material_before_summary_export()
         assert_run_capture_pipeline_uses_completion_status_helpers()
         assert_run_capture_pipeline_blocks_auth_before_opencli(tmp_path)
         assert_run_capture_pipeline_reports_opencli_blocker(tmp_path)

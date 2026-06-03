@@ -733,6 +733,17 @@ def append_resume_pass_budget(command: list[Any], args: argparse.Namespace) -> N
     )
 
 
+def resume_sync_command(base: list[Any], primary_date: str, args: argparse.Namespace) -> list[Any]:
+    command = list(base)
+    if "--sync" not in command:
+        command.append("--sync")
+    if primary_date:
+        command.extend(["--target-date", primary_date])
+    command.extend(["--resume-only", "--force-recover-running"])
+    append_resume_pass_budget(command, args)
+    return command
+
+
 def full_capture_command(
     base: list[Any],
     primary_date: str,
@@ -953,6 +964,14 @@ def next_commands_for_status(
                 "command": command_text(command),
             }
         )
+    if run_status in {"captured_not_synced", "resumed_not_synced"}:
+        commands.append(
+            {
+                "reason": run_status,
+                "description": "本地采集/补抓已完成但未写入飞书；继续同账号同步，让飞书台账更新到最新结果。",
+                "command": command_text(resume_sync_command(base, primary_date, args)),
+            }
+        )
     if run_status == "quality_threshold_failed":
         command = resume_command(base, primary_date, force_recover_running=True)
         command.append("--status-only")
@@ -1122,7 +1141,21 @@ def worker_failure_summary(worker_passes: list[dict[str, Any]]) -> dict[str, Any
 
 
 def has_pre_summary_auto_enrichment_work(completion: dict[str, Any]) -> bool:
-    return bool(completion.get("auto_open_task_count") or completion.get("has_auto_enrichment_work"))
+    """Return True only when article material still needs machine fetching.
+
+    Post type, engagement, exact time, and lead-link refetches can continue in
+    parallel with summary generation once article material exists. Blocking
+    summaries on those independent OpenCLI stages leaves Feishu rows with empty
+    story summaries even though the summary source is already available.
+    """
+
+    for key in ("open_task_stage_counts", "missing_stage_counts"):
+        counts = completion.get(key)
+        if not isinstance(counts, dict):
+            continue
+        if _int_metric(counts.get("article_material")) > 0:
+            return True
+    return False
 
 
 def export_summary_requests_for_job(args: argparse.Namespace, target_dates: list[str], completion: dict[str, Any]) -> dict[str, Any]:
