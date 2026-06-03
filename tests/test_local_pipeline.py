@@ -5652,6 +5652,57 @@ def assert_run_account_job_worker_pass_surfaces_summary_required() -> None:
     assert summary_requirement["codex_summary_required_count"] == 1
 
 
+def assert_run_account_job_continues_worker_passes_until_complete() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    assert run_account_job.auto_resume_pass_limit(0) >= 8
+    assert run_account_job.auto_resume_pass_limit(999) == run_account_job.MAX_AUTO_RESUME_PASSES
+    assert run_account_job.completion_improved(
+        {"open_task_count": 3, "auto_open_task_count": 3, "incomplete_post_count": 1},
+        {"open_task_count": 2, "auto_open_task_count": 2, "incomplete_post_count": 1},
+    )
+    assert not run_account_job.completion_improved(
+        {"open_task_count": 2, "auto_open_task_count": 2, "incomplete_post_count": 1},
+        {"open_task_count": 2, "auto_open_task_count": 2, "incomplete_post_count": 1},
+    )
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/continue",
+            "account_name": "Continue Page",
+            "account_type": "competitor",
+            "sync": True,
+            "dry_run": False,
+            "strict_ready_only": False,
+            "resume_only": True,
+            "max_snapshots": 32,
+            "min_snapshots": 6,
+            "max_resume_passes": 0,
+            "expected_post_count": 0,
+            "expected_labels": "",
+            "require_coverage_complete": False,
+            "min_ledger_usable_rate": 0.0,
+            "min_final_usable_rate": 0.0,
+            "min_completion_rate": 0.0,
+            "min_expected_post_coverage_rate": 0.0,
+            "min_expected_label_coverage_rate": 0.0,
+        },
+    )()
+    commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260603"],
+        run_status="incomplete_pending_tasks",
+        completion={"open_task_count": 4, "has_auto_enrichment_work": True},
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+    pending = next(item for item in commands if item["reason"] == "pending_enrichment")
+    assert "--max-resume-passes 8" in pending["command"]
+
+
 def assert_run_account_job_auto_exports_summary_requests(tmp_path: Path) -> None:
     config = tmp_path / "settings_account_summary_export.yaml"
     db_path = tmp_path / "account-summary-export.sqlite"
@@ -6367,6 +6418,118 @@ print(json.dumps(payload, ensure_ascii=False))
     assert data["quality_summary"]["coverage_health"] == "complete"
     assert data["quality_summary"]["ledger_candidate_count"] == 2
     assert data["run_status"] != "coverage_incomplete"
+
+
+def assert_run_account_job_auto_retries_expected_coverage_gap(tmp_path: Path) -> None:
+    config = tmp_path / "settings_account_expected_retry.yaml"
+    fake_bin = tmp_path / "bin-account-expected-retry"
+    fake_opencli = tmp_path / "fake-opencli-account-expected-retry"
+    calls_file = tmp_path / "account-expected-retry-calls.json"
+    db_path = tmp_path / "account-expected-retry.sqlite"
+    opencli_status = start_opencli_status_server()
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
+    config.write_text(text, encoding="utf-8")
+    fake_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
+    fake_opencli.chmod(0o755)
+    fake_bin.mkdir()
+    (fake_bin / "node").write_text(
+        f"""#!{PYTHON}
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+max_snapshots = int(sys.argv[sys.argv.index("--max-snapshots") + 1])
+if max_snapshots < 32:
+    posts = [
+        {{
+            "post_url": "https://www.facebook.com/expectedretry/posts/one",
+            "post_time_text": "1h",
+            "crawled_at": "2026-06-03T12:00:00",
+            "raw_text": "candidate one"
+        }}
+    ]
+    labels = ["1h"]
+else:
+    posts = [
+        {{
+            "post_url": "https://www.facebook.com/expectedretry/posts/one",
+            "post_time_text": "1h",
+            "crawled_at": "2026-06-03T12:00:00",
+            "raw_text": "candidate one"
+        }},
+        {{
+            "post_url": "https://www.facebook.com/expectedretry/posts/two",
+            "post_time_text": "2h",
+            "crawled_at": "2026-06-03T12:00:00",
+            "raw_text": "candidate two"
+        }},
+    ]
+    labels = ["1h", "2h"]
+payload = {{
+    "ok": True,
+    "post_count": len(posts),
+    "raw_candidate_count": len(posts),
+    "capture_complete": True,
+    "coverage": {{"capture_complete": True, "coverage_incomplete": False, "stop_reason": "stable_no_new_posts"}},
+    "snapshots": [{{"visible_time_texts": labels, "new_posts": len(posts)}}],
+    "posts": posts,
+}}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    (fake_bin / "node").chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+
+    try:
+        result = run(
+            [
+                PYTHON,
+                "scripts/run_account_job.py",
+                "--config",
+                str(config),
+                "--account-url",
+                "https://www.facebook.com/expectedretry",
+                "--account-name",
+                "Expected Retry",
+                "--target-date",
+                "260603",
+                "--dry-run",
+                "--status-only",
+                "--max-snapshots",
+                "20",
+                "--min-snapshots",
+                "6",
+                "--expected-post-count",
+                "2",
+                "--expected-labels",
+                "1h,2h",
+            ],
+            env=env,
+        )
+    finally:
+        opencli_status.shutdown()
+        opencli_status.server_close()
+    assert result.returncode == 0, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert len(calls) == 2
+    assert calls[0][calls[0].index("--max-snapshots") + 1] == "20"
+    assert calls[1][calls[1].index("--max-snapshots") + 1] == "32"
+    assert data["post_count"] == 2
+    assert data["discover_import"]["discover"]["expected_coverage"]["ok"] is True
+    assert data["discover_import"]["discover_retry"]["attempted"] is True
+    assert data["discover_import"]["discover"]["auto_retry"]["resolved"] is True
+    assert data["discover_coverage"]["complete"] is True
+    assert data["quality_summary"]["coverage_health"] == "complete"
 
 
 def assert_run_account_job_structures_prepare_and_import_failures(tmp_path: Path) -> None:
@@ -8077,6 +8240,7 @@ def main() -> int:
         assert_run_account_job_reports_worker_retry_later()
         assert_run_account_job_summary_only_next_command_exports_requests()
         assert_run_account_job_worker_pass_surfaces_summary_required()
+        assert_run_account_job_continues_worker_passes_until_complete()
         assert_run_account_job_auto_exports_summary_requests(tmp_path)
         assert_run_account_job_worker_pass_reports_non_json_failure()
         assert_run_account_job_prioritizes_auto_work_before_summary_export()
@@ -8086,6 +8250,7 @@ def main() -> int:
         assert_run_capture_pipeline_applies_expected_coverage(tmp_path)
         assert_run_account_job_passes_snapshot_budget(tmp_path)
         assert_run_account_job_auto_retries_snapshot_cap(tmp_path)
+        assert_run_account_job_auto_retries_expected_coverage_gap(tmp_path)
         assert_run_capture_pipeline_passes_snapshot_budget(tmp_path)
         assert_run_capture_pipeline_auto_retries_snapshot_cap(tmp_path)
         assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path)

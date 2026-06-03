@@ -36,6 +36,8 @@ ENRICHMENT_STAGES = "detail_time,lead_link,engagement,post_type,article_material
 HUMAN_INTERVENTION_STATUSES = {"human_intervention_required", "login_required", "visitor_preview", "facebook_tab_missing"}
 WORKER_OPERATIONAL_STATUSES = {"complete", "failed", "human_intervention_required", "incomplete_pending_tasks", "needs_codex_summary"}
 DEFAULT_RESUME_STALE_RUNNING_SECONDS = 1800
+DEFAULT_MAX_RESUME_PASSES = 8
+MAX_AUTO_RESUME_PASSES = 20
 OPENCLI_REQUIRED_STAGES = {"detail_time", "lead_link", "engagement", "post_type"}
 STAGE_LABELS = {
     "detail_time": "精确时间",
@@ -222,13 +224,27 @@ def discover_homepage_once(
     return discover, payload, int((time.monotonic() - started) * 1000)
 
 
+def expected_coverage_incomplete(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
+    expected = coverage.get("expected") if isinstance(coverage.get("expected"), dict) else {}
+    return bool(expected.get("enabled") and expected.get("ok") is False)
+
+
 def discover_homepage_with_retry(args: argparse.Namespace) -> tuple[subprocess.CompletedProcess[str], dict[str, Any], dict[str, Any]]:
     max_snapshots = int(args.max_snapshots or 0)
     min_snapshots = int(args.min_snapshots or 0)
+    expected_labels = split_expected_labels(getattr(args, "expected_labels", ""))
     discover, payload, elapsed_ms = discover_homepage_once(
         args,
         max_snapshots=max_snapshots,
         min_snapshots=min_snapshots,
+    )
+    payload = apply_expected_coverage(
+        payload,
+        expected_post_count=int(getattr(args, "expected_post_count", 0) or 0),
+        expected_labels=expected_labels,
     )
     attempts = [
         {
@@ -239,16 +255,23 @@ def discover_homepage_with_retry(args: argparse.Namespace) -> tuple[subprocess.C
             "ok": bool(payload.get("ok")),
             "post_count": payload.get("post_count", 0),
             "coverage_incomplete": bool(payload.get("coverage_incomplete") or (payload.get("coverage") or {}).get("coverage_incomplete")),
+            "expected_coverage_failed": expected_coverage_incomplete(payload),
             "stop_reason": (payload.get("coverage") or {}).get("stop_reason") or "",
             "elapsed_ms": elapsed_ms,
         }
     ]
-    if discover.returncode == 0 and payload.get("ok") and needs_snapshot_budget_retry(payload):
+    needs_retry = needs_snapshot_budget_retry(payload) or expected_coverage_incomplete(payload)
+    if discover.returncode == 0 and payload.get("ok") and needs_retry:
         raised_max = retry_snapshot_budget(max_snapshots, minimum=32)
         retry_discover, retry_payload, retry_elapsed_ms = discover_homepage_once(
             args,
             max_snapshots=raised_max,
             min_snapshots=min_snapshots,
+        )
+        retry_payload = apply_expected_coverage(
+            retry_payload,
+            expected_post_count=int(getattr(args, "expected_post_count", 0) or 0),
+            expected_labels=expected_labels,
         )
         attempts.append(
             {
@@ -261,6 +284,7 @@ def discover_homepage_with_retry(args: argparse.Namespace) -> tuple[subprocess.C
                 "coverage_incomplete": bool(
                     retry_payload.get("coverage_incomplete") or (retry_payload.get("coverage") or {}).get("coverage_incomplete")
                 ),
+                "expected_coverage_failed": expected_coverage_incomplete(retry_payload),
                 "stop_reason": (retry_payload.get("coverage") or {}).get("stop_reason") or "",
                 "elapsed_ms": retry_elapsed_ms,
             }
@@ -292,12 +316,6 @@ def discover_and_import(
                 "discover": discover_payload,
                 "discover_retry": discover_retry,
             }
-        expected_labels = split_expected_labels(getattr(args, "expected_labels", ""))
-        discover_payload = apply_expected_coverage(
-            discover_payload,
-            expected_post_count=int(getattr(args, "expected_post_count", 0) or 0),
-            expected_labels=expected_labels,
-        )
         raw_path.write_text(json.dumps(discover_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
         imports: list[dict[str, Any]] = []
@@ -523,6 +541,30 @@ def run_worker_pass(args: argparse.Namespace, *, target_dates: list[str], pass_i
     }
 
 
+def auto_resume_pass_limit(value: Any) -> int:
+    try:
+        configured = int(value or 0)
+    except (TypeError, ValueError):
+        configured = 0
+    if configured <= 0:
+        return DEFAULT_MAX_RESUME_PASSES
+    return min(configured, MAX_AUTO_RESUME_PASSES)
+
+
+def completion_progress_key(completion: dict[str, Any]) -> tuple[int, int, int, int, int]:
+    return (
+        _int_metric(completion.get("open_task_count")),
+        _int_metric(completion.get("auto_open_task_count")),
+        _int_metric(completion.get("incomplete_post_count")),
+        _int_metric(completion.get("requires_codex_summary_count")),
+        _int_metric(completion.get("coverage_incomplete_count")),
+    )
+
+
+def completion_improved(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    return completion_progress_key(after) < completion_progress_key(before)
+
+
 def run_sync(
     config: dict[str, Any],
     args: argparse.Namespace,
@@ -672,6 +714,10 @@ def append_quality_threshold_args(command: list[Any], args: argparse.Namespace) 
             command.extend([flag, str(value)])
 
 
+def append_resume_pass_budget(command: list[Any], args: argparse.Namespace) -> None:
+    command.extend(["--max-resume-passes", str(auto_resume_pass_limit(getattr(args, "max_resume_passes", 0)))])
+
+
 def full_capture_command(
     base: list[Any],
     primary_date: str,
@@ -787,12 +833,7 @@ def next_commands_for_status(
         )
     if run_status == "worker_failed":
         command = resume_command(base, primary_date, force_recover_running=True)
-        command.extend(
-            [
-                "--max-resume-passes",
-                str(max(int(args.max_resume_passes or 0), 2)),
-            ]
-        )
+        append_resume_pass_budget(command, args)
         commands.append(
             {
                 "reason": "worker_failed",
@@ -807,12 +848,7 @@ def next_commands_for_status(
         or has_auto_work
     ):
         command = resume_command(base, primary_date, force_recover_running=True)
-        command.extend(
-            [
-                "--max-resume-passes",
-                str(max(int(args.max_resume_passes or 0), 2)),
-            ]
-        )
+        append_resume_pass_budget(command, args)
         commands.append(
             {
                 "reason": "pending_enrichment",
@@ -862,13 +898,8 @@ def next_commands_for_status(
         )
     if run_status == "quality_threshold_failed":
         command = resume_command(base, primary_date, force_recover_running=True)
-        command.extend(
-            [
-                "--status-only",
-                "--max-resume-passes",
-                str(max(int(args.max_resume_passes or 0), 2)),
-            ]
-        )
+        command.append("--status-only")
+        append_resume_pass_budget(command, args)
         commands.append(
             {
                 "reason": "quality_threshold_failed",
@@ -886,12 +917,7 @@ def next_commands_for_status(
         )
         if getattr(args, "resume_only", False):
             command = resume_command(base, primary_date, force_recover_running=True)
-            command.extend(
-                [
-                    "--max-resume-passes",
-                    str(max(int(args.max_resume_passes or 0), 2)),
-                ]
-            )
+            append_resume_pass_budget(command, args)
             commands.append(
                 {
                     "reason": "resume_after_opencli",
@@ -1510,7 +1536,12 @@ def main() -> int:
     parser.add_argument("--sync", action="store_true")
     parser.add_argument("--strict-ready-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--max-resume-passes", type=int, default=2)
+    parser.add_argument(
+        "--max-resume-passes",
+        type=int,
+        default=DEFAULT_MAX_RESUME_PASSES,
+        help="Maximum enrichment passes inside one account job; 0 uses the default automatic budget.",
+    )
     parser.add_argument("--status-only", action="store_true", help="Report resumable status and optional dry-run sync without running enrichment.")
     parser.add_argument("--enrichment-limit", type=int, default=50)
     parser.add_argument(
@@ -1804,7 +1835,8 @@ def main() -> int:
             emit_result(partial_result)
             return 1
     worker_passes: list[dict[str, Any]] = []
-    resume_passes = 0 if args.status_only else max(0, args.max_resume_passes)
+    resume_passes = 0 if args.status_only else auto_resume_pass_limit(args.max_resume_passes)
+    no_progress_streak = 0
     for index in range(resume_passes):
         completion_before = enrichment_completion_summary(conn, posts, config)
         if not completion_before.get("open_task_count"):
@@ -1812,6 +1844,8 @@ def main() -> int:
         worker_pass = run_worker_pass(args, target_dates=target_dates, pass_index=index + 1)
         worker_passes.append(worker_pass)
         if worker_pass.get("human_intervention_required"):
+            break
+        if worker_pass.get("worker_failed"):
             break
         posts = scoped_posts(
             conn,
@@ -1821,6 +1855,28 @@ def main() -> int:
             dates=target_dates,
         )
         enqueue_enrichment_tasks_for_posts(conn, posts, config)
+        completion_after = enrichment_completion_summary(conn, posts, config)
+        worker_pass["completion_before"] = {
+            "open_task_count": _int_metric(completion_before.get("open_task_count")),
+            "auto_open_task_count": _int_metric(completion_before.get("auto_open_task_count")),
+            "incomplete_post_count": _int_metric(completion_before.get("incomplete_post_count")),
+            "requires_codex_summary_count": _int_metric(completion_before.get("requires_codex_summary_count")),
+        }
+        worker_pass["completion_after"] = {
+            "open_task_count": _int_metric(completion_after.get("open_task_count")),
+            "auto_open_task_count": _int_metric(completion_after.get("auto_open_task_count")),
+            "incomplete_post_count": _int_metric(completion_after.get("incomplete_post_count")),
+            "requires_codex_summary_count": _int_metric(completion_after.get("requires_codex_summary_count")),
+        }
+        worker_pass["made_progress"] = completion_improved(completion_before, completion_after)
+        if worker_pass.get("retry_later"):
+            break
+        if worker_pass["made_progress"]:
+            no_progress_streak = 0
+        else:
+            no_progress_streak += 1
+            if no_progress_streak >= 2:
+                break
 
     posts = scoped_posts(
         conn,
