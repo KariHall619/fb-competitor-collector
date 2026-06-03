@@ -7594,6 +7594,7 @@ account_name = sys.argv[sys.argv.index("--account-name") + 1]
 account_type = sys.argv[sys.argv.index("--account-type") + 1]
 account_calls = [call for call in calls if "--account-url" in call and call[call.index("--account-url") + 1] == account_url]
 if account_type == "competitor" or len(account_calls) > 1:
+    total_posts = 2 if account_type == "competitor" else 1
     payload = {{
         "ok": True,
         "run_status": "complete",
@@ -7601,11 +7602,11 @@ if account_type == "competitor" or len(account_calls) > 1:
         "account_url": account_url,
         "account_name": account_name,
         "account_type": account_type,
-        "post_count": 2,
+        "post_count": total_posts,
         "quality_summary": {{
             "coverage_health": "complete",
-            "ledger_candidate_count": 2 if account_type == "competitor" else 1,
-            "final_usable_count": 2 if account_type == "competitor" else 1,
+            "ledger_candidate_count": total_posts,
+            "final_usable_count": total_posts,
             "final_usable_rate": 1.0,
             "open_task_count": 0
         }},
@@ -8552,6 +8553,132 @@ sys.exit(code)
     account = data["accounts"][0]
     assert account["complete"] is True
     assert [attempt["run_status"] for attempt in account["attempts"]] == ["incomplete_pending_tasks", "complete"]
+
+
+def assert_run_accounts_job_downgrades_false_child_complete(tmp_path: Path) -> None:
+    config = tmp_path / "settings_batch_false_complete.yaml"
+    fake_lark = tmp_path / "fake-lark-cli-false-complete"
+    fake_python = tmp_path / "fake-python-false-complete"
+    calls_file = tmp_path / "batch-false-complete-calls.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch_false_complete.sqlite'}")
+    text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/usr/bin/env python3
+import json
+payload = {
+  "data": {
+    "valueRange": {
+      "values": [
+        ["主页名称", "竞品fb账户", "内部FB账户"],
+        ["False Complete Page", "https://www.facebook.com/falsecompletepage", ""]
+      ]
+    }
+  }
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    fake_python.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+account_url = sys.argv[sys.argv.index("--account-url") + 1]
+account_name = sys.argv[sys.argv.index("--account-name") + 1]
+account_type = sys.argv[sys.argv.index("--account-type") + 1]
+is_resume = "--resume-only" in sys.argv and "--force-recover-running" in sys.argv
+if not is_resume:
+    payload = {{
+        "ok": True,
+        "run_status": "complete",
+        "complete": True,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 6,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 6,
+            "final_usable_count": 2,
+            "final_usable_rate": 0.3333,
+            "open_task_count": 0,
+            "open_task_stage_counts": {{}},
+            "missing_stage_counts": {{"post_type": 2, "summary": 2}},
+            "top_field_gaps": [
+                {{"reason": "post_type", "stage": "post_type", "count": 2}},
+                {{"reason": "article_summary", "stage": "summary", "count": 2}}
+            ]
+        }},
+        "completion_blockers": [],
+        "next_commands": []
+    }}
+    code = 0
+else:
+    payload = {{
+        "ok": True,
+        "run_status": "complete",
+        "complete": True,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 6,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 6,
+            "final_usable_count": 6,
+            "final_usable_rate": 1.0,
+            "open_task_count": 0,
+            "open_task_stage_counts": {{}},
+            "missing_stage_counts": {{}},
+            "top_field_gaps": []
+        }},
+        "next_commands": []
+    }}
+    code = 0
+print(json.dumps(payload, ensure_ascii=False))
+sys.exit(code)
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--sync",
+            "--dry-run",
+            "--no-open-account-tabs",
+            "--auto-follow-attempts",
+            "2",
+        ],
+        env={**os.environ, "PYTHON": str(fake_python)},
+    )
+    assert result.returncode == 0, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert len(calls) == 2
+    assert "--resume-only" in calls[1]
+    assert "--force-recover-running" in calls[1]
+    account = data["accounts"][0]
+    assert account["complete"] is True
+    assert account["attempts"][0]["run_status"] == "incomplete_pending_tasks"
+    assert account["attempts"][1]["run_status"] == "complete"
+    assert account["attempts"][0]["quality_progress_key"][0] == 2
 
 
 def assert_run_accounts_job_treats_stage_progress_as_quality_improvement(tmp_path: Path) -> None:
@@ -11066,6 +11193,7 @@ def main() -> int:
         assert_run_accounts_job_extends_attempts_while_quality_improves(tmp_path)
         assert_run_accounts_job_extends_attempts_for_followable_commands_without_metric_progress(tmp_path)
         assert_run_accounts_job_synthesizes_resume_when_child_omits_next_commands(tmp_path)
+        assert_run_accounts_job_downgrades_false_child_complete(tmp_path)
         assert_run_accounts_job_treats_stage_progress_as_quality_improvement(tmp_path)
         assert_run_accounts_job_follows_recoverable_exit_one_commands(tmp_path)
         assert_run_accounts_job_follows_prepare_and_import_recovery(tmp_path)

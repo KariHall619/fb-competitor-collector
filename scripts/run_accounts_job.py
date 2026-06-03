@@ -252,7 +252,9 @@ def account_job_command(args: argparse.Namespace, account: dict[str, Any]) -> li
 
 
 def summarize_account_result(payload: dict[str, Any], *, returncode: int) -> dict[str, Any]:
-    quality_summary = payload.get("quality_summary") if isinstance(payload.get("quality_summary"), dict) else {}
+    raw_quality_summary = payload.get("quality_summary")
+    quality_summary_present = isinstance(raw_quality_summary, dict)
+    quality_summary = raw_quality_summary if quality_summary_present else {}
     result = {
         "account_name": payload.get("account_name") or "",
         "account_url": payload.get("account_url") or "",
@@ -273,6 +275,24 @@ def summarize_account_result(payload: dict[str, Any], *, returncode: int) -> dic
         "completion_blockers": payload.get("completion_blockers") if isinstance(payload.get("completion_blockers"), list) else [],
         "next_commands": payload.get("next_commands") if isinstance(payload.get("next_commands"), list) else [],
     }
+    guard_reasons = account_completion_guard_reasons(result, quality_summary_present=quality_summary_present)
+    if result["complete"] and guard_reasons:
+        result["reported_complete"] = True
+        result["reported_run_status"] = result["run_status"]
+        result["complete"] = False
+        result["completion_guard_reasons"] = guard_reasons
+        result["run_status"] = guarded_run_status(guard_reasons)
+        result["completion_blockers"] = [
+            {
+                "code": "batch_completion_guard",
+                "label": "批量完成复核未通过",
+                "severity": "completion_guard",
+                "message": "子账号作业自报 complete，但质量摘要仍显示覆盖、补抓或最终字段缺口；批量入口继续自动恢复，不把该账号计为完成。",
+                "next_action": "继续同账号机器可恢复命令，直到 quality_summary 不再有缺口。",
+                "metrics": {"reasons": guard_reasons},
+            },
+            *result["completion_blockers"],
+        ]
     if not payload.get("account_url") and isinstance(payload.get("stderr"), str):
         result["error"] = payload.get("stderr")[:500]
     return result
@@ -375,6 +395,8 @@ def synthesized_auto_follow_command(summary: dict[str, Any], account: dict[str, 
     auto_stages = {"detail_time", "lead_link", "engagement", "post_type", "article_material", "summary"}
     if _int_value(summary.get("open_task_count")) > 0 or _counted_stage(summary, auto_stages):
         return synthesized_resume_command(args, account)
+    if run_status in {"incomplete_pending_tasks", "synced_ledger_incomplete", "needs_codex_summary", "summary_auto_apply_failed"}:
+        return synthesized_resume_command(args, account)
     if bool(summary.get("requested_sync")) and run_status in {
         "captured_not_synced",
         "resumed_not_synced",
@@ -425,6 +447,64 @@ def _int_value(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _float_value(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _has_positive_counts(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return any(_int_value(count) > 0 for count in value.values())
+
+
+def _has_positive_field_gaps(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    for item in value:
+        if isinstance(item, dict) and _int_value(item.get("count")) > 0:
+            return True
+    return False
+
+
+def account_completion_guard_reasons(summary: dict[str, Any], *, quality_summary_present: bool = True) -> list[str]:
+    reasons: list[str] = []
+    if not quality_summary_present:
+        reasons.append("missing_quality_summary")
+        return reasons
+    if str(summary.get("coverage_health") or "") == "incomplete":
+        reasons.append("coverage_incomplete")
+    if _int_value(summary.get("open_task_count")) > 0:
+        reasons.append("open_enrichment_tasks")
+    if _has_positive_counts(summary.get("open_task_stage_counts")):
+        reasons.append("open_stage_counts")
+    if _has_positive_counts(summary.get("missing_stage_counts")):
+        reasons.append("missing_stage_counts")
+    if _has_positive_field_gaps(summary.get("top_field_gaps")):
+        reasons.append("field_gaps")
+    post_count = _int_value(summary.get("post_count"))
+    final_usable_count = _int_value(summary.get("final_usable_count"))
+    if post_count > 0 and final_usable_count < post_count:
+        reasons.append("final_usable_incomplete")
+    if post_count > 0 and _float_value(summary.get("final_usable_rate")) < 1.0:
+        reasons.append("final_usable_rate_below_one")
+    ordered: list[str] = []
+    for reason in reasons:
+        if reason not in ordered:
+            ordered.append(reason)
+    return ordered
+
+
+def guarded_run_status(reasons: list[str]) -> str:
+    if "coverage_incomplete" in reasons:
+        return "coverage_incomplete"
+    if "missing_quality_summary" in reasons:
+        return "account_completion_unverified"
+    return "incomplete_pending_tasks"
 
 
 def stage_remaining_score(summary: dict[str, Any]) -> int:
