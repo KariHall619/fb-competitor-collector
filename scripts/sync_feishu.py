@@ -12,7 +12,7 @@ from field_schema import configured_output_headers, output_row_for_headers
 from field_audit import audit_reason_counts, audit_reason_notes, audit_reason_summary
 from lark_io import ensure_user_identity, write_rows
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review, ready_for_output
-from store import all_posts, connect, mark_output_synced
+from store import all_posts, connect, enqueue_enrichment_tasks_for_posts, mark_output_synced, row_for_post, upsert_post
 from sync_status import annotate_sync_failure, annotate_sync_result, blocked_auth_result, enrichment_completion_summary
 
 
@@ -28,6 +28,13 @@ def sync_posts(
     conn: Any | None = None,
     completion_posts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if conn is not None:
+        refreshed_posts: list[dict[str, Any]] = []
+        for post in posts:
+            upsert_post(conn, post, config)
+            refreshed_posts.append(row_for_post(conn, post) or post)
+        posts = refreshed_posts
+        enqueue_enrichment_tasks_for_posts(conn, posts, config)
     completion_scope = completion_posts if completion_posts is not None else posts
     if partial:
         partial_posts, skipped_posts = partial_for_review(posts)

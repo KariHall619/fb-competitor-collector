@@ -1789,6 +1789,13 @@ def assert_feishu_upsert_merges_rows_without_overwriting_manual_adoption() -> No
         VALID_CN_SUMMARY,
         "",
     ]
+    incoming_weak_summary = ["https://facebook.com/post/3", "图文", "首页可见正文片段", "待补抓：文章概要、分享数"]
+    assert merge_upsert_row(existing_enriched, incoming_weak_summary, business_headers) == [
+        "https://facebook.com/post/3",
+        "图文",
+        VALID_CN_SUMMARY,
+        "待补抓：文章概要、分享数",
+    ]
     assert normalized_upsert_key(
         "https://www.facebook.com/storyhub/posts/pfbid123?utm_source=x",
         "post_url",
@@ -2086,6 +2093,62 @@ def assert_sync_status_marks_incomplete_ledger(tmp_path: Path) -> None:
     assert "覆盖不足：1 条" in completion["field_gap_notes"]
     assert any("最终输出字段缺口" in action for action in completion["next_actions"])
     assert any("覆盖未完成" in action for action in completion["next_actions"])
+
+
+def assert_sync_posts_self_heals_missing_business_field_tasks(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import sync_feishu
+    from models import normalize_post
+    from store import connect, pending_enrichment_tasks, row_for_post, upsert_post
+
+    conn = connect(tmp_path / "sync-self-heal-business-fields.sqlite")
+    config = {
+        "feishu": {
+            "sheets": {"all_posts": "FB竞品帖子链接"},
+            "field_schema": {"output_headers": ["帖子链接", "帖子类型", "故事概要", "是否采用"]},
+        },
+        "quality_audit": {
+            "required_engagement_fields": ["likes", "comments", "shares"],
+            "required_post_types": ["图文", "视频", "仅图片", "仅文字"],
+        },
+    }
+    post = normalize_post(
+        {
+            "account_name": "Self Heal",
+            "account_url": "https://www.facebook.com/selfheal",
+            "post_url": "https://www.facebook.com/selfheal/posts/missing-business-fields",
+            "posted_at": "2026年6月3日 12:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/self-heal",
+            "landing_url": "https://story.example/self-heal",
+            "lead_url_raw": "https://story.example/self-heal",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "likes": 20,
+            "comments": 4,
+            "shares": 2,
+            "story_summary": "",
+            "summary_source": "pending_article_summary",
+            "post_type": "",
+        }
+    )
+    upsert_post(conn, post, config)
+    stored = row_for_post(conn, post)
+    assert stored is not None
+    assert pending_enrichment_tasks(conn, limit=20) == []
+
+    result = sync_feishu.sync_posts(config, [stored], "all_posts", "append", True, audit=True, conn=conn)
+
+    assert result["ok"] is True
+    assert result["run_status"] == "synced_ledger_incomplete"
+    assert result["audit_missing_field_counts"]["post_type"] == 1
+    assert result["audit_missing_field_counts"]["article_summary"] == 1
+    tasks = sorted(task["stage"] for task in pending_enrichment_tasks(conn, limit=20))
+    assert tasks == ["article_material", "post_type", "summary"]
+    completion = result["enrichment_completion"]
+    assert completion["open_task_stage_counts"] == {"article_material": 1, "post_type": 1, "summary": 1}
+    assert completion["missing_stage_counts"] == {"article_material": 1, "post_type": 1, "summary": 1}
 
 
 def assert_sync_status_promotes_summary_only_work(tmp_path: Path) -> None:
@@ -12893,6 +12956,7 @@ def main() -> int:
         assert_prepare_capture_reports_structured_input_failures(tmp_path)
         assert_article_summary_scripts_report_structured_input_failures(tmp_path)
         assert_sync_status_marks_incomplete_ledger(tmp_path)
+        assert_sync_posts_self_heals_missing_business_field_tasks(tmp_path)
         assert_sync_status_promotes_summary_only_work(tmp_path)
         assert_sync_status_prioritizes_auto_work_over_summary(tmp_path)
         assert_completion_summary_uses_quality_audit_config(tmp_path)

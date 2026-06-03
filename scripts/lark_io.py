@@ -307,6 +307,26 @@ def merge_upsert_row(existing: list[Any], incoming: list[Any], headers: list[str
     width = max(len(headers), len(existing), len(incoming))
     merged = list(existing) + [""] * (width - len(existing))
     incoming_full = list(incoming) + [""] * (width - len(incoming))
+    adoption_index = next(
+        (index for index, header in enumerate(headers) if output_field_for_header(header) == "adoption_status"),
+        None,
+    )
+    incoming_marker = (
+        incoming_full[adoption_index]
+        if adoption_index is not None and adoption_index < len(incoming_full)
+        else ""
+    )
+    marker_text = str(incoming_marker or "")
+
+    def incoming_marks_business_field_missing(field: str) -> bool:
+        if not is_system_audit_marker(marker_text):
+            return False
+        if field == "post_type":
+            return "帖子类型" in marker_text
+        if field == "story_summary":
+            return "文章概要" in marker_text or "故事概要" in marker_text
+        return False
+
     for index in range(width):
         field = output_field_for_header(headers[index]) if index < len(headers) else ""
         current = merged[index]
@@ -314,6 +334,12 @@ def merge_upsert_row(existing: list[Any], incoming: list[Any], headers: list[str
         if field == "adoption_status" and current and not is_system_audit_marker(current):
             continue
         if field != "adoption_status" and not cell_has_value(new_value):
+            continue
+        if (
+            field in {"post_type", "story_summary"}
+            and cell_has_value(current)
+            and incoming_marks_business_field_missing(field)
+        ):
             continue
         merged[index] = new_value
     return merged[:width]
