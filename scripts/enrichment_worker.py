@@ -16,7 +16,7 @@ from typing import Any
 from config_loader import deep_get, load_config
 from fetch_article_material import extract_material
 from models import has_qualified_comment_lead_link
-from pipeline_status import crawl_status_for, output_status_for
+from pipeline_status import crawl_status_for, has_confirmed_time, output_status_for
 from story_summary_policy import has_valid_story_summary, story_summary_errors
 from store import (
     cached_article_material,
@@ -199,7 +199,7 @@ def run_summary_task(post: dict[str, Any]) -> dict[str, Any]:
 
 def detail_stage_satisfied(post: dict[str, Any], stage: str) -> bool:
     if stage == "detail_time":
-        return bool(post.get("posted_at") and parse_bool(post.get("time_confirmed")))
+        return has_confirmed_time(post)
     if stage == "lead_link":
         return has_qualified_comment_lead_link(post)
     if stage == "engagement":

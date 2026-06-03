@@ -4340,6 +4340,19 @@ def assert_enrichment_worker_lead_stage_requires_external_landing_url() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import enrichment_worker
 
+    estimated_time = {
+        "posted_at": "2026年6月3日 10:00",
+        "time_confirmed": True,
+        "time_source": "relative_estimated",
+    }
+    exact_time = {
+        "posted_at": "2026年6月3日 10:00",
+        "time_confirmed": True,
+        "time_source": "dom_aria_label",
+    }
+    assert enrichment_worker.detail_stage_satisfied(estimated_time, "detail_time") is False
+    assert enrichment_worker.detail_stage_satisfied(exact_time, "detail_time") is True
+
     internal_lead = {
         "lead_link_status": "qualified",
         "lead_link_source": "comment",
