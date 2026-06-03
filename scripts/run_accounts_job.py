@@ -835,6 +835,16 @@ def _batch_auth_recovery_items(args: argparse.Namespace) -> list[dict[str, Any]]
     ]
 
 
+def _batch_human_recovery_items(args: argparse.Namespace) -> list[dict[str, Any]]:
+    return [
+        {
+            "reason": "human_intervention_required",
+            "description": "先在正常 Chrome 中恢复 Facebook 登录态、Profile、验证码或目标账号主页可见性；恢复后按原批量范围重新运行所有目标账号，避免只续跑单个账号而漏掉后续采集、补抓或同步。",
+            "command": command_text(batch_retry_command(args, fix_opencli=True)),
+        },
+    ]
+
+
 def _append_hard_blocker_commands(
     commands: list[dict[str, Any]],
     account: dict[str, Any],
@@ -903,6 +913,24 @@ def _append_blocked_auth_commands(
     )
 
 
+def _append_human_intervention_commands(
+    commands: list[dict[str, Any]],
+    account: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    limit: int,
+) -> bool:
+    fallback_items = _batch_human_recovery_items(args)
+    if _append_batch_next_command(commands, account, fallback_items[0], limit=limit):
+        return True
+    for item in account.get("next_commands") or []:
+        if not isinstance(item, dict) or not item.get("command"):
+            continue
+        if _append_batch_next_command(commands, account, item, limit=limit):
+            return True
+    return len(commands) >= limit
+
+
 def synthesized_batch_next_command(account: dict[str, Any], args: argparse.Namespace) -> dict[str, Any] | None:
     if account.get("complete") or str(account.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS:
         return None
@@ -932,6 +960,10 @@ def next_commands_for_batch(account_results: list[dict[str, Any]], args: argpars
             continue
         if str(account.get("run_status") or "") == "blocked_auth":
             if _append_blocked_auth_commands(commands, account, args, limit=limit):
+                return commands
+            continue
+        if str(account.get("run_status") or "") == "human_intervention_required":
+            if _append_human_intervention_commands(commands, account, args, limit=limit):
                 return commands
             continue
         added_for_account = False
