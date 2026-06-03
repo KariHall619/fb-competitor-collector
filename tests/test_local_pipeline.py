@@ -4965,6 +4965,54 @@ def assert_enqueue_does_not_steal_active_running_tasks(tmp_path: Path) -> None:
     assert tasks == []
 
 
+def assert_enqueue_reopens_done_tasks_when_fields_are_missing_again(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, pending_enrichment_tasks, upsert_post
+
+    conn = connect(tmp_path / "reopen-done-tasks.sqlite")
+    post = normalize_post(
+        {
+            "post_url": "https://www.facebook.com/example/posts/reopen-post-type",
+            "posted_at": "2026年6月3日 10:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "lead_url_raw": "https://story.example/reopen",
+            "landing_url": "https://story.example/reopen",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "article_url": "https://story.example/reopen",
+            "story_summary": VALID_CN_SUMMARY,
+            "summary_source": "article",
+            "likes": 38,
+            "comments": 12,
+            "shares": 4,
+            "post_type": "",
+        }
+    )
+    upsert_post(conn, post)
+    first = enqueue_enrichment_tasks_for_posts(conn, [post])
+    assert first["stage_counts"] == {"post_type": 1}
+    conn.execute(
+        """
+        UPDATE enrichment_tasks
+        SET status = 'done',
+            last_error = 'old success marker',
+            next_run_at = NULL
+        WHERE stage = 'post_type'
+        """
+    )
+    conn.commit()
+
+    second = enqueue_enrichment_tasks_for_posts(conn, [post])
+    assert second["stage_counts"] == {"post_type": 1}
+    assert second["open_stage_counts"] == {"post_type": 1}
+    tasks = pending_enrichment_tasks(conn, stages=["post_type"], limit=10)
+    assert len(tasks) == 1
+    assert tasks[0]["status"] == "pending"
+    assert tasks[0]["last_error"] is None
+
+
 def assert_enrichment_worker_scopes_tasks_to_account(tmp_path: Path) -> None:
     config = tmp_path / "settings_worker_scope.yaml"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
@@ -9150,6 +9198,7 @@ def main() -> int:
         assert_enrichment_worker_lead_stage_requires_external_landing_url()
         assert_stale_running_enrichment_tasks_are_recovered(tmp_path)
         assert_enqueue_does_not_steal_active_running_tasks(tmp_path)
+        assert_enqueue_reopens_done_tasks_when_fields_are_missing_again(tmp_path)
         assert_enrichment_worker_scopes_tasks_to_account(tmp_path)
         assert_enrichment_worker_scope_includes_unknown_date_candidates(tmp_path)
         assert_enrichment_worker_article_cache_and_summary(tmp_path)

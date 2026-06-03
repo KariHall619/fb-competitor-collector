@@ -402,12 +402,14 @@ def enqueue_enrichment_tasks(
             ON CONFLICT(canonical_post_url, stage) DO UPDATE SET
                 post_url = excluded.post_url,
                 status = CASE
-                    WHEN enrichment_tasks.status = 'done' THEN enrichment_tasks.status
                     WHEN enrichment_tasks.status = 'running' THEN enrichment_tasks.status
                     ELSE 'pending'
                 END,
+                last_error = CASE
+                    WHEN enrichment_tasks.status = 'running' THEN enrichment_tasks.last_error
+                    ELSE NULL
+                END,
                 next_run_at = CASE
-                    WHEN enrichment_tasks.status = 'done' THEN enrichment_tasks.next_run_at
                     WHEN enrichment_tasks.status = 'running' THEN enrichment_tasks.next_run_at
                     ELSE CURRENT_TIMESTAMP
                 END,
