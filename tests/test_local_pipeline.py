@@ -8681,6 +8681,108 @@ sys.exit(code)
     assert account["attempts"][0]["quality_progress_key"][0] == 2
 
 
+def assert_run_accounts_job_top_level_synthesizes_missing_recovery_command(tmp_path: Path) -> None:
+    config = tmp_path / "settings_batch_top_synth.yaml"
+    fake_lark = tmp_path / "fake-lark-cli-top-synth"
+    fake_python = tmp_path / "fake-python-top-synth"
+    calls_file = tmp_path / "batch-top-synth-calls.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch_top_synth.sqlite'}")
+    text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/usr/bin/env python3
+import json
+payload = {
+  "data": {
+    "valueRange": {
+      "values": [
+        ["主页名称", "竞品fb账户", "内部FB账户"],
+        ["Top Synth Page", "https://www.facebook.com/topsynthpage", ""]
+      ]
+    }
+  }
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    fake_python.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+account_url = sys.argv[sys.argv.index("--account-url") + 1]
+account_name = sys.argv[sys.argv.index("--account-name") + 1]
+account_type = sys.argv[sys.argv.index("--account-type") + 1]
+payload = {{
+    "ok": True,
+    "run_status": "incomplete_pending_tasks",
+    "complete": False,
+    "account_url": account_url,
+    "account_name": account_name,
+    "account_type": account_type,
+    "post_count": 4,
+    "quality_summary": {{
+        "coverage_health": "complete",
+        "ledger_candidate_count": 4,
+        "final_usable_count": 1,
+        "final_usable_rate": 0.25,
+        "open_task_count": 3,
+        "open_task_stage_counts": {{"post_type": 2, "summary": 1}},
+        "missing_stage_counts": {{"post_type": 2, "summary": 1}},
+        "top_field_gaps": [
+            {{"reason": "post_type", "stage": "post_type", "count": 2}},
+            {{"reason": "article_summary", "stage": "summary", "count": 1}}
+        ]
+    }},
+    "completion_blockers": [{{"code": "stage_post_type"}}],
+    "next_commands": []
+}}
+print(json.dumps(payload, ensure_ascii=False))
+sys.exit(2)
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--sync",
+            "--dry-run",
+            "--no-open-account-tabs",
+            "--auto-follow-attempts",
+            "1",
+        ],
+        env={**os.environ, "PYTHON": str(fake_python)},
+    )
+    assert result.returncode == 2, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    assert data["run_status"] == "accounts_incomplete"
+    assert data["next_commands"]
+    command = data["next_commands"][0]
+    assert command["reason"] == "auto_follow_exhausted"
+    assert command["account_url"] == "https://www.facebook.com/topsynthpage"
+    parts = shlex.split(command["command"])
+    assert "scripts/run_account_job.py" in parts
+    assert "--resume-only" in parts
+    assert "--force-recover-running" in parts
+    assert "--sync" in parts
+
+
 def assert_run_accounts_job_treats_stage_progress_as_quality_improvement(tmp_path: Path) -> None:
     config = tmp_path / "settings_batch_stage_progress.yaml"
     fake_lark = tmp_path / "fake-lark-cli-stage-progress"
@@ -11194,6 +11296,7 @@ def main() -> int:
         assert_run_accounts_job_extends_attempts_for_followable_commands_without_metric_progress(tmp_path)
         assert_run_accounts_job_synthesizes_resume_when_child_omits_next_commands(tmp_path)
         assert_run_accounts_job_downgrades_false_child_complete(tmp_path)
+        assert_run_accounts_job_top_level_synthesizes_missing_recovery_command(tmp_path)
         assert_run_accounts_job_treats_stage_progress_as_quality_improvement(tmp_path)
         assert_run_accounts_job_follows_recoverable_exit_one_commands(tmp_path)
         assert_run_accounts_job_follows_prepare_and_import_recovery(tmp_path)

@@ -780,25 +780,54 @@ def aggregate_status(account_results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def next_commands_for_batch(account_results: list[dict[str, Any]], *, limit: int = 8) -> list[dict[str, Any]]:
+def _batch_next_command_entry(account: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "account_url": account.get("account_url") or "",
+        "account_name": account.get("account_name") or "",
+        "account_type": account.get("account_type") or "",
+        "run_status": account.get("run_status") or "",
+        "reason": item.get("reason") or "",
+        "description": item.get("description") or "",
+        "command": item.get("command"),
+    }
+
+
+def synthesized_batch_next_command(account: dict[str, Any], args: argparse.Namespace) -> dict[str, Any] | None:
+    if account.get("complete") or str(account.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS:
+        return None
+    command = next_auto_follow_command(account, account, args)
+    if not command:
+        return None
+    reason = (
+        "auto_follow_exhausted"
+        if account.get("auto_follow_exhausted")
+        else "synthesized_account_recovery"
+    )
+    return {
+        "reason": reason,
+        "description": "账号作业仍未完整，但没有可转发的子命令；批量入口按当前状态合成同账号续跑命令，避免等待用户再次提醒。",
+        "command": command_text(command),
+    }
+
+
+def next_commands_for_batch(account_results: list[dict[str, Any]], args: argparse.Namespace, *, limit: int = 8) -> list[dict[str, Any]]:
     commands: list[dict[str, Any]] = []
     for account in account_results:
         if account.get("complete"):
             continue
+        added_for_account = False
         for item in account.get("next_commands") or []:
             if not isinstance(item, dict) or not item.get("command"):
                 continue
-            commands.append(
-                {
-                    "account_url": account.get("account_url") or "",
-                    "account_name": account.get("account_name") or "",
-                    "account_type": account.get("account_type") or "",
-                    "run_status": account.get("run_status") or "",
-                    "reason": item.get("reason") or "",
-                    "description": item.get("description") or "",
-                    "command": item.get("command"),
-                }
-            )
+            commands.append(_batch_next_command_entry(account, item))
+            added_for_account = True
+            if len(commands) >= limit:
+                return commands
+        if added_for_account:
+            continue
+        synthesized = synthesized_batch_next_command(account, args)
+        if synthesized:
+            commands.append(_batch_next_command_entry(account, synthesized))
             if len(commands) >= limit:
                 return commands
     return commands
@@ -951,7 +980,7 @@ def main() -> int:
             "failed": sum(1 for item in account_tab_cleanup if not item.get("ok")),
             "items": account_tab_cleanup,
         },
-        "next_commands": next_commands_for_batch(account_results),
+        "next_commands": next_commands_for_batch(account_results, args),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
