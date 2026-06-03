@@ -436,14 +436,16 @@ def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any])
         if result.returncode not in {0, 2}:
             attempts[-1]["auto_follow_nonstandard_returncode"] = result.returncode
         if attempt_index >= base_attempt_limit:
-            if improved and attempt_index < hard_attempt_limit:
+            if attempt_index < hard_attempt_limit:
                 attempts[-1]["auto_follow_extended_after_budget"] = True
+                attempts[-1]["auto_follow_extended_reason"] = "followable_next_command"
+                if improved:
+                    attempts[-1]["auto_follow_extended_quality_improved"] = True
                 extended_after_budget += 1
             else:
                 attempts[-1]["auto_follow_stopped_reason"] = "max_attempts_reached"
                 attempts[-1]["next_auto_follow_available"] = True
-                if attempt_index >= hard_attempt_limit:
-                    attempts[-1]["auto_follow_hard_limit_reached"] = True
+                attempts[-1]["auto_follow_hard_limit_reached"] = True
                 break
         follow_key = subprocess.list2cmdline(follow)
         if follow_key == command_key:

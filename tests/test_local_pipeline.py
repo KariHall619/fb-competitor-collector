@@ -6155,6 +6155,56 @@ def assert_run_account_job_continues_worker_passes_until_complete() -> None:
     assert "--max-resume-passes 8" in pending["command"]
 
 
+def assert_run_account_job_does_not_stop_after_no_progress_worker_passes() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    original_run_worker_pass = run_account_job.run_worker_pass
+    original_completion_summary = run_account_job.enrichment_completion_summary
+    original_should_run = run_account_job.should_run_worker_for_completion
+    original_scoped_posts = run_account_job.scoped_posts
+    original_enqueue = run_account_job.enqueue_enrichment_tasks_for_posts
+    pass_calls: list[int] = []
+
+    args = type(
+        "Args",
+        (),
+        {
+            "max_resume_passes": 3,
+            "status_only": False,
+            "account_name": "No Progress",
+            "account_url": "https://www.facebook.com/noprogress",
+            "account_type": "competitor",
+        },
+    )()
+
+    def fake_completion_summary(_conn: object, _posts: list[dict[str, object]], _config: dict[str, object]) -> dict[str, object]:
+        if len(pass_calls) >= 3:
+            return {"open_task_count": 0, "auto_open_task_count": 0, "incomplete_post_count": 0}
+        return {"open_task_count": 2, "auto_open_task_count": 2, "incomplete_post_count": 2}
+
+    def fake_worker_pass(_args: object, *, target_dates: list[str], pass_index: int) -> dict[str, object]:
+        pass_calls.append(pass_index)
+        return {"ok": True, "pass": pass_index, "results": []}
+
+    try:
+        run_account_job.enrichment_completion_summary = fake_completion_summary
+        run_account_job.run_worker_pass = fake_worker_pass
+        run_account_job.should_run_worker_for_completion = lambda completion: bool(completion.get("open_task_count"))
+        run_account_job.scoped_posts = lambda *_args, **_kwargs: []
+        run_account_job.enqueue_enrichment_tasks_for_posts = lambda *_args, **_kwargs: {}
+        worker_passes, _posts = run_account_job.run_worker_passes_for_job(args, None, [], {}, ["260603"])
+    finally:
+        run_account_job.run_worker_pass = original_run_worker_pass
+        run_account_job.enrichment_completion_summary = original_completion_summary
+        run_account_job.should_run_worker_for_completion = original_should_run
+        run_account_job.scoped_posts = original_scoped_posts
+        run_account_job.enqueue_enrichment_tasks_for_posts = original_enqueue
+
+    assert pass_calls == [1, 2, 3]
+    assert [item["made_progress"] for item in worker_passes] == [False, False, True]
+
+
 def assert_run_account_job_auto_exports_summary_requests(tmp_path: Path) -> None:
     config = tmp_path / "settings_account_summary_export.yaml"
     db_path = tmp_path / "account-summary-export.sqlite"
@@ -7373,7 +7423,7 @@ sys.exit(code)
     assert all("--sync" in call and "--dry-run" in call for call in calls)
 
     calls_file.unlink()
-    no_follow_result = run(
+    base_budget_result = run(
         [
             PYTHON,
             "scripts/run_accounts_job.py",
@@ -7387,14 +7437,15 @@ sys.exit(code)
         ],
         env={**os.environ, "PYTHON": str(fake_python)},
     )
-    assert no_follow_result.returncode == 2, no_follow_result.stdout
-    no_follow_data = json.loads(no_follow_result.stdout)
-    assert no_follow_data["run_status"] == "accounts_need_codex_summary"
-    assert no_follow_data["complete"] is False
-    no_follow_internal = next(item for item in no_follow_data["accounts"] if item["account_url"] == "https://www.facebook.com/internalone")
-    assert no_follow_internal["auto_follow_attempt_limit"] == 1
-    assert no_follow_internal["auto_follow_exhausted"] is True
-    assert no_follow_internal["attempts"][-1]["auto_follow_stopped_reason"] == "max_attempts_reached"
+    assert base_budget_result.returncode == 0, base_budget_result.stdout
+    base_budget_data = json.loads(base_budget_result.stdout)
+    assert base_budget_data["run_status"] == "complete"
+    assert base_budget_data["complete"] is True
+    base_budget_internal = next(item for item in base_budget_data["accounts"] if item["account_url"] == "https://www.facebook.com/internalone")
+    assert base_budget_internal["auto_follow_attempt_limit"] == 1
+    assert base_budget_internal["auto_follow_extended_after_budget_count"] == 1
+    assert base_budget_internal["auto_follow_exhausted"] is False
+    assert [attempt["run_status"] for attempt in base_budget_internal["attempts"]] == ["needs_codex_summary", "complete"]
 
     calls_file.unlink()
     status_only_result = run(
@@ -7961,6 +8012,137 @@ sys.exit(code)
     ]
     assert account["attempts"][1]["auto_follow_extended_after_budget"] is True
     assert account["attempts"][2]["auto_follow_extended_after_budget"] is True
+
+
+def assert_run_accounts_job_extends_attempts_for_followable_commands_without_metric_progress(tmp_path: Path) -> None:
+    config = tmp_path / "settings_batch_extend_followable.yaml"
+    fake_lark = tmp_path / "fake-lark-cli-extend-followable"
+    fake_python = tmp_path / "fake-python-extend-followable"
+    calls_file = tmp_path / "batch-extend-followable-calls.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch_extend_followable.sqlite'}")
+    text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/usr/bin/env python3
+import json
+payload = {
+  "data": {
+    "valueRange": {
+      "values": [
+        ["主页名称", "竞品fb账户", "内部FB账户"],
+        ["Followable Page", "https://www.facebook.com/followablepage", ""]
+      ]
+    }
+  }
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    fake_python.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+account_url = sys.argv[sys.argv.index("--account-url") + 1]
+account_name = sys.argv[sys.argv.index("--account-name") + 1]
+account_type = sys.argv[sys.argv.index("--account-type") + 1]
+config_path = sys.argv[sys.argv.index("--config") + 1]
+call_number = len(calls)
+resume_command = "python3 scripts/run_account_job.py --config " + config_path + " --account-url " + account_url + " --account-name '" + account_name + "' --account-type " + account_type + " --target-date 260603 --resume-only --force-recover-running --sync --dry-run --fail-on-incomplete --max-resume-passes 8"
+if call_number < 4:
+    payload = {{
+        "ok": True,
+        "run_status": "incomplete_pending_tasks",
+        "complete": False,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 4,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 4,
+            "final_usable_count": 0,
+            "final_usable_rate": 0.0,
+            "open_task_count": 4,
+            "open_task_stage_counts": {{"post_type": 4}},
+            "missing_stage_counts": {{"post_type": 4}},
+            "top_field_gaps": [{{"reason": "post_type", "stage": "post_type", "count": 4}}]
+        }},
+        "next_commands": [{{
+            "reason": "pending_enrichment",
+            "description": "continue same scoped queue",
+            "command": resume_command
+        }}]
+    }}
+    code = 2
+else:
+    payload = {{
+        "ok": True,
+        "run_status": "complete",
+        "complete": True,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 4,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 4,
+            "final_usable_count": 4,
+            "final_usable_rate": 1.0,
+            "open_task_count": 0
+        }},
+        "next_commands": []
+    }}
+    code = 0
+print(json.dumps(payload, ensure_ascii=False))
+sys.exit(code)
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--sync",
+            "--dry-run",
+            "--no-open-account-tabs",
+            "--auto-follow-attempts",
+            "2",
+        ],
+        env={**os.environ, "PYTHON": str(fake_python)},
+    )
+    assert result.returncode == 0, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert len(calls) == 4
+    account = data["accounts"][0]
+    assert account["complete"] is True
+    assert account["auto_follow_attempt_limit"] == 2
+    assert account["auto_follow_extended_after_budget_count"] == 2
+    assert [attempt["run_status"] for attempt in account["attempts"]] == [
+        "incomplete_pending_tasks",
+        "incomplete_pending_tasks",
+        "incomplete_pending_tasks",
+        "complete",
+    ]
+    assert account["attempts"][1]["auto_follow_extended_after_budget"] is True
+    assert account["attempts"][1]["auto_follow_extended_reason"] == "followable_next_command"
+    assert "quality_improved" not in account["attempts"][1]
 
 
 def assert_run_accounts_job_treats_stage_progress_as_quality_improvement(tmp_path: Path) -> None:
@@ -10196,6 +10378,7 @@ def main() -> int:
         assert_run_account_job_skips_worker_for_summary_only_completion()
         assert_run_account_job_worker_pass_surfaces_summary_required()
         assert_run_account_job_continues_worker_passes_until_complete()
+        assert_run_account_job_does_not_stop_after_no_progress_worker_passes()
         assert_run_account_job_auto_exports_summary_requests(tmp_path)
         assert_run_account_job_applies_partial_generated_summaries()
         assert_run_account_job_generates_summary_while_post_type_pending()
@@ -10214,6 +10397,7 @@ def main() -> int:
         assert_run_accounts_job_prioritizes_detail_resume_over_coverage_rerun(tmp_path)
         assert_run_accounts_job_repeats_same_resume_until_complete(tmp_path)
         assert_run_accounts_job_extends_attempts_while_quality_improves(tmp_path)
+        assert_run_accounts_job_extends_attempts_for_followable_commands_without_metric_progress(tmp_path)
         assert_run_accounts_job_treats_stage_progress_as_quality_improvement(tmp_path)
         assert_run_accounts_job_follows_recoverable_exit_one_commands(tmp_path)
         assert_run_accounts_job_opencli_blocker_preserves_batch_retry(tmp_path)

@@ -612,6 +612,52 @@ def run_sync(
     )
 
 
+def run_worker_passes_for_job(
+    args: argparse.Namespace,
+    conn: Any,
+    posts: list[dict[str, Any]],
+    config: dict[str, Any],
+    target_dates: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    worker_passes: list[dict[str, Any]] = []
+    resume_passes = 0 if args.status_only else auto_resume_pass_limit(args.max_resume_passes)
+    for index in range(resume_passes):
+        completion_before = enrichment_completion_summary(conn, posts, config)
+        if not should_run_worker_for_completion(completion_before):
+            break
+        worker_pass = run_worker_pass(args, target_dates=target_dates, pass_index=index + 1)
+        worker_passes.append(worker_pass)
+        if worker_pass.get("human_intervention_required"):
+            break
+        if worker_pass.get("worker_failed"):
+            break
+        posts = scoped_posts(
+            conn,
+            account_name=args.account_name,
+            account_url=args.account_url,
+            account_type=args.account_type,
+            dates=target_dates,
+        )
+        enqueue_enrichment_tasks_for_posts(conn, posts, config)
+        completion_after = enrichment_completion_summary(conn, posts, config)
+        worker_pass["completion_before"] = {
+            "open_task_count": _int_metric(completion_before.get("open_task_count")),
+            "auto_open_task_count": _int_metric(completion_before.get("auto_open_task_count")),
+            "incomplete_post_count": _int_metric(completion_before.get("incomplete_post_count")),
+            "requires_codex_summary_count": _int_metric(completion_before.get("requires_codex_summary_count")),
+        }
+        worker_pass["completion_after"] = {
+            "open_task_count": _int_metric(completion_after.get("open_task_count")),
+            "auto_open_task_count": _int_metric(completion_after.get("auto_open_task_count")),
+            "incomplete_post_count": _int_metric(completion_after.get("incomplete_post_count")),
+            "requires_codex_summary_count": _int_metric(completion_after.get("requires_codex_summary_count")),
+        }
+        worker_pass["made_progress"] = completion_improved(completion_before, completion_after)
+        if worker_pass.get("retry_later"):
+            break
+    return worker_passes, posts
+
+
 def discover_has_incomplete_coverage(discover_import: dict[str, Any] | None) -> bool:
     if not discover_import:
         return False
@@ -2081,49 +2127,7 @@ def main() -> int:
             )
             emit_result(partial_result)
             return 1
-    worker_passes: list[dict[str, Any]] = []
-    resume_passes = 0 if args.status_only else auto_resume_pass_limit(args.max_resume_passes)
-    no_progress_streak = 0
-    for index in range(resume_passes):
-        completion_before = enrichment_completion_summary(conn, posts, config)
-        if not should_run_worker_for_completion(completion_before):
-            break
-        worker_pass = run_worker_pass(args, target_dates=target_dates, pass_index=index + 1)
-        worker_passes.append(worker_pass)
-        if worker_pass.get("human_intervention_required"):
-            break
-        if worker_pass.get("worker_failed"):
-            break
-        posts = scoped_posts(
-            conn,
-            account_name=args.account_name,
-            account_url=args.account_url,
-            account_type=args.account_type,
-            dates=target_dates,
-        )
-        enqueue_enrichment_tasks_for_posts(conn, posts, config)
-        completion_after = enrichment_completion_summary(conn, posts, config)
-        worker_pass["completion_before"] = {
-            "open_task_count": _int_metric(completion_before.get("open_task_count")),
-            "auto_open_task_count": _int_metric(completion_before.get("auto_open_task_count")),
-            "incomplete_post_count": _int_metric(completion_before.get("incomplete_post_count")),
-            "requires_codex_summary_count": _int_metric(completion_before.get("requires_codex_summary_count")),
-        }
-        worker_pass["completion_after"] = {
-            "open_task_count": _int_metric(completion_after.get("open_task_count")),
-            "auto_open_task_count": _int_metric(completion_after.get("auto_open_task_count")),
-            "incomplete_post_count": _int_metric(completion_after.get("incomplete_post_count")),
-            "requires_codex_summary_count": _int_metric(completion_after.get("requires_codex_summary_count")),
-        }
-        worker_pass["made_progress"] = completion_improved(completion_before, completion_after)
-        if worker_pass.get("retry_later"):
-            break
-        if worker_pass["made_progress"]:
-            no_progress_streak = 0
-        else:
-            no_progress_streak += 1
-            if no_progress_streak >= 2:
-                break
+    worker_passes, posts = run_worker_passes_for_job(args, conn, posts, config, target_dates)
 
     posts = scoped_posts(
         conn,
