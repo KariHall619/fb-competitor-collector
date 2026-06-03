@@ -10763,6 +10763,102 @@ exit 1
     assert rerun[rerun.index("--min-final-usable-rate") + 1] == "0.9"
 
 
+def assert_run_accounts_job_no_accounts_reports_recovery_commands(tmp_path: Path) -> None:
+    config = tmp_path / "settings_batch_no_accounts.yaml"
+    fake_lark = tmp_path / "fake-lark-cli-no-accounts"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch_no_accounts.sqlite'}")
+    text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/usr/bin/env python3
+import json
+payload = {
+  "data": {
+    "valueRange": {
+      "values": [
+        ["主页名称", "竞品fb账户", "内部FB账户"],
+        ["Competitor Page", "https://www.facebook.com/competitoronly", ""]
+      ]
+    }
+  }
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--account-type",
+            "internal",
+            "--limit",
+            "2",
+            "--sync",
+            "--dry-run",
+            "--no-open-account-tabs",
+            "--auto-follow-attempts",
+            "6",
+            "--max-snapshots",
+            "40",
+            "--min-snapshots",
+            "8",
+            "--max-resume-passes",
+            "9",
+            "--enrichment-limit",
+            "25",
+            "--resume-stale-running-seconds",
+            "120",
+            "--expected-post-count",
+            "13",
+            "--expected-labels",
+            "38m,1h,2h",
+            "--require-coverage-complete",
+            "--min-final-usable-rate",
+            "0.9",
+        ]
+    )
+    assert result.returncode == 2, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    assert data["run_status"] == "no_accounts"
+    assert data["complete"] is False
+    assert data["account_count"] == 0
+    assert [item["reason"] for item in data["next_commands"][:2]] == [
+        "no_accounts",
+        "rerun_batch_after_accounts_fix",
+    ]
+    check_command = shlex.split(data["next_commands"][0]["command"])
+    assert check_command == ["python3", "scripts/read_accounts.py", "--config", str(config)]
+    rerun = shlex.split(data["next_commands"][1]["command"])
+    assert "scripts/run_accounts_job.py" in rerun
+    assert rerun[rerun.index("--config") + 1] == str(config)
+    assert rerun[rerun.index("--target-date") + 1] == "260603"
+    assert rerun[rerun.index("--account-type") + 1] == "internal"
+    assert rerun[rerun.index("--limit") + 1] == "2"
+    assert "--sync" in rerun
+    assert "--dry-run" in rerun
+    assert "--no-open-account-tabs" in rerun
+    assert rerun[rerun.index("--auto-follow-attempts") + 1] == "6"
+    assert rerun[rerun.index("--max-snapshots") + 1] == "40"
+    assert rerun[rerun.index("--min-snapshots") + 1] == "8"
+    assert rerun[rerun.index("--max-resume-passes") + 1] == "9"
+    assert rerun[rerun.index("--enrichment-limit") + 1] == "25"
+    assert rerun[rerun.index("--resume-stale-running-seconds") + 1] == "120"
+    assert rerun[rerun.index("--expected-post-count") + 1] == "13"
+    assert rerun[rerun.index("--expected-labels") + 1] == "38m,1h,2h"
+    assert "--require-coverage-complete" in rerun
+    assert rerun[rerun.index("--min-final-usable-rate") + 1] == "0.9"
+
+
 def assert_run_account_job_structures_prepare_and_import_failures(tmp_path: Path) -> None:
     opencli_status = start_opencli_status_server()
     try:
@@ -12538,6 +12634,7 @@ def main() -> int:
         assert_run_accounts_job_unverified_complete_preserves_batch_retry()
         assert_run_accounts_job_auth_blocker_preserves_batch_retry(tmp_path)
         assert_run_accounts_job_accounts_load_failed_preserves_batch_retry(tmp_path)
+        assert_run_accounts_job_no_accounts_reports_recovery_commands(tmp_path)
         assert_run_capture_pipeline_passes_snapshot_budget(tmp_path)
         assert_run_capture_pipeline_auto_retries_snapshot_cap(tmp_path)
         assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path)

@@ -866,6 +866,21 @@ def _batch_account_job_recovery_items(args: argparse.Namespace) -> list[dict[str
     ]
 
 
+def no_accounts_recovery_commands(args: argparse.Namespace) -> list[dict[str, Any]]:
+    return [
+        {
+            "reason": "no_accounts",
+            "description": "先检查飞书账号源是否有启用账号、表头是否被识别，以及当前筛选条件是否过窄。",
+            "command": command_text(["python3", "scripts/read_accounts.py", "--config", args.config]),
+        },
+        {
+            "reason": "rerun_batch_after_accounts_fix",
+            "description": "账号源或筛选条件修复后，按原批量范围重新运行所有目标账号。",
+            "command": command_text(batch_retry_command(args)),
+        },
+    ]
+
+
 def _append_hard_blocker_commands(
     commands: list[dict[str, Any]],
     account: dict[str, Any],
@@ -1195,6 +1210,9 @@ def main() -> int:
             account_results[account_index]["close_account_tab"] = close_result
 
     aggregate = aggregate_status(account_results)
+    next_commands = next_commands_for_batch(account_results, args)
+    if aggregate["run_status"] == "no_accounts":
+        next_commands = no_accounts_recovery_commands(args)
     payload = {
         "ok": aggregate["complete"],
         "run_status": aggregate["run_status"],
@@ -1212,7 +1230,7 @@ def main() -> int:
             "failed": sum(1 for item in account_tab_cleanup if not item.get("ok")),
             "items": account_tab_cleanup,
         },
-        "next_commands": next_commands_for_batch(account_results, args),
+        "next_commands": next_commands,
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
