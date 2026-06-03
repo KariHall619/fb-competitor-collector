@@ -32,6 +32,16 @@ MEDIA_LINK_RE = re.compile(
     r"(?:facebook\.com/(?:photo(?:\.php|/)|photos/|reel/|watch/|video/|[^/]+/videos/|videos/|share/)|fb\.watch/)",
     re.I,
 )
+ARTICLE_SUMMARY_KEYS = ("article_summary", "文章摘要", "内容摘要", "故事概要", "摘要", "简述")
+POST_TYPE_KEYS = ("post_type", "帖子类型", "内容类型")
+
+
+def first_raw_value(raw: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        value = raw.get(key)
+        if value not in (None, ""):
+            return value
+    return ""
 
 
 def prepare_failed_result(
@@ -74,7 +84,7 @@ def load_raw_posts(path: str | Path) -> tuple[dict[str, Any] | list[dict[str, An
 
 
 def clean_story_placeholder(raw: dict[str, Any]) -> str:
-    article_summary = raw.get("article_summary") or raw.get("故事概要") or raw.get("文章摘要") or ""
+    article_summary = first_raw_value(raw, ARTICLE_SUMMARY_KEYS)
     if article_summary:
         return str(article_summary).strip()
     if raw.get("summary_source") == "article" and raw.get("story_summary"):
@@ -85,7 +95,7 @@ def clean_story_placeholder(raw: dict[str, Any]) -> str:
 def summary_source_for_story(raw: dict[str, Any], story_summary: str) -> str:
     if raw.get("summary_source"):
         return str(raw.get("summary_source") or "")
-    if raw.get("article_summary") or raw.get("故事概要") or raw.get("文章摘要"):
+    if first_raw_value(raw, ARTICLE_SUMMARY_KEYS):
         return "article"
     return "pending_article_summary"
 
@@ -225,7 +235,7 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
         note_parts.append("评论/回复引流落地链接待确认")
     story_summary = clean_story_placeholder(raw)
     summary_source = summary_source_for_story(raw, story_summary)
-    post_type = str(raw.get("post_type") or raw.get("帖子类型") or "").strip()
+    post_type = str(first_raw_value(raw, POST_TYPE_KEYS)).strip()
     if not story_summary or summary_source != "article":
         note_parts.append("文章概要待生成")
     if not post_type:

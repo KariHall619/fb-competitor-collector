@@ -43,6 +43,8 @@ AUTO_FOLLOW_REASONS = {
     "coverage_incomplete",
     "no_local_work",
     "pending_enrichment",
+    "prepare_failed",
+    "import_failed",
     "needs_codex_summary",
     "summary_auto_apply_failed",
     "captured_not_synced",
@@ -55,6 +57,8 @@ AUTO_FOLLOW_REASONS = {
 }
 AUTO_FOLLOW_REASON_PRIORITY = {
     "pending_enrichment": 10,
+    "prepare_failed": 18,
+    "import_failed": 19,
     "needs_codex_summary": 20,
     "summary_auto_apply_failed": 30,
     "captured_not_synced": 35,

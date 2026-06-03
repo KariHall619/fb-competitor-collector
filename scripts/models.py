@@ -14,8 +14,19 @@ from value_utils import parse_bool
 
 
 POST_URL_KEYS = ("post_url", "fb_post_url", "Facebook帖子链接", "帖子链接")
-ARTICLE_URL_KEYS = ("article_url", "landing_url", "comment_article_url", "文章链接")
-SUMMARY_KEYS = ("article_summary", "story_summary", "topic_content", "简述", "故事概要")
+ARTICLE_URL_KEYS = (
+    "article_url",
+    "landing_url",
+    "comment_article_url",
+    "文章链接",
+    "落地链接",
+    "落地页链接",
+    "最终落地URL",
+    "引流落地链接",
+)
+ARTICLE_SUMMARY_KEYS = ("article_summary", "文章摘要", "内容摘要", "故事概要", "摘要", "简述")
+SUMMARY_KEYS = (*ARTICLE_SUMMARY_KEYS, "story_summary", "topic_content")
+POST_TYPE_KEYS = ("post_type", "帖子类型", "内容类型")
 POSTED_AT_KEYS = ("posted_at", "发帖时间精确值")
 FACEBOOK_INTERNAL_HOSTS = {
     "facebook.com",
@@ -498,9 +509,7 @@ def summary_source_for_raw(raw: dict[str, Any], summary: Any) -> str:
     explicit = raw.get("summary_source")
     if explicit:
         return str(explicit)
-    if raw.get("article_summary"):
-        return "article"
-    if raw.get("故事概要") or raw.get("文章摘要"):
+    if first_value(raw, ARTICLE_SUMMARY_KEYS):
         return "article"
     return ""
 
@@ -589,7 +598,7 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
         "raw_fb_url": raw_fb_url,
         "parent_post_url": parent_post_url,
         "fb_link_kind": raw.get("fb_link_kind") or facebook_link_kind(raw_fb_url or post_url),
-        "post_type": raw.get("post_type") or raw.get("帖子类型") or defaults.get("post_type", ""),
+        "post_type": first_value(raw, POST_TYPE_KEYS, defaults.get("post_type", "")),
         "posted_date": posted_date,
         "posted_at": posted_at,
         "relative_time_text": relative_time_text,

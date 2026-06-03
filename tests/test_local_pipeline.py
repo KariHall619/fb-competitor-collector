@@ -3242,9 +3242,8 @@ def assert_prepare_capture_preserves_type_and_article_summary(tmp_path: Path) ->
                         "lead_url_raw": "https://story.example/keeps-fields",
                         "lead_link_status": "qualified",
                         "lead_link_source": "comment",
-                        "post_type": "图文",
-                        "story_summary": VALID_CN_SUMMARY,
-                        "summary_source": "article",
+                        "内容类型": "图文",
+                        "内容摘要": VALID_CN_SUMMARY,
                         "likes": 80,
                         "comments": 12,
                         "shares": 3,
@@ -3327,6 +3326,36 @@ def assert_normalize_post_marks_existing_story_summary_as_article() -> None:
         }
     )
     assert post["post_type"] == "视频"
+    assert post["story_summary"] == VALID_CN_SUMMARY
+    assert post["summary_source"] == "article"
+    assert post["output_status"] == "ready_for_output"
+
+
+def assert_normalize_post_accepts_business_header_aliases() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+
+    post = normalize_post(
+        {
+            "account_name": "Imported Sheet",
+            "post_url": "https://www.facebook.com/imported/posts/business-alias",
+            "posted_at": "2026年5月27日 17:06",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "落地页链接": "https://story.example/business-alias",
+            "lead_url_raw": "https://story.example/business-alias",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "内容类型": "图文",
+            "内容摘要": VALID_CN_SUMMARY,
+            "likes": 80,
+            "comments": 12,
+            "shares": 3,
+        }
+    )
+    assert post["post_type"] == "图文"
+    assert post["article_url"] == "https://story.example/business-alias"
+    assert post["landing_url"] == "https://story.example/business-alias"
     assert post["story_summary"] == VALID_CN_SUMMARY
     assert post["summary_source"] == "article"
     assert post["output_status"] == "ready_for_output"
@@ -8434,6 +8463,129 @@ sys.exit(0)
     assert [attempt["run_status"] for attempt in no_work_account["attempts"]] == ["no_work", "complete"]
 
 
+def assert_run_accounts_job_follows_prepare_and_import_recovery(tmp_path: Path) -> None:
+    config = tmp_path / "settings_batch_prepare_import_recovery.yaml"
+    fake_lark = tmp_path / "fake-lark-cli-prepare-import-recovery"
+    fake_python = tmp_path / "fake-python-prepare-import-recovery"
+    calls_file = tmp_path / "batch-prepare-import-recovery-calls.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch_prepare_import_recovery.sqlite'}")
+    text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/usr/bin/env python3
+import json
+payload = {
+  "data": {
+    "valueRange": {
+      "values": [
+        ["主页名称", "竞品fb账户", "内部FB账户"],
+        ["Prepare Recovery Page", "https://www.facebook.com/preparerecovery", ""],
+        ["Import Recovery Page", "https://www.facebook.com/importrecovery", ""]
+      ]
+    }
+  }
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    fake_python.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+account_url = sys.argv[sys.argv.index("--account-url") + 1]
+account_name = sys.argv[sys.argv.index("--account-name") + 1]
+account_type = sys.argv[sys.argv.index("--account-type") + 1]
+config_path = sys.argv[sys.argv.index("--config") + 1]
+account_calls = [call for call in calls if "--account-url" in call and call[call.index("--account-url") + 1] == account_url]
+reason = "prepare_failed" if "preparerecovery" in account_url else "import_failed"
+if len(account_calls) == 1:
+    command = "python3 scripts/run_account_job.py --config " + config_path + " --account-url " + account_url + " --account-name '" + account_name + "' --account-type " + account_type + " --target-date 260603 --sync --dry-run --fail-on-incomplete --max-snapshots 32 --min-snapshots 6 --max-resume-passes 8"
+    payload = {{
+        "ok": False,
+        "run_status": reason,
+        "complete": False,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 0,
+        "quality_summary": {{
+            "coverage_health": "incomplete",
+            "ledger_candidate_count": 0,
+            "final_usable_count": 0,
+            "final_usable_rate": 0.0,
+            "open_task_count": 0
+        }},
+        "next_commands": [{{"reason": reason, "description": "rerun full capture", "command": command}}]
+    }}
+    print(json.dumps(payload, ensure_ascii=False))
+    sys.exit(1)
+payload = {{
+    "ok": True,
+    "run_status": "complete",
+    "complete": True,
+    "account_url": account_url,
+    "account_name": account_name,
+    "account_type": account_type,
+    "post_count": 2,
+    "quality_summary": {{
+        "coverage_health": "complete",
+        "ledger_candidate_count": 2,
+        "final_usable_count": 2,
+        "final_usable_rate": 1.0,
+        "open_task_count": 0
+    }},
+    "next_commands": []
+}}
+print(json.dumps(payload, ensure_ascii=False))
+sys.exit(0)
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--sync",
+            "--dry-run",
+            "--no-open-account-tabs",
+        ],
+        env={**os.environ, "PYTHON": str(fake_python)},
+    )
+    assert result.returncode == 0, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert len(calls) == 4
+    assert data["run_status"] == "complete"
+    prepare_calls = [call for call in calls if "--account-url" in call and call[call.index("--account-url") + 1] == "https://www.facebook.com/preparerecovery"]
+    import_calls = [call for call in calls if "--account-url" in call and call[call.index("--account-url") + 1] == "https://www.facebook.com/importrecovery"]
+    assert len(prepare_calls) == 2
+    assert len(import_calls) == 2
+    assert "--resume-only" not in prepare_calls[1]
+    assert "--resume-only" not in import_calls[1]
+    prepare_account = next(item for item in data["accounts"] if item["account_url"] == "https://www.facebook.com/preparerecovery")
+    import_account = next(item for item in data["accounts"] if item["account_url"] == "https://www.facebook.com/importrecovery")
+    assert [attempt["run_status"] for attempt in prepare_account["attempts"]] == ["prepare_failed", "complete"]
+    assert [attempt["run_status"] for attempt in import_account["attempts"]] == ["import_failed", "complete"]
+    assert prepare_account["attempts"][0]["auto_follow_nonstandard_returncode"] == 1
+    assert import_account["attempts"][0]["auto_follow_nonstandard_returncode"] == 1
+
+
 def assert_run_accounts_job_follows_unsynced_recovery_when_sync_requested(tmp_path: Path) -> None:
     config = tmp_path / "settings_batch_unsynced_recovery.yaml"
     fake_lark = tmp_path / "fake-lark-cli-unsynced-recovery"
@@ -10459,6 +10611,7 @@ def main() -> int:
         assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path)
         assert_prepare_capture_preserves_type_and_article_summary(tmp_path)
         assert_normalize_post_marks_existing_story_summary_as_article()
+        assert_normalize_post_accepts_business_header_aliases()
         assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_path)
         assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path)
         assert_article_url_alone_does_not_qualify_lead_link(tmp_path)
@@ -10527,6 +10680,7 @@ def main() -> int:
         assert_run_accounts_job_extends_attempts_for_followable_commands_without_metric_progress(tmp_path)
         assert_run_accounts_job_treats_stage_progress_as_quality_improvement(tmp_path)
         assert_run_accounts_job_follows_recoverable_exit_one_commands(tmp_path)
+        assert_run_accounts_job_follows_prepare_and_import_recovery(tmp_path)
         assert_run_accounts_job_follows_unsynced_recovery_when_sync_requested(tmp_path)
         assert_run_accounts_job_opencli_blocker_preserves_batch_retry(tmp_path)
         assert_run_accounts_job_auth_blocker_preserves_batch_retry(tmp_path)
