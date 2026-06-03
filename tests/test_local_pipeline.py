@@ -5674,7 +5674,9 @@ def assert_run_account_job_recovery_commands_preserve_resume_budget() -> None:
         completion=completion,
         discover_coverage=discover,
     )
-    coverage_parts = shlex.split(coverage_commands[0]["command"])
+    assert coverage_commands[0]["reason"] == "pending_enrichment"
+    coverage_command = next(item for item in coverage_commands if item["reason"] == "coverage_incomplete")
+    coverage_parts = shlex.split(coverage_command["command"])
     assert coverage_parts[coverage_parts.index("--max-resume-passes") + 1] == "4"
     assert coverage_parts[coverage_parts.index("--enrichment-limit") + 1] == "25"
     assert coverage_parts[coverage_parts.index("--resume-stale-running-seconds") + 1] == "120"
@@ -6812,11 +6814,11 @@ print(json.dumps(payload, ensure_ascii=False))
     assert data["completion_blockers"] == data["quality_summary"]["completion_blockers"]
     assert any("覆盖未完成" in action for action in data["next_actions"])
     command_reasons = [item["reason"] for item in data["next_commands"]]
-    assert command_reasons[:2] == ["coverage_incomplete", "pending_enrichment"]
-    assert "--max-snapshots 44" in data["next_commands"][0]["command"]
-    assert "--expected-post-count 13" in data["next_commands"][0]["command"]
-    assert "--resume-only" in data["next_commands"][1]["command"]
-    assert "--force-recover-running" in data["next_commands"][1]["command"]
+    assert command_reasons[:2] == ["pending_enrichment", "coverage_incomplete"]
+    assert "--resume-only" in data["next_commands"][0]["command"]
+    assert "--force-recover-running" in data["next_commands"][0]["command"]
+    assert "--max-snapshots 44" in data["next_commands"][1]["command"]
+    assert "--expected-post-count 13" in data["next_commands"][1]["command"]
     assert strict_result.returncode == 2, strict_result.stdout
     strict_data = json.loads(strict_result.stdout)
     assert strict_data["run_status"] == "coverage_incomplete"
@@ -6826,7 +6828,7 @@ print(json.dumps(payload, ensure_ascii=False))
     assert [failure["metric"] for failure in strict_data["quality_threshold_failures"]] == ["final_usable_rate"]
     assert "quality_threshold_failed" in [item["code"] for item in strict_data["completion_blockers"]]
     strict_command_reasons = [item["reason"] for item in strict_data["next_commands"]]
-    assert strict_command_reasons[:2] == ["coverage_incomplete", "pending_enrichment"]
+    assert strict_command_reasons[:2] == ["pending_enrichment", "coverage_incomplete"]
 
 
 def assert_run_account_job_passes_snapshot_budget(tmp_path: Path) -> None:
@@ -9345,7 +9347,7 @@ def assert_run_account_job_promotes_sync_failure_status() -> None:
         discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
     )
     assert quality_commands[0]["reason"] == "pending_enrichment"
-    assert "先补抓再同步" in quality_commands[0]["description"]
+    assert "先补齐详情字段并回写飞书" in quality_commands[0]["description"]
     assert quality_commands[1]["reason"] == "quality_gate"
 
 
@@ -9451,12 +9453,15 @@ def assert_run_account_job_promotes_discover_coverage_status() -> None:
     assert summary["reasons"] == ["capture_incomplete", "coverage_incomplete"]
     assert summary["raw_candidate_count"] == 12
     assert summary["stop_reason"] == "max_snapshots"
-    assert next_commands[0]["reason"] == "coverage_incomplete"
-    assert "--max-snapshots 32" in next_commands[0]["command"]
-    assert "--min-snapshots 6" in next_commands[0]["command"]
-    assert "--expected-post-count 13" in next_commands[0]["command"]
-    assert "--expected-labels" in next_commands[0]["command"]
-    assert "38m,1h,2h" in next_commands[0]["command"]
+    assert [item["reason"] for item in next_commands[:2]] == ["pending_enrichment", "coverage_incomplete"]
+    assert "--resume-only" in next_commands[0]["command"]
+    assert "--force-recover-running" in next_commands[0]["command"]
+    coverage_command = next_commands[1]["command"]
+    assert "--max-snapshots 32" in coverage_command
+    assert "--min-snapshots 6" in coverage_command
+    assert "--expected-post-count 13" in coverage_command
+    assert "--expected-labels" in coverage_command
+    assert "38m,1h,2h" in coverage_command
     quality = run_account_job.account_job_quality_summary(
         run_status=status,
         discover_coverage=summary,

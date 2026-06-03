@@ -816,6 +816,21 @@ def next_commands_for_status(
     append_quality_threshold_args(base, args)
     commands: list[dict[str, Any]] = []
     primary_date = target_dates[-1] if target_dates else ""
+    has_auto_work = has_auto_enrichment_work(completion)
+    hard_blockers = {"blocked_opencli", "blocked_auth", "human_intervention_required", "worker_failed"}
+    if run_status not in hard_blockers and (
+        run_status in {"coverage_incomplete", "incomplete_pending_tasks", "synced_ledger_incomplete"}
+        or has_auto_work
+    ):
+        command = resume_command(base, primary_date, force_recover_running=True)
+        append_resume_pass_budget(command, args)
+        commands.append(
+            {
+                "reason": "pending_enrichment",
+                "description": "继续同账号同日期的 SQLite 补抓队列，不重新发现主页；同时恢复上次中断遗留的 running 任务。覆盖不足仍需后续重跑主页，但已入库候选应先补齐详情字段并回写飞书。",
+                "command": command_text(command),
+            }
+        )
     if run_status == "coverage_incomplete":
         command = full_capture_command(
             base,
@@ -893,21 +908,6 @@ def next_commands_for_status(
                 "reason": "summary_auto_apply_failed",
                 "description": "重新执行同账号概要阶段和同步；批量作业会优先使用这条机器可续跑命令，避免停在概要导出后等待人工追问。",
                 "command": command_text(retry_command),
-            }
-        )
-    has_auto_work = has_auto_enrichment_work(completion)
-    hard_blockers = {"blocked_opencli", "blocked_auth", "human_intervention_required", "worker_failed"}
-    if run_status not in hard_blockers and (
-        run_status in {"coverage_incomplete", "incomplete_pending_tasks", "synced_ledger_incomplete"}
-        or has_auto_work
-    ):
-        command = resume_command(base, primary_date, force_recover_running=True)
-        append_resume_pass_budget(command, args)
-        commands.append(
-            {
-                "reason": "pending_enrichment",
-                "description": "继续同账号同日期的 SQLite 补抓队列，不重新发现主页；同时恢复上次中断遗留的 running 任务。质量门失败但仍有字段缺口时先补抓再同步。",
-                "command": command_text(command),
             }
         )
     if run_status == "needs_codex_summary" or (
