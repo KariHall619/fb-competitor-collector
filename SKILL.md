@@ -68,6 +68,7 @@ Map common requests as follows:
   - If an account homepage cannot be opened through OpenCLI, the batch must still continue later accounts. Report both emitted top-level recovery commands: first the OpenCLI environment fix, then the original scoped batch rerun command with date/filter/sync/budget flags preserved.
   - If a child account job reaches `blocked_opencli` during scoped detail补抓, still report the top-level batch recovery path before the child-only resume: first the OpenCLI environment fix, then the original scoped batch rerun command with date/filter/sync/budget/threshold flags preserved, then any single-account `resume_after_opencli` command.
   - If real Feishu write auth blocks before account reading or Facebook capture, report the emitted `blocked_auth` batch rerun command after the user restores authorization; it must preserve the original date/filter/sync/budget flags.
+  - If a child account job reaches `blocked_auth` during sync or scoped resume, still report the top-level batch recovery path before the child-only resume: first the Feishu auth fix, then the original scoped batch rerun command with date/filter/sync/budget/threshold flags preserved, then any single-account resume command.
   - Non-`complete` batch runs return nonzero by default. Use `--allow-incomplete-success` only for explicit preview/backward-compatibility checks where JSON will be inspected.
   - Do not manually loop account commands in chat; that is how later accounts, detail enrichment, or summary export steps get skipped.
 

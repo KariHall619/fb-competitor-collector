@@ -820,6 +820,53 @@ def _batch_opencli_recovery_items(args: argparse.Namespace) -> list[dict[str, An
     ]
 
 
+def _batch_auth_recovery_items(args: argparse.Namespace) -> list[dict[str, Any]]:
+    return [
+        {
+            "reason": "blocked_auth",
+            "description": "先检查并尝试修复飞书用户授权。",
+            "command": command_text(["python3", "scripts/check_env.py", "--config", args.config, "--fix-auth"]),
+        },
+        {
+            "reason": "rerun_batch_after_auth",
+            "description": "飞书用户授权恢复后，按原批量范围重新运行所有目标账号，避免只续跑单个账号而漏掉后续采集、补抓或同步。",
+            "command": command_text(batch_retry_command(args)),
+        },
+    ]
+
+
+def _append_hard_blocker_commands(
+    commands: list[dict[str, Any]],
+    account: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    limit: int,
+    blocker_reason: str,
+    batch_rerun_reason: str,
+    fallback_items: list[dict[str, Any]],
+) -> bool:
+    child_items = [
+        item
+        for item in account.get("next_commands") or []
+        if isinstance(item, dict) and item.get("command")
+    ]
+    env_index = next((index for index, item in enumerate(child_items) if str(item.get("reason") or "") == blocker_reason), None)
+    batch_index = next((index for index, item in enumerate(child_items) if str(item.get("reason") or "") == batch_rerun_reason), None)
+    env_item = child_items[env_index] if env_index is not None else fallback_items[0]
+    batch_item = child_items[batch_index] if batch_index is not None else fallback_items[1]
+    if _append_batch_next_command(commands, account, env_item, limit=limit):
+        return True
+    if _append_batch_next_command(commands, account, batch_item, limit=limit):
+        return True
+    used_child_indexes = {index for index in (env_index, batch_index) if index is not None}
+    for index, item in enumerate(child_items):
+        if index in used_child_indexes:
+            continue
+        if _append_batch_next_command(commands, account, item, limit=limit):
+            return True
+    return len(commands) >= limit
+
+
 def _append_blocked_opencli_commands(
     commands: list[dict[str, Any]],
     account: dict[str, Any],
@@ -827,27 +874,33 @@ def _append_blocked_opencli_commands(
     *,
     limit: int,
 ) -> bool:
-    child_items = [
-        item
-        for item in account.get("next_commands") or []
-        if isinstance(item, dict) and item.get("command")
-    ]
-    fallback_items = _batch_opencli_recovery_items(args)
-    env_item = next((item for item in child_items if str(item.get("reason") or "") == "blocked_opencli"), fallback_items[0])
-    batch_item = next((item for item in child_items if str(item.get("reason") or "") == "rerun_batch_after_opencli"), fallback_items[1])
-    if _append_batch_next_command(commands, account, env_item, limit=limit):
-        return True
-    if _append_batch_next_command(commands, account, batch_item, limit=limit):
-        return True
-    for item in child_items:
-        reason = str(item.get("reason") or "")
-        if reason == "blocked_opencli":
-            continue
-        if reason == "rerun_batch_after_opencli":
-            continue
-        if _append_batch_next_command(commands, account, item, limit=limit):
-            return True
-    return len(commands) >= limit
+    return _append_hard_blocker_commands(
+        commands,
+        account,
+        args,
+        limit=limit,
+        blocker_reason="blocked_opencli",
+        batch_rerun_reason="rerun_batch_after_opencli",
+        fallback_items=_batch_opencli_recovery_items(args),
+    )
+
+
+def _append_blocked_auth_commands(
+    commands: list[dict[str, Any]],
+    account: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    limit: int,
+) -> bool:
+    return _append_hard_blocker_commands(
+        commands,
+        account,
+        args,
+        limit=limit,
+        blocker_reason="blocked_auth",
+        batch_rerun_reason="rerun_batch_after_auth",
+        fallback_items=_batch_auth_recovery_items(args),
+    )
 
 
 def synthesized_batch_next_command(account: dict[str, Any], args: argparse.Namespace) -> dict[str, Any] | None:
@@ -875,6 +928,10 @@ def next_commands_for_batch(account_results: list[dict[str, Any]], args: argpars
             continue
         if str(account.get("run_status") or "") == "blocked_opencli":
             if _append_blocked_opencli_commands(commands, account, args, limit=limit):
+                return commands
+            continue
+        if str(account.get("run_status") or "") == "blocked_auth":
+            if _append_blocked_auth_commands(commands, account, args, limit=limit):
                 return commands
             continue
         added_for_account = False
