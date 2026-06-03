@@ -19,6 +19,26 @@ from read_accounts import read_accounts
 
 ACCOUNT_HARD_BLOCKERS = {"blocked_auth", "blocked_opencli", "human_intervention_required"}
 MAX_AUTO_FOLLOW_ATTEMPTS = 50
+STAGE_REMAINING_WEIGHTS = {
+    "coverage": 700,
+    "detail_time": 600,
+    "lead_link": 500,
+    "engagement": 400,
+    "post_type": 300,
+    "article_material": 200,
+    "summary": 100,
+}
+FIELD_REASON_STAGES = {
+    "exact_time": "detail_time",
+    "lead_link": "lead_link",
+    "likes": "engagement",
+    "comments": "engagement",
+    "shares": "engagement",
+    "likes_low": "engagement",
+    "post_type": "post_type",
+    "article_summary": "summary",
+    "coverage": "coverage",
+}
 AUTO_FOLLOW_REASONS = {
     "coverage_incomplete",
     "pending_enrichment",
@@ -207,6 +227,8 @@ def summarize_account_result(payload: dict[str, Any], *, returncode: int) -> dic
         "final_usable_count": int(quality_summary.get("final_usable_count") or 0),
         "final_usable_rate": float(quality_summary.get("final_usable_rate") or 0.0),
         "open_task_count": int(quality_summary.get("open_task_count") or 0),
+        "open_task_stage_counts": quality_summary.get("open_task_stage_counts") if isinstance(quality_summary.get("open_task_stage_counts"), dict) else {},
+        "missing_stage_counts": quality_summary.get("missing_stage_counts") if isinstance(quality_summary.get("missing_stage_counts"), dict) else {},
         "top_field_gaps": quality_summary.get("top_field_gaps") if isinstance(quality_summary.get("top_field_gaps"), list) else [],
         "completion_blockers": payload.get("completion_blockers") if isinstance(payload.get("completion_blockers"), list) else [],
         "next_commands": payload.get("next_commands") if isinstance(payload.get("next_commands"), list) else [],
@@ -255,13 +277,41 @@ def next_auto_follow_command(summary: dict[str, Any], account: dict[str, Any]) -
     return []
 
 
-def account_progress_key(summary: dict[str, Any]) -> tuple[int, int, int, int, int]:
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def stage_remaining_score(summary: dict[str, Any]) -> int:
+    counts: dict[str, int] = {}
+    for source in (summary.get("missing_stage_counts"), summary.get("open_task_stage_counts")):
+        if not isinstance(source, dict):
+            continue
+        for stage, count in source.items():
+            text_stage = str(stage or "")
+            if not text_stage:
+                continue
+            counts[text_stage] = max(counts.get(text_stage, 0), _int_value(count))
+    for item in summary.get("top_field_gaps") or []:
+        if not isinstance(item, dict):
+            continue
+        stage = str(item.get("stage") or FIELD_REASON_STAGES.get(str(item.get("reason") or ""), "") or "")
+        if not stage:
+            continue
+        counts[stage] = max(counts.get(stage, 0), _int_value(item.get("count")))
+    return sum(STAGE_REMAINING_WEIGHTS.get(stage, 50) * count for stage, count in counts.items())
+
+
+def account_progress_key(summary: dict[str, Any]) -> tuple[int, int, int, int, int, int]:
     """Return a monotonic-ish quality key for deciding whether auto-follow is still useful."""
 
     return (
         int(summary.get("final_usable_count") or 0),
         int(summary.get("ledger_candidate_count") or 0),
         -int(summary.get("open_task_count") or 0),
+        -stage_remaining_score(summary),
         int(round(float(summary.get("final_usable_rate") or 0.0) * 10000)),
         int(summary.get("post_count") or 0),
     )
@@ -395,6 +445,8 @@ def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any])
             "final_usable_count": 0,
             "final_usable_rate": 0.0,
             "open_task_count": 0,
+            "open_task_stage_counts": {},
+            "missing_stage_counts": {},
             "top_field_gaps": [],
             "completion_blockers": [],
             "next_commands": [],
