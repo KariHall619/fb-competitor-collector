@@ -1178,7 +1178,14 @@ def auto_generate_and_apply_summaries(
     generate_payload["command"] = command_text(generate_command)
     generate_payload["output"] = summaries_output
     generate_payload["output_path"] = str(summaries_path)
-    generate_ok = generated.returncode == 0 and bool(generate_payload.get("ok", True))
+    generated_summary_count = max(
+        _int_metric(generate_payload.get("generated")),
+        _int_metric(generate_payload.get("generated_request_count")),
+        _int_metric(generate_payload.get("summary_key_count")),
+    )
+    generate_ok = bool(generate_payload.get("ok", True)) and (
+        generated.returncode == 0 or (generated.returncode == 2 and generated_summary_count > 0)
+    )
     if not generate_ok:
         return {
             "ok": False,
@@ -1186,7 +1193,7 @@ def auto_generate_and_apply_summaries(
             "run_status": "summary_auto_apply_failed",
             "export": export_payload,
             "generate": generate_payload,
-            "message": "中文概要生成失败；未应用概要。",
+            "message": "中文概要生成失败或没有可应用概要；未应用概要。",
         }
 
     apply_command: list[str] = [
@@ -1211,6 +1218,8 @@ def auto_generate_and_apply_summaries(
         "run_status": "summary_applied" if apply_ok else "summary_auto_apply_failed",
         "export": export_payload,
         "generate": generate_payload,
+        "partial_generation": generated.returncode != 0,
+        "generated_summary_count": generated_summary_count,
         "apply": apply_payload,
         "requests_output": output,
         "summaries_output": summaries_output,
