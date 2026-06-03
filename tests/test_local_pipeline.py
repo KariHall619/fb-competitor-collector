@@ -5137,6 +5137,7 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
             "--status-only",
             "--sync",
             "--dry-run",
+            "--allow-incomplete-success",
         ]
     )
     assert job.returncode == 0, job.stdout
@@ -5169,6 +5170,29 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
     assert "--resume-only" in data["next_commands"][0]["command"]
     assert "--force-recover-running" in data["next_commands"][0]["command"]
 
+    default_strict_job = run(
+        [
+            PYTHON,
+            "scripts/run_account_job.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/resumepage",
+            "--account-name",
+            "Resume Page",
+            "--target-date",
+            "260602",
+            "--resume-only",
+            "--status-only",
+            "--sync",
+            "--dry-run",
+        ]
+    )
+    assert default_strict_job.returncode == 2, default_strict_job.stdout
+    default_strict_data = json.loads(default_strict_job.stdout)
+    assert default_strict_data["run_status"] == "incomplete_pending_tasks"
+    assert default_strict_data["exit_status_reason"] == "incomplete_run_status"
+
     strict_job = run(
         [
             PYTHON,
@@ -5185,7 +5209,6 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
             "--status-only",
             "--sync",
             "--dry-run",
-            "--fail-on-incomplete",
         ]
     )
     assert strict_job.returncode == 2, strict_job.stdout
@@ -5448,6 +5471,7 @@ def assert_run_account_job_recovers_scoped_running_tasks(tmp_path: Path) -> None
             "--sync",
             "--dry-run",
             "--force-recover-running",
+            "--allow-incomplete-success",
         ]
     )
     assert job.returncode == 0, job.stdout
@@ -5517,6 +5541,7 @@ def assert_run_account_job_does_not_recover_fresh_running_tasks(tmp_path: Path) 
             "--status-only",
             "--sync",
             "--dry-run",
+            "--allow-incomplete-success",
         ]
     )
     assert job.returncode == 0, job.stdout
@@ -5856,6 +5881,7 @@ def assert_run_account_job_auto_exports_summary_requests(tmp_path: Path) -> None
             "--resume-only",
             "--status-only",
             "--dry-run",
+            "--allow-incomplete-success",
         ]
     )
     assert status_only.returncode == 0, status_only.stdout
@@ -6378,6 +6404,7 @@ print(json.dumps(payload, ensure_ascii=False))
                 "260603",
                 "--dry-run",
                 "--status-only",
+                "--allow-incomplete-success",
                 "--max-snapshots",
                 "44",
                 "--min-snapshots",
@@ -6497,6 +6524,7 @@ print(json.dumps(payload, ensure_ascii=False))
                 "260603",
                 "--dry-run",
                 "--status-only",
+                "--allow-incomplete-success",
                 "--max-snapshots",
                 "20",
                 "--min-snapshots",
@@ -6608,6 +6636,7 @@ print(json.dumps(payload, ensure_ascii=False))
                 "260603",
                 "--dry-run",
                 "--status-only",
+                "--allow-incomplete-success",
                 "--max-snapshots",
                 "20",
                 "--min-snapshots",
@@ -6702,7 +6731,8 @@ calls_path.write_text(json.dumps(calls), encoding="utf-8")
 account_url = sys.argv[sys.argv.index("--account-url") + 1]
 account_name = sys.argv[sys.argv.index("--account-name") + 1]
 account_type = sys.argv[sys.argv.index("--account-type") + 1]
-if account_type == "competitor":
+account_calls = [call for call in calls if "--account-url" in call and call[call.index("--account-url") + 1] == account_url]
+if account_type == "competitor" or len(account_calls) > 1:
     payload = {{
         "ok": True,
         "run_status": "complete",
@@ -6713,8 +6743,8 @@ if account_type == "competitor":
         "post_count": 2,
         "quality_summary": {{
             "coverage_health": "complete",
-            "ledger_candidate_count": 2,
-            "final_usable_count": 2,
+            "ledger_candidate_count": 2 if account_type == "competitor" else 1,
+            "final_usable_count": 2 if account_type == "competitor" else 1,
             "final_usable_rate": 1.0,
             "open_task_count": 0
         }},
@@ -6740,12 +6770,12 @@ else:
         }},
         "completion_blockers": [{{"code": "codex_summary_required"}}],
         "next_commands": [{{
-            "reason": "codex_summary_required",
-            "description": "export summaries",
-            "command": "python3 scripts/export_summary_requests.py --account-url " + account_url
+            "reason": "pending_enrichment",
+            "description": "continue same account",
+            "command": "python3 scripts/run_account_job.py --config " + sys.argv[sys.argv.index("--config") + 1] + " --account-url " + account_url + " --account-name '" + account_name + "' --account-type " + account_type + " --target-date 260603 --resume-only --force-recover-running --sync --dry-run --fail-on-incomplete"
         }}]
     }}
-    code = 0
+    code = 2
 print(json.dumps(payload, ensure_ascii=False))
 sys.exit(code)
 """,
@@ -6771,22 +6801,27 @@ sys.exit(code)
     assert result.returncode == 0, result.stdout or result.stderr
     data = json.loads(result.stdout)
     calls = json.loads(calls_file.read_text(encoding="utf-8"))
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert data["account_count"] == 2
-    assert data["run_status"] == "accounts_need_codex_summary"
-    assert data["complete"] is False
-    assert data["accounts_completed"] == 1
-    assert data["accounts_needing_codex_summary"] == 1
+    assert data["run_status"] == "complete"
+    assert data["complete"] is True
+    assert data["accounts_completed"] == 2
+    assert data["accounts_needing_codex_summary"] == 0
     assert data["ledger_candidate_count"] == 3
-    assert data["final_usable_count"] == 2
-    assert data["next_commands"][0]["account_url"] == "https://www.facebook.com/internalone"
+    assert data["final_usable_count"] == 3
+    assert data["next_commands"] == []
+    internal = next(item for item in data["accounts"] if item["account_url"] == "https://www.facebook.com/internalone")
+    assert internal["complete"] is True
+    assert internal["auto_follow_attempted"] is True
+    assert [attempt["run_status"] for attempt in internal["attempts"]] == ["needs_codex_summary", "complete"]
     opencli_calls = json.loads(opencli_calls_file.read_text(encoding="utf-8"))
     assert len([call for call in opencli_calls if "new" in call]) == 2
     assert len([call for call in opencli_calls if "close" in call]) == 2
     assert all("--target-date" in call and "260603" in call for call in calls)
     assert all("--sync" in call and "--dry-run" in call for call in calls)
 
-    strict_result = run(
+    calls_file.unlink()
+    no_follow_result = run(
         [
             PYTHON,
             "scripts/run_accounts_job.py",
@@ -6795,11 +6830,37 @@ sys.exit(code)
             "--target-date",
             "260603",
             "--dry-run",
-            "--fail-on-incomplete",
+            "--auto-follow-attempts",
+            "1",
         ],
         env={**os.environ, "PYTHON": str(fake_python)},
     )
-    assert strict_result.returncode == 2, strict_result.stdout
+    assert no_follow_result.returncode == 2, no_follow_result.stdout
+    no_follow_data = json.loads(no_follow_result.stdout)
+    assert no_follow_data["run_status"] == "accounts_need_codex_summary"
+    assert no_follow_data["complete"] is False
+
+    calls_file.unlink()
+    status_only_result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--dry-run",
+            "--status-only",
+        ],
+        env={**os.environ, "PYTHON": str(fake_python)},
+    )
+    assert status_only_result.returncode == 2, status_only_result.stdout
+    status_only_data = json.loads(status_only_result.stdout)
+    status_calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert len(status_calls) == 2
+    assert status_only_data["run_status"] == "accounts_need_codex_summary"
+    internal_status = next(item for item in status_only_data["accounts"] if item["account_url"] == "https://www.facebook.com/internalone")
+    assert internal_status["auto_follow_attempted"] is False
 
     previous_opencli_call_count = len(json.loads(opencli_calls_file.read_text(encoding="utf-8")))
     no_open_result = run(
@@ -6814,6 +6875,7 @@ sys.exit(code)
             "--no-open-account-tabs",
             "--limit",
             "1",
+            "--allow-incomplete-success",
         ],
         env={**os.environ, "PYTHON": str(fake_python)},
     )
@@ -7500,6 +7562,7 @@ def assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path: Path
             "--status-only",
             "--sync",
             "--dry-run",
+            "--allow-incomplete-success",
         ]
     )
     assert job.returncode == 0, job.stdout

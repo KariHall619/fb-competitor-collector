@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -17,6 +18,16 @@ from read_accounts import read_accounts
 
 
 ACCOUNT_HARD_BLOCKERS = {"blocked_auth", "blocked_opencli", "human_intervention_required"}
+AUTO_FOLLOW_REASONS = {
+    "pending_enrichment",
+    "needs_codex_summary",
+    "summary_auto_apply_failed",
+    "quality_threshold_failed",
+    "sync_failed",
+    "quality_gate",
+    "audit_output_gate",
+    "partial_gate",
+}
 
 
 def run_command(command: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
@@ -155,8 +166,10 @@ def account_job_command(args: argparse.Namespace, account: dict[str, Any]) -> li
         command.append("--sync")
     if args.dry_run:
         command.append("--dry-run")
-    if args.fail_on_incomplete:
+    if not args.allow_incomplete_success:
         command.append("--fail-on-incomplete")
+    if args.allow_incomplete_success:
+        command.append("--allow-incomplete-success")
     if args.require_coverage_complete:
         command.append("--require-coverage-complete")
     threshold_args = {
@@ -195,6 +208,110 @@ def summarize_account_result(payload: dict[str, Any], *, returncode: int) -> dic
     if not payload.get("account_url") and isinstance(payload.get("stderr"), str):
         result["error"] = payload.get("stderr")[:500]
     return result
+
+
+def command_for_current_account(command_text: str, account: dict[str, Any]) -> bool:
+    if not command_text:
+        return False
+    try:
+        parts = shlex.split(command_text)
+    except ValueError:
+        return False
+    if "scripts/run_account_job.py" not in parts:
+        return False
+    if "--account-url" not in parts:
+        return False
+    try:
+        return parts[parts.index("--account-url") + 1] == str(account.get("account_url") or "")
+    except (IndexError, ValueError):
+        return False
+
+
+def next_auto_follow_command(summary: dict[str, Any], account: dict[str, Any]) -> list[str]:
+    if summary.get("complete") or str(summary.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS:
+        return []
+    for item in summary.get("next_commands") or []:
+        if not isinstance(item, dict):
+            continue
+        reason = str(item.get("reason") or "")
+        command_text = str(item.get("command") or "")
+        if reason not in AUTO_FOLLOW_REASONS:
+            continue
+        if not command_for_current_account(command_text, account):
+            continue
+        try:
+            command = shlex.split(command_text)
+        except ValueError:
+            return []
+        if command and command[0] in {"python", "python3"}:
+            command[0] = os.environ.get("PYTHON") or sys.executable
+        return command
+    return []
+
+
+def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any]) -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    command = account_job_command(args, account)
+    max_attempts = 1 if args.status_only else max(1, int(args.auto_follow_attempts or 0))
+    seen_commands: set[str] = set()
+    final_summary: dict[str, Any] | None = None
+    for attempt_index in range(1, max_attempts + 1):
+        command_key = subprocess.list2cmdline(command)
+        result = run_command(command)
+        payload = parse_json_output(result)
+        payload.setdefault("account_url", account.get("account_url") or "")
+        payload.setdefault("account_name", account.get("account_name") or "")
+        payload.setdefault("account_type", account.get("account_type") or "competitor")
+        summary = summarize_account_result(payload, returncode=result.returncode)
+        summary["command"] = command_key
+        attempts.append(
+            {
+                "attempt": attempt_index,
+                "command": command_key,
+                "returncode": result.returncode,
+                "run_status": summary.get("run_status"),
+                "complete": summary.get("complete"),
+            }
+        )
+        final_summary = summary
+        if summary.get("complete") or str(summary.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS:
+            break
+        if result.returncode not in {0, 2}:
+            break
+        if attempt_index >= max_attempts:
+            break
+        follow = next_auto_follow_command(summary, account)
+        if not follow:
+            break
+        follow_key = subprocess.list2cmdline(follow)
+        if follow_key in seen_commands:
+            attempts[-1]["auto_follow_stopped_reason"] = "repeated_command"
+            break
+        seen_commands.add(command_key)
+        command = follow
+    if final_summary is None:
+        final_summary = {
+            "account_name": account.get("account_name") or "",
+            "account_url": account.get("account_url") or "",
+            "account_type": account.get("account_type") or "competitor",
+            "ok": False,
+            "returncode": 1,
+            "run_status": "account_job_failed",
+            "complete": False,
+            "post_count": 0,
+            "coverage_health": "",
+            "ledger_candidate_count": 0,
+            "final_usable_count": 0,
+            "final_usable_rate": 0.0,
+            "open_task_count": 0,
+            "top_field_gaps": [],
+            "completion_blockers": [],
+            "next_commands": [],
+            "command": subprocess.list2cmdline(command),
+        }
+    final_summary["attempts"] = attempts
+    final_summary["auto_follow_attempted"] = len(attempts) > 1
+    return final_summary
 
 
 def account_open_blocker(account: dict[str, Any], open_result: dict[str, Any]) -> dict[str, Any]:
@@ -319,6 +436,17 @@ def main() -> int:
     parser.add_argument("--open-account-tabs", dest="open_account_tabs", action="store_true")
     parser.add_argument("--no-open-account-tabs", dest="open_account_tabs", action="store_false")
     parser.add_argument("--fail-on-incomplete", action="store_true")
+    parser.add_argument(
+        "--allow-incomplete-success",
+        action="store_true",
+        help="Compatibility mode: return 0 and do not force child account jobs to fail when incomplete.",
+    )
+    parser.add_argument(
+        "--auto-follow-attempts",
+        type=int,
+        default=3,
+        help="Maximum run_account_job attempts per account, following machine-runnable next_commands before reporting incomplete.",
+    )
     parser.add_argument("--max-snapshots", type=int, default=32)
     parser.add_argument("--min-snapshots", type=int, default=6)
     parser.add_argument("--max-resume-passes", type=int, default=8)
@@ -398,14 +526,7 @@ def main() -> int:
             continue
         if isinstance(open_result.get("tab"), dict) and open_result["tab"].get("page"):
             opened_account_tabs.append((len(account_results), open_result["tab"]))
-        command = account_job_command(args, account)
-        result = run_command(command)
-        payload = parse_json_output(result)
-        payload.setdefault("account_url", account.get("account_url") or "")
-        payload.setdefault("account_name", account.get("account_name") or "")
-        payload.setdefault("account_type", account.get("account_type") or "competitor")
-        account_summary = summarize_account_result(payload, returncode=result.returncode)
-        account_summary["command"] = subprocess.list2cmdline(command)
+        account_summary = run_account_until_settled(args, account)
         account_summary["open_account_tab"] = open_result
         account_results.append(account_summary)
 
@@ -440,7 +561,7 @@ def main() -> int:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     if aggregate["complete"]:
         return 0
-    return 2 if args.fail_on_incomplete else 0
+    return 0 if args.allow_incomplete_success else 2
 
 
 if __name__ == "__main__":

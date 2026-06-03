@@ -1693,6 +1693,11 @@ def main() -> int:
         help="Return a nonzero exit code when run_status is not complete, even if ledger sync itself succeeded.",
     )
     parser.add_argument(
+        "--allow-incomplete-success",
+        action="store_true",
+        help="Compatibility mode: return 0 for incomplete ledger/status reports. Business capture jobs should not use this.",
+    )
+    parser.add_argument(
         "--require-coverage-complete",
         action="store_true",
         help="Fail the account job when homepage/expected coverage is not complete.",
@@ -2100,14 +2105,15 @@ def main() -> int:
         if action and all(action != item.get("description") for item in result["next_commands"]):
             result["next_commands"].append({"reason": "quality_threshold_failed", "description": action, "command": result["next_commands"][0]["command"] if result["next_commands"] else ""})
     result["next_commands"] = result["next_commands"][:4]
-    if args.fail_on_incomplete and run_status != "complete" and sync_result.get("ok", True):
+    strict_completion_exit = not args.allow_incomplete_success
+    if strict_completion_exit and result["run_status"] != "complete" and sync_result.get("ok", True):
         result["exit_status_reason"] = "incomplete_run_status"
     if result.get("quality_threshold_failed") and sync_result.get("ok", True):
         result["exit_status_reason"] = "quality_threshold_failed"
     emit_result(result)
     if result.get("quality_threshold_failed"):
         return 2
-    if args.fail_on_incomplete and run_status != "complete":
+    if strict_completion_exit and result["run_status"] != "complete":
         return 2
     return 0 if sync_result.get("ok", True) else 1
 
