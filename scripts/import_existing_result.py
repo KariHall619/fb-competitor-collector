@@ -15,7 +15,7 @@ from config_loader import load_config
 from field_schema import configured_output_headers, output_row_for_headers
 from field_audit import audit_reason_counts, audit_reason_notes, audit_reason_summary
 from models import normalize_post
-from output_quality import audit_output_candidates, output_quality_errors, partial_for_review
+from output_quality import audit_output_candidates, output_quality_errors, partial_for_review, ready_for_output
 from store import connect, enqueue_enrichment_tasks_for_posts, mark_output_synced, upsert_posts
 from sync_status import annotate_sync_result, blocked_auth_result, enrichment_completion_summary
 from lark_io import ensure_user_identity, write_rows
@@ -291,8 +291,8 @@ def main() -> int:
 
     if should_sync_strict:
         sync_candidates = result.get("sync_candidates") or result["inserted"]
-        ready_posts = [post for post in sync_candidates if post.get("output_status") == "ready_for_output"]
-        quality_errors = output_quality_errors(ready_posts)
+        ready_posts, skipped_posts = ready_for_output(sync_candidates, config)
+        quality_errors = output_quality_errors(ready_posts, config)
         if quality_errors:
             sync_result = annotate_sync_result(
                 {
@@ -312,7 +312,7 @@ def main() -> int:
                 )
             )
             return 1
-        skipped = len(sync_candidates) - len(ready_posts)
+        skipped = len(skipped_posts)
         if not ready_posts:
             sync_result = annotate_sync_result(
                 {

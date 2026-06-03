@@ -95,8 +95,8 @@ def sync_posts(
             )
         return annotate_sync_failure(result)
 
-    ready_posts, skipped_posts = ready_for_output(posts)
-    errors = output_quality_errors(ready_posts)
+    ready_posts, skipped_posts = ready_for_output(posts, config)
+    errors = output_quality_errors(ready_posts, config)
     if errors:
         result = {"ok": False, "stage": "quality_gate", "errors": errors}
         if conn is not None:

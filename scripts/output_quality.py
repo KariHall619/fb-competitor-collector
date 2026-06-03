@@ -5,12 +5,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from field_audit import audit_post_fields
 from models import ESTIMATED_TIME_SOURCES, has_qualified_comment_lead_link
 from story_summary_policy import story_summary_errors
 from value_utils import parse_bool
 
 
-def output_quality_errors(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def output_quality_errors(posts: list[dict[str, Any]], config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
     for index, post in enumerate(posts, 1):
         row_errors = []
@@ -25,6 +26,11 @@ def output_quality_errors(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
             row_errors.extend(summary_errors)
         if not has_qualified_comment_lead_link(post):
             row_errors.append("missing_qualified_comment_lead_link")
+        if config is not None:
+            for reason in audit_post_fields(post, config).get("field_audit_reasons", []):
+                error = f"field_audit_{reason}"
+                if error not in row_errors:
+                    row_errors.append(error)
         if row_errors:
             errors.append(
                 {
@@ -36,9 +42,17 @@ def output_quality_errors(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return errors
 
 
-def ready_for_output(posts: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    ready = [post for post in posts if post.get("output_status") == "ready_for_output"]
-    skipped = [post for post in posts if post.get("output_status") != "ready_for_output"]
+def ready_for_output(
+    posts: list[dict[str, Any]],
+    config: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ready = [
+        post
+        for post in posts
+        if post.get("output_status") == "ready_for_output"
+        and (config is None or audit_post_fields(post, config).get("field_audit_status") == "passed")
+    ]
+    skipped = [post for post in posts if post not in ready]
     return ready, skipped
 
 

@@ -183,8 +183,8 @@ def main() -> int:
 
     if args.sync and args.strict_ready_only:
         headers = configured_output_headers(config)
-        ready_posts, skipped_posts = ready_for_output(posts)
-        errors = output_quality_errors(ready_posts)
+        ready_posts, skipped_posts = ready_for_output(posts, config)
+        errors = output_quality_errors(ready_posts, config)
         if errors:
             result = annotate_sync_result(
                 {
