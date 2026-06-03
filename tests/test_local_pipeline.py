@@ -5679,23 +5679,58 @@ def assert_run_account_job_quality_threshold_failure_has_recovery_command() -> N
             "min_expected_label_coverage_rate": 0.6,
         },
     )()
-    commands = run_account_job.next_commands_for_status(
+    resume_commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260602"],
+        run_status="quality_threshold_failed",
+        completion={
+            "post_count": 3,
+            "open_task_count": 2,
+            "auto_open_task_count": 2,
+            "open_task_stage_counts": {"detail_time": 2},
+            "missing_stage_counts": {"detail_time": 2},
+        },
+        discover_coverage={"source": "discover", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert resume_commands[0]["reason"] == "pending_enrichment"
+    assert resume_commands[1]["reason"] == "quality_threshold_failed"
+    assert "--resume-only" in resume_commands[1]["command"]
+    assert "--force-recover-running" in resume_commands[1]["command"]
+    assert "--status-only" not in resume_commands[1]["command"]
+    assert "--require-coverage-complete" in resume_commands[1]["command"]
+    assert "--min-ledger-usable-rate 1.0" in resume_commands[1]["command"]
+    assert "--min-final-usable-rate 0.9" in resume_commands[1]["command"]
+    assert "--min-completion-rate 0.8" in resume_commands[1]["command"]
+    assert "--min-expected-post-coverage-rate 0.7" in resume_commands[1]["command"]
+    assert "--min-expected-label-coverage-rate 0.6" in resume_commands[1]["command"]
+
+    coverage_commands = run_account_job.next_commands_for_status(
         args=args,
         target_dates=["260602"],
         run_status="quality_threshold_failed",
         completion={"post_count": 3},
+        discover_coverage={"source": "discover", "complete": False, "incomplete": True, "reasons": ["coverage_incomplete"]},
+    )
+    assert coverage_commands[0]["reason"] == "quality_threshold_failed"
+    coverage_command = shlex.split(coverage_commands[0]["command"])
+    assert "--resume-only" not in coverage_command
+    assert "--force-recover-running" not in coverage_command
+    assert coverage_command[coverage_command.index("--max-snapshots") + 1] == "44"
+    assert coverage_command[coverage_command.index("--min-snapshots") + 1] == "6"
+    assert "--require-coverage-complete" in coverage_command
+
+    no_candidate_commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260602"],
+        run_status="quality_threshold_failed",
+        completion={"post_count": 0},
         discover_coverage={"source": "discover", "complete": True, "incomplete": False, "reasons": []},
     )
-    assert commands[0]["reason"] == "quality_threshold_failed"
-    assert "--resume-only" in commands[0]["command"]
-    assert "--status-only" in commands[0]["command"]
-    assert "--force-recover-running" in commands[0]["command"]
-    assert "--require-coverage-complete" in commands[0]["command"]
-    assert "--min-ledger-usable-rate 1.0" in commands[0]["command"]
-    assert "--min-final-usable-rate 0.9" in commands[0]["command"]
-    assert "--min-completion-rate 0.8" in commands[0]["command"]
-    assert "--min-expected-post-coverage-rate 0.7" in commands[0]["command"]
-    assert "--min-expected-label-coverage-rate 0.6" in commands[0]["command"]
+    assert no_candidate_commands[0]["reason"] == "quality_threshold_failed"
+    no_candidate_command = shlex.split(no_candidate_commands[0]["command"])
+    assert "--resume-only" not in no_candidate_command
+    assert "--status-only" not in no_candidate_command
+    assert no_candidate_command[no_candidate_command.index("--target-date") + 1] == "260602"
 
 
 def assert_run_account_job_resume_blocks_opencli_before_detail_tasks(tmp_path: Path) -> None:

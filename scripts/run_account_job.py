@@ -1040,13 +1040,33 @@ def next_commands_for_status(
             }
         )
     if run_status == "quality_threshold_failed":
-        command = resume_command(base, primary_date, force_recover_running=True)
-        command.append("--status-only")
-        append_resume_pass_budget(command, args)
+        coverage_failed = bool(
+            discover_coverage.get("incomplete")
+            or completion.get("coverage_incomplete_count")
+            or _int_metric(completion.get("post_count")) == 0
+        )
+        if coverage_failed:
+            command = full_capture_command(
+                base,
+                primary_date,
+                args,
+                max_snapshots=max(int(getattr(args, "max_snapshots", 0) or 0) + 12, 32),
+                min_snapshots=max(int(getattr(args, "min_snapshots", 0) or 0), 6),
+            )
+            description = "质量阈值未达标且覆盖/候选不足；从账号主页顶部重新发现候选并继续补抓/同步。"
+        elif has_scoped_enrichment_resume_work(completion):
+            command = resume_command(base, primary_date, force_recover_running=True)
+            append_resume_pass_budget(command, args)
+            description = "质量阈值未达标且仍有补抓缺口；继续同账号补抓队列并同步最新字段。"
+        else:
+            command = resume_command(base, primary_date, force_recover_running=True)
+            command.append("--status-only")
+            append_resume_pass_budget(command, args)
+            description = "质量阈值未达标；当前没有可直接推进的补抓/覆盖命令，续跑同账号状态检查确认是否已恢复。"
         commands.append(
             {
                 "reason": "quality_threshold_failed",
-                "description": "质量阈值未达标；先按 quality_summary.top_field_gaps 和 quality_thresholds.failures 判断覆盖或补抓缺口，再续跑同账号状态检查。",
+                "description": description,
                 "command": command_text(command),
             }
         )
