@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from argparse import Namespace
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -11549,6 +11550,57 @@ print(json.dumps(payload, ensure_ascii=False))
         opencli_status.server_close()
 
 
+def assert_run_capture_pipeline_no_candidates_reports_full_capture_command() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_capture_pipeline
+
+    args = Namespace(
+        config="config/settings.yaml",
+        account_url="https://www.facebook.com/nocandidates",
+        account_name="No Candidates",
+        account_type="competitor",
+        target_date="260603",
+        sync_partial=True,
+        dry_run=True,
+        max_snapshots=20,
+        min_snapshots=6,
+        expected_post_count=13,
+        expected_labels="38m,1h,2h",
+        require_coverage_complete=True,
+        min_ledger_usable_rate=1.0,
+        min_final_usable_rate=0.9,
+        min_completion_rate=0.8,
+        min_expected_post_coverage_rate=0.9,
+        min_expected_label_coverage_rate=0.95,
+    )
+    commands = run_capture_pipeline.capture_pipeline_next_commands(
+        args,
+        run_status="no_candidates",
+        completion={"post_count": 0},
+        discover_coverage={"source": "discover", "complete": True, "incomplete": False, "reasons": []},
+    )
+    assert [item["reason"] for item in commands] == ["no_local_work"]
+    command = shlex.split(commands[0]["command"])
+    assert command[:2] == ["python3", "scripts/run_account_job.py"]
+    assert command[command.index("--account-url") + 1] == "https://www.facebook.com/nocandidates"
+    assert command[command.index("--account-name") + 1] == "No Candidates"
+    assert command[command.index("--target-date") + 1] == "260603"
+    assert command[command.index("--max-snapshots") + 1] == "20"
+    assert command[command.index("--min-snapshots") + 1] == "6"
+    assert command[command.index("--expected-post-count") + 1] == "13"
+    assert command[command.index("--expected-labels") + 1] == "38m,1h,2h"
+    assert "--sync" in command
+    assert "--dry-run" in command
+    assert "--resume-only" not in command
+    assert "--force-recover-running" not in command
+    assert "--require-coverage-complete" in command
+    assert command[command.index("--min-ledger-usable-rate") + 1] == "1.0"
+    assert command[command.index("--min-final-usable-rate") + 1] == "0.9"
+    assert command[command.index("--min-completion-rate") + 1] == "0.8"
+    assert command[command.index("--min-expected-post-coverage-rate") + 1] == "0.9"
+    assert command[command.index("--min-expected-label-coverage-rate") + 1] == "0.95"
+
+
 def assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path: Path) -> None:
     config = tmp_path / "settings_account_job_unknown_date.yaml"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
@@ -12722,6 +12774,7 @@ def main() -> int:
         assert_run_capture_pipeline_auto_retries_snapshot_cap(tmp_path)
         assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path)
         assert_run_capture_pipeline_structures_prepare_and_import_failures(tmp_path)
+        assert_run_capture_pipeline_no_candidates_reports_full_capture_command()
         assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path)
         assert_expected_coverage_marks_missing_posts()
         assert_run_account_job_expected_coverage_marks_missing_posts()

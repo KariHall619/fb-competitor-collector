@@ -97,7 +97,7 @@ def capture_pipeline_next_commands(
 ) -> list[dict]:
     if run_status == "complete":
         return []
-    command_status = "no_work" if run_status == "discover_failed" else run_status
+    command_status = "no_work" if run_status in {"discover_failed", "no_candidates"} else run_status
     return next_commands_for_status(
         args=capture_pipeline_command_args(args),
         target_dates=[normalize_date(args.target_date) if args.target_date else ""],
