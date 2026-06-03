@@ -308,6 +308,8 @@ def main() -> int:
     failed = 0
     retry_later = 0
     retry_later_reasons: list[str] = []
+    codex_summary_required = 0
+    codex_summary_urls: list[str] = []
     human_intervention_required = False
     human_intervention_reasons: list[str] = []
 
@@ -403,18 +405,36 @@ def main() -> int:
             mark_task_done(conn, task["id"], duration_ms=int((time.monotonic() - task_start) * 1000))
             completed += 1
         except Exception as exc:
-            mark_task_failed(conn, task["id"], str(exc), duration_ms=int((time.monotonic() - task_start) * 1000))
+            error = str(exc)
+            if error.startswith("requires_codex_chinese_summary:"):
+                codex_summary_required += 1
+                key = post_task_key(post, task)
+                if key and key not in codex_summary_urls:
+                    codex_summary_urls.append(key)
+            mark_task_failed(conn, task["id"], error, duration_ms=int((time.monotonic() - task_start) * 1000))
             failed += 1
+
+    if human_intervention_required:
+        run_status = "human_intervention_required"
+    elif retry_later and failed == 0:
+        run_status = "incomplete_pending_tasks"
+    elif codex_summary_required and failed == codex_summary_required:
+        run_status = "needs_codex_summary"
+    elif failed == 0:
+        run_status = "complete"
+    else:
+        run_status = "failed"
 
     result = {
         "ok": failed == 0,
-        "run_status": "human_intervention_required"
-        if human_intervention_required
-        else ("incomplete_pending_tasks" if retry_later and failed == 0 else ("complete" if failed == 0 else "failed")),
+        "run_status": run_status,
         "human_intervention_required": human_intervention_required,
         "human_intervention_reasons": human_intervention_reasons,
         "retry_later": bool(retry_later),
         "retry_later_reasons": retry_later_reasons,
+        "codex_summary_required": bool(codex_summary_required),
+        "codex_summary_required_count": codex_summary_required,
+        "codex_summary_required_urls": codex_summary_urls[:10],
         "input_tasks": len(tasks),
         "completed": completed,
         "requeued": retry_later,
@@ -433,7 +453,7 @@ def main() -> int:
         "task_counts": task_counts_for_posts(conn, scoped_posts) if scope_enabled else task_counts(conn),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if failed == 0 else 1
+    return 0 if failed == 0 else (2 if run_status == "needs_codex_summary" else 1)
 
 
 if __name__ == "__main__":

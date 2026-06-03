@@ -4475,8 +4475,10 @@ def assert_enrichment_worker_scopes_tasks_to_account(tmp_path: Path) -> None:
             "10",
         ]
     )
-    assert worker.returncode == 1, worker.stdout
+    assert worker.returncode == 2, worker.stdout
     data = json.loads(worker.stdout)
+    assert data["run_status"] == "needs_codex_summary"
+    assert data["codex_summary_required"] is True
     assert data["scope"]["enabled"] is True
     assert data["scope"]["post_count"] == 1
     assert data["input_tasks"] == 1
@@ -5144,6 +5146,52 @@ def assert_run_account_job_summary_only_next_command_exports_requests() -> None:
     assert "--account-url https://www.facebook.com/example" in commands[0]["command"]
     assert "--account-type competitor" in commands[0]["command"]
     assert "--resume-only" not in commands[0]["command"]
+
+
+def assert_run_account_job_worker_pass_surfaces_summary_required() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    original_run_command = run_account_job.run_command
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/example",
+            "account_name": "Example Page",
+            "account_type": "competitor",
+            "enrichment_limit": 50,
+        },
+    )()
+
+    class FakeSummaryRequiredWorker:
+        returncode = 2
+        stdout = json.dumps(
+            {
+                "ok": False,
+                "run_status": "needs_codex_summary",
+                "codex_summary_required": True,
+                "codex_summary_required_count": 1,
+                "codex_summary_required_urls": ["https://facebook.com/example/posts/summary-needed"],
+                "failed": 1,
+            },
+            ensure_ascii=False,
+        )
+        stderr = ""
+
+    try:
+        run_account_job.run_command = lambda _command: FakeSummaryRequiredWorker()
+        worker_pass = run_account_job.run_worker_pass(args, target_dates=["260603"], pass_index=1)
+    finally:
+        run_account_job.run_command = original_run_command
+    assert worker_pass["ok"] is True
+    assert worker_pass["codex_summary_required"] is True
+    assert worker_pass["codex_summary_required_count"] == 1
+    assert worker_pass["codex_summary_required_urls"] == ["https://facebook.com/example/posts/summary-needed"]
+    summary_requirement = run_account_job.worker_summary_requirement_summary([worker_pass])
+    assert summary_requirement["codex_summary_required"] is True
+    assert summary_requirement["codex_summary_required_count"] == 1
 
 
 def assert_run_account_job_prioritizes_auto_work_before_summary_export() -> None:
@@ -6965,7 +7013,12 @@ def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
             "10",
         ]
     )
-    assert summary_worker.returncode == 1, summary_worker.stdout + summary_worker.stderr
+    assert summary_worker.returncode == 2, summary_worker.stdout + summary_worker.stderr
+    summary_data = json.loads(summary_worker.stdout)
+    assert summary_data["run_status"] == "needs_codex_summary"
+    assert summary_data["codex_summary_required"] is True
+    assert summary_data["codex_summary_required_count"] == 2
+    assert len(summary_data["codex_summary_required_urls"]) == 2
 
     sys.path.insert(0, str(ROOT / "scripts"))
     from store import all_posts, cached_article_material, connect, pending_enrichment_tasks
@@ -7351,6 +7404,7 @@ def main() -> int:
         assert_run_account_job_next_commands_force_recover_running()
         assert_run_account_job_reports_worker_retry_later()
         assert_run_account_job_summary_only_next_command_exports_requests()
+        assert_run_account_job_worker_pass_surfaces_summary_required()
         assert_run_account_job_prioritizes_auto_work_before_summary_export()
         assert_run_capture_pipeline_uses_completion_status_helpers()
         assert_run_capture_pipeline_blocks_auth_before_opencli(tmp_path)

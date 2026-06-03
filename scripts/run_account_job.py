@@ -444,12 +444,23 @@ def run_worker_pass(args: argparse.Namespace, *, target_dates: list[str], pass_i
         payload["returncode"] = worker.returncode
         payload["target_date"] = target_date
         results.append(payload)
-    failed = [item for item in results if item.get("returncode") not in {0, 1}]
+    failed = [
+        item
+        for item in results
+        if item.get("returncode") not in {0, 1}
+        and item.get("run_status") != "needs_codex_summary"
+    ]
     human_intervention = [item for item in results if needs_human_intervention(item)]
     retry_later_seen = any(bool(item.get("retry_later")) for item in results)
     retry_later_count = sum(_int_metric(item.get("requeued")) for item in results if item.get("retry_later"))
     retry_later_reasons: list[str] = []
+    codex_summary_required_count = sum(_int_metric(item.get("codex_summary_required_count")) for item in results)
+    codex_summary_required_urls: list[str] = []
     for item in results:
+        for url in item.get("codex_summary_required_urls") or []:
+            text_url = str(url or "").strip()
+            if text_url and text_url not in codex_summary_required_urls:
+                codex_summary_required_urls.append(text_url)
         if not item.get("retry_later"):
             continue
         for reason in item.get("retry_later_reasons") or [item.get("run_status") or item.get("status") or "retry_later"]:
@@ -469,6 +480,9 @@ def run_worker_pass(args: argparse.Namespace, *, target_dates: list[str], pass_i
         "retry_later": retry_later_seen,
         "retry_later_count": retry_later_count,
         "retry_later_reasons": retry_later_reasons[:10],
+        "codex_summary_required": bool(codex_summary_required_count),
+        "codex_summary_required_count": codex_summary_required_count,
+        "codex_summary_required_urls": codex_summary_required_urls[:10],
         "results": results,
     }
 
@@ -911,6 +925,22 @@ def worker_retry_summary(worker_passes: list[dict[str, Any]]) -> dict[str, Any]:
         "retry_later": retry_later_seen,
         "retry_later_count": count,
         "retry_later_reasons": reasons[:10],
+    }
+
+
+def worker_summary_requirement_summary(worker_passes: list[dict[str, Any]]) -> dict[str, Any]:
+    count = 0
+    urls: list[str] = []
+    for worker_pass in worker_passes:
+        count += _int_metric(worker_pass.get("codex_summary_required_count"))
+        for url in worker_pass.get("codex_summary_required_urls") or []:
+            text = str(url or "").strip()
+            if text and text not in urls:
+                urls.append(text)
+    return {
+        "codex_summary_required": count > 0,
+        "codex_summary_required_count": count,
+        "codex_summary_required_urls": urls[:10],
     }
 
 
@@ -1660,6 +1690,7 @@ def main() -> int:
     sync_result = run_sync(config, args, posts, conn)
     completion = enrichment_completion_summary(conn, posts)
     retry_summary = worker_retry_summary(worker_passes)
+    summary_requirement = worker_summary_requirement_summary(worker_passes)
     run_status = summarize_job_status(
         preflight=opencli_preflight,
         discover_import=discover_import,
@@ -1685,6 +1716,9 @@ def main() -> int:
         "worker_retry_later": retry_summary["retry_later"],
         "worker_retry_later_count": retry_summary["retry_later_count"],
         "worker_retry_later_reasons": retry_summary["retry_later_reasons"],
+        "worker_codex_summary_required": summary_requirement["codex_summary_required"],
+        "worker_codex_summary_required_count": summary_requirement["codex_summary_required_count"],
+        "worker_codex_summary_required_urls": summary_requirement["codex_summary_required_urls"],
         "worker_passes": worker_passes,
         "feishu_sync": sync_result,
         "enrichment_completion": completion,
