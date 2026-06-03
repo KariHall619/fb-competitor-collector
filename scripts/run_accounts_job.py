@@ -866,6 +866,16 @@ def _batch_account_job_recovery_items(args: argparse.Namespace) -> list[dict[str
     ]
 
 
+def _batch_auto_follow_exhausted_items(args: argparse.Namespace) -> list[dict[str, Any]]:
+    return [
+        {
+            "reason": "rerun_batch_after_auto_follow_exhausted",
+            "description": "账号自动续跑达到安全上限后，按原批量范围重新运行所有目标账号，避免只续跑单个账号而漏掉后续采集、补抓或同步。",
+            "command": command_text(batch_retry_command(args)),
+        }
+    ]
+
+
 def no_accounts_recovery_commands(args: argparse.Namespace) -> list[dict[str, Any]]:
     return [
         {
@@ -1012,6 +1022,28 @@ def _append_account_job_failed_commands(
     return len(commands) >= limit
 
 
+def _append_auto_follow_exhausted_commands(
+    commands: list[dict[str, Any]],
+    account: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    limit: int,
+) -> bool:
+    for item in _batch_auto_follow_exhausted_items(args):
+        if _append_batch_next_command(commands, account, item, limit=limit):
+            return True
+    synthesized = synthesized_batch_next_command(account, args)
+    if synthesized:
+        if _append_batch_next_command(commands, account, synthesized, limit=limit):
+            return True
+    for item in account.get("next_commands") or []:
+        if not isinstance(item, dict) or not item.get("command"):
+            continue
+        if _append_batch_next_command(commands, account, item, limit=limit):
+            return True
+    return len(commands) >= limit
+
+
 def synthesized_batch_next_command(account: dict[str, Any], args: argparse.Namespace) -> dict[str, Any] | None:
     if account.get("complete") or str(account.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS:
         return None
@@ -1053,6 +1085,10 @@ def next_commands_for_batch(account_results: list[dict[str, Any]], args: argpars
             continue
         if str(account.get("run_status") or "") in ACCOUNT_SCRIPT_FAILURE_STATUSES:
             if _append_account_job_failed_commands(commands, account, args, limit=limit):
+                return commands
+            continue
+        if account.get("auto_follow_exhausted"):
+            if _append_auto_follow_exhausted_commands(commands, account, args, limit=limit):
                 return commands
             continue
         added_for_account = False

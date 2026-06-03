@@ -9141,7 +9141,14 @@ sys.exit(2)
     data = json.loads(result.stdout)
     assert data["run_status"] == "accounts_incomplete"
     assert data["next_commands"]
-    command = data["next_commands"][0]
+    batch_command = data["next_commands"][0]
+    assert batch_command["reason"] == "rerun_batch_after_auto_follow_exhausted"
+    batch_parts = shlex.split(batch_command["command"])
+    assert "scripts/run_accounts_job.py" in batch_parts
+    assert batch_parts[batch_parts.index("--target-date") + 1] == "260603"
+    assert "--sync" in batch_parts
+    assert "--dry-run" in batch_parts
+    command = data["next_commands"][1]
     assert command["reason"] == "auto_follow_exhausted"
     assert command["account_url"] == "https://www.facebook.com/topsynthpage"
     parts = shlex.split(command["command"])
@@ -9149,6 +9156,105 @@ sys.exit(2)
     assert "--resume-only" in parts
     assert "--force-recover-running" in parts
     assert "--sync" in parts
+
+
+def assert_run_accounts_job_auto_follow_exhausted_prefers_batch_rerun() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_accounts_job
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "target_date": "260603",
+            "last_hours": 24,
+            "account_type": "competitor",
+            "account_url": "",
+            "account_name": "",
+            "limit": 3,
+            "resume_only": False,
+            "force_recover_running": False,
+            "sync": True,
+            "dry_run": True,
+            "allow_incomplete_success": False,
+            "open_account_tabs": False,
+            "auto_follow_attempts": 6,
+            "max_snapshots": 40,
+            "min_snapshots": 8,
+            "max_resume_passes": 9,
+            "enrichment_limit": 25,
+            "resume_stale_running_seconds": 120,
+            "expected_post_count": 13,
+            "expected_labels": "38m,1h,2h",
+            "require_coverage_complete": True,
+            "min_ledger_usable_rate": 0.0,
+            "min_final_usable_rate": 0.9,
+            "min_completion_rate": 0.0,
+            "min_expected_post_coverage_rate": 0.0,
+            "min_expected_label_coverage_rate": 0.0,
+        },
+    )()
+    account = {
+        "account_url": "https://www.facebook.com/exhaustedpage",
+        "account_name": "Exhausted Page",
+        "account_type": "competitor",
+        "run_status": "incomplete_pending_tasks",
+        "complete": False,
+        "post_count": 6,
+        "ledger_candidate_count": 6,
+        "final_usable_count": 2,
+        "final_usable_rate": 0.3333,
+        "open_task_count": 4,
+        "open_task_stage_counts": {"post_type": 2, "summary": 2},
+        "missing_stage_counts": {"post_type": 2, "summary": 2},
+        "top_field_gaps": [
+            {"reason": "post_type", "stage": "post_type", "count": 2},
+            {"reason": "article_summary", "stage": "summary", "count": 2},
+        ],
+        "auto_follow_exhausted": True,
+        "next_commands": [
+            {
+                "reason": "pending_enrichment",
+                "description": "continue only this account",
+                "command": "python3 scripts/run_account_job.py --config config/settings.yaml --account-url https://www.facebook.com/exhaustedpage --account-name 'Exhausted Page' --account-type competitor --target-date 260603 --resume-only --force-recover-running --sync --dry-run --fail-on-incomplete",
+            }
+        ],
+    }
+
+    commands = run_accounts_job.next_commands_for_batch([account], args)
+    assert [item["reason"] for item in commands[:3]] == [
+        "rerun_batch_after_auto_follow_exhausted",
+        "auto_follow_exhausted",
+        "pending_enrichment",
+    ]
+    batch_rerun = shlex.split(commands[0]["command"])
+    assert "scripts/run_accounts_job.py" in batch_rerun
+    assert batch_rerun[batch_rerun.index("--config") + 1] == "config/settings.yaml"
+    assert batch_rerun[batch_rerun.index("--target-date") + 1] == "260603"
+    assert batch_rerun[batch_rerun.index("--account-type") + 1] == "competitor"
+    assert batch_rerun[batch_rerun.index("--limit") + 1] == "3"
+    assert "--sync" in batch_rerun
+    assert "--dry-run" in batch_rerun
+    assert "--no-open-account-tabs" in batch_rerun
+    assert batch_rerun[batch_rerun.index("--auto-follow-attempts") + 1] == "6"
+    assert batch_rerun[batch_rerun.index("--max-snapshots") + 1] == "40"
+    assert batch_rerun[batch_rerun.index("--min-snapshots") + 1] == "8"
+    assert batch_rerun[batch_rerun.index("--max-resume-passes") + 1] == "9"
+    assert batch_rerun[batch_rerun.index("--enrichment-limit") + 1] == "25"
+    assert batch_rerun[batch_rerun.index("--resume-stale-running-seconds") + 1] == "120"
+    assert batch_rerun[batch_rerun.index("--expected-post-count") + 1] == "13"
+    assert batch_rerun[batch_rerun.index("--expected-labels") + 1] == "38m,1h,2h"
+    assert "--require-coverage-complete" in batch_rerun
+    assert batch_rerun[batch_rerun.index("--min-final-usable-rate") + 1] == "0.9"
+    synthesized = shlex.split(commands[1]["command"])
+    assert "scripts/run_account_job.py" in synthesized
+    assert synthesized[synthesized.index("--account-url") + 1] == "https://www.facebook.com/exhaustedpage"
+    assert "--resume-only" in synthesized
+    assert "--force-recover-running" in synthesized
+    single_resume = shlex.split(commands[2]["command"])
+    assert "scripts/run_account_job.py" in single_resume
+    assert single_resume[single_resume.index("--account-url") + 1] == "https://www.facebook.com/exhaustedpage"
 
 
 def assert_run_accounts_job_treats_stage_progress_as_quality_improvement(tmp_path: Path) -> None:
@@ -12786,6 +12892,7 @@ def main() -> int:
         assert_run_accounts_job_synthesizes_resume_when_child_omits_next_commands(tmp_path)
         assert_run_accounts_job_downgrades_false_child_complete(tmp_path)
         assert_run_accounts_job_top_level_synthesizes_missing_recovery_command(tmp_path)
+        assert_run_accounts_job_auto_follow_exhausted_prefers_batch_rerun()
         assert_run_accounts_job_treats_stage_progress_as_quality_improvement(tmp_path)
         assert_run_accounts_job_follows_recoverable_exit_one_commands(tmp_path)
         assert_run_accounts_job_follows_prepare_and_import_recovery(tmp_path)
