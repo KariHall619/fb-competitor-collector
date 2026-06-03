@@ -51,6 +51,18 @@ AUTO_FOLLOW_REASONS = {
     "audit_output_gate",
     "partial_gate",
 }
+AUTO_FOLLOW_REASON_PRIORITY = {
+    "pending_enrichment": 10,
+    "needs_codex_summary": 20,
+    "summary_auto_apply_failed": 30,
+    "sync_failed": 40,
+    "quality_gate": 45,
+    "audit_output_gate": 46,
+    "partial_gate": 47,
+    "quality_threshold_failed": 50,
+    "coverage_incomplete": 80,
+    "no_local_work": 90,
+}
 
 
 def command_text(command: list[Any]) -> str:
@@ -259,6 +271,7 @@ def command_for_current_account(command_text: str, account: dict[str, Any]) -> b
 def next_auto_follow_command(summary: dict[str, Any], account: dict[str, Any]) -> list[str]:
     if summary.get("complete") or str(summary.get("run_status") or "") in ACCOUNT_HARD_BLOCKERS:
         return []
+    candidates: list[tuple[int, int, str]] = []
     for item in summary.get("next_commands") or []:
         if not isinstance(item, dict):
             continue
@@ -268,14 +281,17 @@ def next_auto_follow_command(summary: dict[str, Any], account: dict[str, Any]) -
             continue
         if not command_for_current_account(command_text, account):
             continue
-        try:
-            command = shlex.split(command_text)
-        except ValueError:
-            return []
-        if command and command[0] in {"python", "python3"}:
-            command[0] = os.environ.get("PYTHON") or sys.executable
-        return command
-    return []
+        candidates.append((AUTO_FOLLOW_REASON_PRIORITY.get(reason, 100), len(candidates), command_text))
+    if not candidates:
+        return []
+    command_text = sorted(candidates, key=lambda item: (item[0], item[1]))[0][2]
+    try:
+        command = shlex.split(command_text)
+    except ValueError:
+        return []
+    if command and command[0] in {"python", "python3"}:
+        command[0] = os.environ.get("PYTHON") or sys.executable
+    return command
 
 
 def _int_value(value: Any) -> int:

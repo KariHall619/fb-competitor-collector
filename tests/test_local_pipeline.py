@@ -7510,6 +7510,138 @@ sys.exit(code)
     assert data["next_commands"] == []
 
 
+def assert_run_accounts_job_prioritizes_detail_resume_over_coverage_rerun(tmp_path: Path) -> None:
+    config = tmp_path / "settings_batch_coverage_with_detail.yaml"
+    fake_lark = tmp_path / "fake-lark-cli-coverage-detail"
+    fake_python = tmp_path / "fake-python-coverage-detail"
+    calls_file = tmp_path / "batch-coverage-detail-calls.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch_coverage_detail.sqlite'}")
+    text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
+    config.write_text(text, encoding="utf-8")
+    fake_lark.write_text(
+        """#!/usr/bin/env python3
+import json
+payload = {
+  "data": {
+    "valueRange": {
+      "values": [
+        ["主页名称", "竞品fb账户", "内部FB账户"],
+        ["Coverage Detail Page", "https://www.facebook.com/coveragedetailpage", ""]
+      ]
+    }
+  }
+}
+print(json.dumps(payload, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    fake_python.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+calls_path = pathlib.Path(r"{calls_file}")
+calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
+calls.append(sys.argv)
+calls_path.write_text(json.dumps(calls), encoding="utf-8")
+account_url = sys.argv[sys.argv.index("--account-url") + 1]
+account_name = sys.argv[sys.argv.index("--account-name") + 1]
+account_type = sys.argv[sys.argv.index("--account-type") + 1]
+config_path = sys.argv[sys.argv.index("--config") + 1]
+account_calls = [call for call in calls if "--account-url" in call and call[call.index("--account-url") + 1] == account_url]
+coverage_command = "python3 scripts/run_account_job.py --config " + config_path + " --account-url " + account_url + " --account-name '" + account_name + "' --account-type " + account_type + " --target-date 260603 --sync --dry-run --fail-on-incomplete --max-snapshots 44 --min-snapshots 6"
+resume_command = "python3 scripts/run_account_job.py --config " + config_path + " --account-url " + account_url + " --account-name '" + account_name + "' --account-type " + account_type + " --target-date 260603 --resume-only --force-recover-running --sync --dry-run --fail-on-incomplete --max-resume-passes 8"
+if len(account_calls) == 1:
+    payload = {{
+        "ok": True,
+        "run_status": "coverage_incomplete",
+        "complete": False,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 6,
+        "quality_summary": {{
+            "coverage_health": "incomplete",
+            "ledger_candidate_count": 6,
+            "final_usable_count": 0,
+            "final_usable_rate": 0.0,
+            "open_task_count": 6,
+            "open_task_stage_counts": {{"detail_time": 6, "post_type": 6}},
+            "missing_stage_counts": {{"detail_time": 6, "post_type": 6}},
+            "top_field_gaps": [
+                {{"reason": "exact_time", "stage": "detail_time", "count": 6}},
+                {{"reason": "post_type", "stage": "post_type", "count": 6}}
+            ]
+        }},
+        "completion_blockers": [
+            {{"code": "coverage_incomplete"}},
+            {{"code": "stage_detail_time"}},
+            {{"code": "stage_post_type"}}
+        ],
+        "next_commands": [
+            {{"reason": "coverage_incomplete", "description": "rerun from top", "command": coverage_command}},
+            {{"reason": "pending_enrichment", "description": "continue detail fields", "command": resume_command}}
+        ]
+    }}
+    code = 2
+else:
+    payload = {{
+        "ok": True,
+        "run_status": "complete",
+        "complete": True,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 6,
+        "quality_summary": {{
+            "coverage_health": "complete",
+            "ledger_candidate_count": 6,
+            "final_usable_count": 6,
+            "final_usable_rate": 1.0,
+            "open_task_count": 0
+        }},
+        "next_commands": []
+    }}
+    code = 0
+print(json.dumps(payload, ensure_ascii=False))
+sys.exit(code)
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = run(
+        [
+            PYTHON,
+            "scripts/run_accounts_job.py",
+            "--config",
+            str(config),
+            "--target-date",
+            "260603",
+            "--sync",
+            "--dry-run",
+            "--no-open-account-tabs",
+            "--auto-follow-attempts",
+            "3",
+        ],
+        env={**os.environ, "PYTHON": str(fake_python)},
+    )
+    assert result.returncode == 0, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert len(calls) == 2
+    assert "--resume-only" in calls[1]
+    assert "--force-recover-running" in calls[1]
+    assert "--max-snapshots" not in calls[1]
+    account = data["accounts"][0]
+    assert [attempt["run_status"] for attempt in account["attempts"]] == ["coverage_incomplete", "complete"]
+    assert account["attempts"][1].get("auto_follow_repeated_command") is None
+
+
 def assert_run_accounts_job_repeats_same_resume_until_complete(tmp_path: Path) -> None:
     config = tmp_path / "settings_batch_repeated_resume.yaml"
     fake_lark = tmp_path / "fake-lark-cli-repeated-resume"
@@ -10019,6 +10151,7 @@ def main() -> int:
         assert_run_account_job_auto_retries_expected_coverage_gap(tmp_path)
         assert_run_accounts_job_runs_all_accounts_and_aggregates_status(tmp_path)
         assert_run_accounts_job_auto_follows_coverage_recovery(tmp_path)
+        assert_run_accounts_job_prioritizes_detail_resume_over_coverage_rerun(tmp_path)
         assert_run_accounts_job_repeats_same_resume_until_complete(tmp_path)
         assert_run_accounts_job_extends_attempts_while_quality_improves(tmp_path)
         assert_run_accounts_job_treats_stage_progress_as_quality_improvement(tmp_path)
