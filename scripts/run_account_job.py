@@ -1094,12 +1094,16 @@ def worker_failure_summary(worker_passes: list[dict[str, Any]]) -> dict[str, Any
     }
 
 
+def has_pre_summary_auto_enrichment_work(completion: dict[str, Any]) -> bool:
+    return bool(completion.get("auto_open_task_count") or completion.get("has_auto_enrichment_work"))
+
+
 def export_summary_requests_for_job(args: argparse.Namespace, target_dates: list[str], completion: dict[str, Any]) -> dict[str, Any]:
     if getattr(args, "status_only", False):
         return {"ok": True, "skipped": True, "reason": "status_only"}
     if not completion.get("requires_codex_summary_count"):
         return {"ok": True, "skipped": True, "reason": "no_codex_summary_required"}
-    if has_auto_enrichment_work(completion):
+    if has_pre_summary_auto_enrichment_work(completion):
         return {"ok": True, "skipped": True, "reason": "auto_enrichment_still_pending"}
     output = summary_requests_output_path_for_dates(target_dates)
     output_path = ROOT / output
@@ -1137,7 +1141,7 @@ def auto_generate_and_apply_summaries(
         return {"ok": True, "skipped": True, "reason": "status_only"}
     if not completion.get("requires_codex_summary_count"):
         return {"ok": True, "skipped": True, "reason": "no_codex_summary_required"}
-    if has_auto_enrichment_work(completion):
+    if has_pre_summary_auto_enrichment_work(completion):
         return {"ok": True, "skipped": True, "reason": "auto_enrichment_still_pending"}
 
     output = summary_requests_output_path_for_dates(target_dates)

@@ -6138,12 +6138,20 @@ def assert_run_account_job_applies_partial_generated_summaries() -> None:
                 "requires_codex_summary_count": 2,
                 "has_auto_enrichment_work": False,
                 "auto_open_task_count": 0,
-                "coverage_incomplete_count": 0,
+                "coverage_incomplete_count": 1,
             },
         )
     finally:
         run_account_job.run_command = original_run_command
 
+    assert run_account_job.has_pre_summary_auto_enrichment_work(
+        {
+            "requires_codex_summary_count": 1,
+            "has_auto_enrichment_work": False,
+            "auto_open_task_count": 0,
+            "coverage_incomplete_count": 1,
+        }
+    ) is False
     scripts = [call[1] for call in calls]
     assert any(script.endswith("generate_article_summaries.py") for script in scripts)
     assert any(script.endswith("apply_article_summaries.py") for script in scripts)
