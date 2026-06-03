@@ -1528,6 +1528,51 @@ def assert_field_schema_controls_output_rows() -> None:
     assert normalize_account_type("竞品账号") == "competitor"
 
 
+def assert_read_accounts_uses_wide_configured_source_range() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import read_accounts
+
+    captured_ranges: list[str] = []
+    original_read_source_range = read_accounts.read_source_range
+
+    class FakeResult:
+        returncode = 0
+        stderr = ""
+        stdout = json.dumps(
+            {
+                "data": {
+                    "valueRange": {
+                        "values": [
+                            ["主页名称", "竞品fb账户", "内部FB账户", "备注"],
+                            ["Wide One", "https://facebook.com/wide-one", "https://facebook.com/internal-one", "keep"],
+                            ["Wide Two", "https://facebook.com/wide-two", "", "keep"],
+                        ]
+                    }
+                }
+            },
+            ensure_ascii=False,
+        )
+
+    def fake_read_source_range(_config: dict[str, object], range_expr: str) -> FakeResult:
+        captured_ranges.append(range_expr)
+        return FakeResult()
+
+    try:
+        read_accounts.read_source_range = fake_read_source_range
+        accounts = read_accounts.read_accounts({"feishu": {"sheets": {"accounts": "sourceSheet"}}})
+    finally:
+        read_accounts.read_source_range = original_read_source_range
+
+    assert captured_ranges == ["sourceSheet!A1:Z200"]
+    assert [item["account_url"] for item in accounts] == [
+        "https://facebook.com/wide-one",
+        "https://facebook.com/internal-one",
+        "https://facebook.com/wide-two",
+    ]
+    assert [item["account_name"] for item in accounts] == ["Wide One", "Wide One", "Wide Two"]
+    assert [item["account_type"] for item in accounts] == ["competitor", "internal", "competitor"]
+
+
 def assert_field_audit_marks_refetchable_missing_fields(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from field_audit import audit_post_fields
@@ -1588,6 +1633,68 @@ def assert_field_audit_marks_refetchable_missing_fields(tmp_path: Path) -> None:
     enqueue_enrichment_tasks_for_posts(conn, [stored])
     stages = sorted(task["stage"] for task in pending_enrichment_tasks(conn, limit=20))
     assert stages == ["engagement", "lead_link", "post_type"]
+
+
+def assert_import_with_project_config_queues_missing_post_type(tmp_path: Path) -> None:
+    config = tmp_path / "settings_missing_type_import.yaml"
+    db_path = tmp_path / "missing-type-import.sqlite"
+    raw = tmp_path / "missing_type_import.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {db_path}"),
+        encoding="utf-8",
+    )
+    raw.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Missing Type Import",
+                        "account_url": "https://www.facebook.com/missingtypeimport",
+                        "post_url": "https://www.facebook.com/missingtypeimport/posts/one",
+                        "posted_at": "2026年6月3日 12:00",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                        "article_url": "https://story.example/missing-type-import",
+                        "landing_url": "https://story.example/missing-type-import",
+                        "lead_url_raw": "https://story.example/missing-type-import",
+                        "lead_link_status": "qualified",
+                        "lead_link_source": "comment",
+                        "story_summary": VALID_CN_SUMMARY,
+                        "summary_source": "article",
+                        "likes": 20,
+                        "comments": 4,
+                        "shares": 2,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--no-sync"])
+    assert imported.returncode == 0, imported.stdout + imported.stderr
+    data = json.loads(imported.stdout)
+    assert data["enrichment_tasks"]["stage_counts"]["post_type"] == 1
+    assert data["enrichment_tasks"]["open_stage_counts"]["post_type"] == 1
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from store import connect, pending_enrichment_tasks, row_for_post
+
+    conn = connect(db_path)
+    stored = row_for_post(
+        conn,
+        {
+            "post_url": "https://www.facebook.com/missingtypeimport/posts/one",
+            "canonical_post_url": "https://facebook.com/missingtypeimport/posts/one",
+        },
+    )
+    assert stored is not None
+    assert stored["output_status"] != "ready_for_output"
+    assert "post_type" in stored["field_audit_reasons"]
+    stages = sorted(task["stage"] for task in pending_enrichment_tasks(conn, limit=10))
+    assert stages == ["post_type"]
 
 
 def assert_audit_marker_is_written_to_adoption_status() -> None:
@@ -6604,6 +6711,136 @@ sys.exit(1)
     assert "帖子类型" not in row[headers.index("是否采用")]
 
 
+def assert_run_account_job_keeps_missing_post_type_incomplete_after_summary_apply(tmp_path: Path) -> None:
+    config = tmp_path / "settings_account_missing_type_summary.yaml"
+    db_path = tmp_path / "account-missing-type-summary.sqlite"
+    fake_lark = tmp_path / "fake-lark-cli-missing-type-summary"
+    writes_file = tmp_path / "missing-type-summary-writes.json"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config_text = config.read_text(encoding="utf-8")
+    config_text = config_text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
+    config_text = config_text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
+    config_text = config_text.replace('output_spreadsheet_url: ""', 'output_spreadsheet_url: "https://fake.feishu.cn/sheets/output"')
+    config.write_text(config_text, encoding="utf-8")
+    fake_lark.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+writes_path = pathlib.Path(r"{writes_file}")
+args = sys.argv[1:]
+if args[:2] == ["config", "default-as"]:
+    print("default-as: user")
+    sys.exit(0)
+if args[:2] == ["config", "strict-mode"]:
+    print("strict-mode: user")
+    sys.exit(0)
+if args[:2] == ["auth", "status"]:
+    print(json.dumps({{"identity": "user", "tokenStatus": "valid", "userName": "Test User"}}))
+    sys.exit(0)
+if args[:2] == ["sheets", "+info"]:
+    print(json.dumps({{"data": {{"sheets": {{"sheets": [{{"title": "全量内容库", "sheet_id": "sheet1"}}, {{"title": "FB竞品帖子链接", "sheet_id": "sheet2"}}]}}}}}}))
+    sys.exit(0)
+if args[:2] == ["sheets", "+create-sheet"]:
+    print(json.dumps({{"ok": True, "sheet_id": "sheet2"}}))
+    sys.exit(0)
+if args[:2] == ["sheets", "+read"]:
+    print(json.dumps({{"data": {{"valueRange": {{"values": []}}}}}}))
+    sys.exit(0)
+if args[:2] == ["sheets", "+write"]:
+    range_value = args[args.index("--range") + 1]
+    values = json.loads(args[args.index("--values") + 1])
+    existing = json.loads(writes_path.read_text(encoding="utf-8")) if writes_path.exists() else []
+    existing.append({{"range": range_value, "values": values}})
+    writes_path.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
+    print(json.dumps({{"ok": True, "rows": len(values)}}))
+    sys.exit(0)
+print("unexpected lark call: " + " ".join(args), file=sys.stderr)
+sys.exit(1)
+""",
+        encoding="utf-8",
+    )
+    fake_lark.chmod(0o755)
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, row_for_post, upsert_post
+
+    conn = connect(db_path)
+    post = normalize_post(
+        {
+            "account_name": "Missing Type Summary",
+            "account_url": "https://www.facebook.com/missingtypesummary",
+            "account_type": "competitor",
+            "post_url": "https://www.facebook.com/missingtypesummary/posts/needs-type",
+            "posted_at": "2026年6月3日 12:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://story.example/missing-type-summary",
+            "landing_url": "https://story.example/missing-type-summary",
+            "lead_url_raw": "https://story.example/missing-type-summary",
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment",
+            "likes": 20,
+            "comments": 4,
+            "shares": 2,
+            "article_material": {
+                "ok": True,
+                "title": "Missing type summary source",
+                "text_excerpt": "A family conflict story where the protagonist uncovers a hidden problem.",
+            },
+        }
+    )
+    upsert_post(conn, post, {"quality_audit": {"required_post_types": ["图文", "视频", "仅图片", "仅文字"]}})
+    stored = row_for_post(conn, post)
+    assert stored is not None
+    enqueue_enrichment_tasks_for_posts(conn, [stored], {"quality_audit": {"required_post_types": ["图文", "视频", "仅图片", "仅文字"]}})
+    assert stored["output_status"] != "ready_for_output"
+
+    job = run(
+        [
+            PYTHON,
+            "scripts/run_account_job.py",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/missingtypesummary",
+            "--account-name",
+            "Missing Type Summary",
+            "--target-date",
+            "260603",
+            "--resume-only",
+            "--sync",
+            "--max-resume-passes",
+            "0",
+        ]
+    )
+
+    assert job.returncode != 0, job.stdout + job.stderr
+    data = json.loads(job.stdout)
+    assert data["run_status"] == "blocked_opencli"
+    assert data["summary_auto_apply"]["ok"] is True
+    assert data["feishu_sync"]["ok"] is True
+    assert data["quality_summary"]["missing_stage_counts"]["post_type"] == 1
+    assert "summary" not in data["quality_summary"]["missing_stage_counts"]
+    assert data["quality_summary"]["final_usable_rate"] == 0.0
+    stored_after = row_for_post(conn, post)
+    assert stored_after is not None
+    assert stored_after["story_summary"]
+    assert stored_after["summary_source"] == "article"
+    assert stored_after["post_type"] == ""
+    assert stored_after["output_status"] != "ready_for_output"
+    assert "post_type" in stored_after["field_audit_reasons"]
+    assert "article_summary" not in stored_after["field_audit_reasons"]
+    writes = json.loads(writes_file.read_text(encoding="utf-8"))
+    values = writes[-1]["values"]
+    headers = values[0]
+    row = values[1]
+    assert row[headers.index("帖子类型")] == ""
+    assert row[headers.index("故事概要")] == stored_after["story_summary"]
+    assert "帖子类型" in row[headers.index("是否采用")]
+    assert "文章概要" not in row[headers.index("是否采用")]
+
+
 def assert_run_account_job_applies_partial_generated_summaries() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import run_account_job
@@ -10823,6 +11060,10 @@ def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
                         "lead_url_raw": article_url,
                         "lead_link_status": "qualified",
                         "lead_link_source": "comment",
+                        "post_type": "图文",
+                        "likes": 20,
+                        "comments": 3,
+                        "shares": 1,
                     },
                     {
                         "account_name": "Story Hub",
@@ -10836,6 +11077,10 @@ def assert_enrichment_worker_article_cache_and_summary(tmp_path: Path) -> None:
                         "lead_url_raw": article_url,
                         "lead_link_status": "qualified",
                         "lead_link_source": "comment",
+                        "post_type": "图文",
+                        "likes": 20,
+                        "comments": 3,
+                        "shares": 1,
                     },
                 ]
             },
@@ -11139,6 +11384,7 @@ def main() -> int:
     assert_comments_and_shares_are_output_as_engagement()
     assert_time_confirmed_string_false_is_not_ready()
     assert_field_schema_controls_output_rows()
+    assert_read_accounts_uses_wide_configured_source_range()
     assert_audit_marker_is_written_to_adoption_status()
     assert_ledger_marker_includes_time_summary_and_coverage()
     assert_feishu_upsert_merges_rows_without_overwriting_manual_adoption()
@@ -11222,6 +11468,7 @@ def main() -> int:
         assert_sqlite_upsert_does_not_protect_internal_lead_links(tmp_path)
         assert_sqlite_upsert_dedupes_equivalent_media_urls(tmp_path)
         assert_field_audit_marks_refetchable_missing_fields(tmp_path)
+        assert_import_with_project_config_queues_missing_post_type(tmp_path)
         assert_cli_feishu_auth_blockers_report_run_status(tmp_path)
         assert_import_existing_result_reports_structured_input_failures(tmp_path)
         assert_prepare_capture_reports_structured_input_failures(tmp_path)
@@ -11294,6 +11541,7 @@ def main() -> int:
         assert_run_account_job_does_not_stop_after_no_progress_worker_passes()
         assert_run_account_job_auto_exports_summary_requests(tmp_path)
         assert_run_account_job_syncs_refreshed_summary_and_type_after_auto_apply(tmp_path)
+        assert_run_account_job_keeps_missing_post_type_incomplete_after_summary_apply(tmp_path)
         assert_run_account_job_applies_partial_generated_summaries()
         assert_run_account_job_generates_summary_while_post_type_pending()
         assert_run_account_job_rejects_noop_summary_apply()

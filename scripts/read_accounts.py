@@ -22,7 +22,8 @@ from lark_io import read_source_range
 
 def read_accounts(config: dict[str, Any]) -> list[dict[str, Any]]:
     sheet_id = deep_get(config, "feishu.sheets.accounts", "账号配置")
-    result = read_source_range(config, f"{sheet_id}!A1:B200")
+    source_range = str(deep_get(config, "feishu.account_source_range", "A1:Z200") or "A1:Z200")
+    result = read_source_range(config, f"{sheet_id}!{source_range}")
     if result.returncode != 0:
         raise RuntimeError(result.stdout or result.stderr)
     payload = json.loads(result.stdout)

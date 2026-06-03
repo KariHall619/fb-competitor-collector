@@ -22,6 +22,7 @@ feishu:
   output_spreadsheet_token: "Md8As2SJzhyuBHtMuOmcLqy3nyf"
   output_spreadsheet_url: "https://pic6ktmsyi.feishu.cn/sheets/Md8As2SJzhyuBHtMuOmcLqy3nyf"
   spreadsheet_url: "https://pic6ktmsyi.feishu.cn/sheets/Md8As2SJzhyuBHtMuOmcLqy3nyf"
+  account_source_range: "A1:Z200"
   sheets:
     accounts: "oZg2HR"
     account_detail: "d1220b"

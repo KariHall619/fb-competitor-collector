@@ -28,15 +28,15 @@ def invalid_summary_record(post: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def downgraded_fields(post: dict[str, Any]) -> dict[str, Any]:
+def downgraded_fields(post: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
     next_post = {
         **post,
         "summary_source": "pending_article_summary",
         "output_status": "",
         "crawl_status": "",
     }
-    next_post["output_status"] = output_status_for(next_post)
-    next_post["crawl_status"] = crawl_status_for(next_post)
+    next_post["output_status"] = output_status_for(next_post, config)
+    next_post["crawl_status"] = crawl_status_for(next_post, config)
     note = str(post.get("note") or "")
     parts = [part for part in note.split("；") if part]
     if "故事概要需重新生成中文摘要" not in parts:
@@ -79,7 +79,7 @@ def main() -> int:
             post = posts_by_key.get(key)
             if not post:
                 continue
-            fields = downgraded_fields(post)
+            fields = downgraded_fields(post, config)
             update_post_fields(conn, post, fields)
             stored = {**post, **fields}
             enqueue_enrichment_tasks(conn, stored, stages=["summary"])

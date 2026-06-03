@@ -9,6 +9,7 @@ from typing import Any
 
 from config_loader import load_config
 from field_audit import audit_fields_for_storage, audit_post_fields
+from pipeline_status import crawl_status_for, output_status_for
 from store import all_posts, connect, enqueue_enrichment_tasks, update_post_fields
 
 
@@ -20,6 +21,11 @@ def audit_and_queue(conn, posts: list[dict[str, Any]], config: dict[str, Any], *
         audit = audit_post_fields(post, config)
         storage_fields = audit_fields_for_storage(post, config)
         if fix:
+            storage_fields = {
+                **storage_fields,
+                "output_status": output_status_for(post, config),
+                "crawl_status": crawl_status_for(post, config),
+            }
             update_post_fields(conn, post, storage_fields)
         if audit["field_audit_status"] == "passed":
             passed += 1

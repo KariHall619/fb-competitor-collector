@@ -2094,6 +2094,28 @@ def main() -> int:
             auto_fix=True,
         )
         if not opencli_preflight.get("ok"):
+            preflight_summary_auto_apply = auto_generate_and_apply_summaries(args, target_dates, completion_before_worker)
+            if preflight_summary_auto_apply.get("ok") and not preflight_summary_auto_apply.get("skipped"):
+                posts = scoped_posts(
+                    conn,
+                    account_name=args.account_name,
+                    account_url=args.account_url,
+                    account_type=args.account_type,
+                    dates=target_dates,
+                )
+                enqueue_enrichment_tasks_for_posts(conn, posts, config)
+                completion_before_worker = enrichment_completion_summary(conn, posts, config)
+                sync_result = run_sync(config, args, posts, conn)
+                posts = scoped_posts(
+                    conn,
+                    account_name=args.account_name,
+                    account_url=args.account_url,
+                    account_type=args.account_type,
+                    dates=target_dates,
+                )
+                completion_before_worker = enrichment_completion_summary(conn, posts, config)
+            else:
+                sync_result = {}
             run_status = "blocked_opencli"
             partial_result = {
                 "ok": False,
@@ -2108,6 +2130,8 @@ def main() -> int:
                 "task_counts": task_counts_for_posts(conn, posts),
                 "recovered_running_tasks": recovered_running_tasks,
                 "opencli_preflight": opencli_preflight,
+                "summary_auto_apply": preflight_summary_auto_apply,
+                "feishu_sync": sync_result,
                 "enrichment_completion": completion_before_worker,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
             }
@@ -2115,7 +2139,7 @@ def main() -> int:
                 run_status=run_status,
                 discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
                 completion=completion_before_worker,
-                sync_result={},
+                sync_result=sync_result,
                 thresholds=quality_thresholds_from_args(args),
             )
             partial_result["next_commands"] = next_commands_for_status(

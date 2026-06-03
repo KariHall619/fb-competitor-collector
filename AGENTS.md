@@ -42,6 +42,7 @@ This file is the first-stop project memory for future agents working in this rep
 - `scripts/opencli_extract_current_tab.mjs::postKey` is the JavaScript snapshot-dedupe mirror of `facebook_content_key`. Keep it aligned whenever new Facebook content URL forms are accepted, otherwise one scroll run can over-count or duplicate candidates before SQLite/Feishu upsert.
 - SQLite upsert must be merge-oriented, not overwrite-oriented. Re-imported partial rows must not downgrade confirmed time, qualified comment/comment-reply lead links, external landing/article URLs, valid Chinese article summaries, engagement values, manual adoption decisions, or final statuses.
 - Feishu upsert is also merge-oriented. Later partial/audit sync rows must not overwrite existing non-empty business fields such as `帖子类型` or `故事概要` with empty values; only real non-empty improvements should replace those cells. `是否采用` is special: preserve manual values, but allow system `待补抓：...` markers to update or clear.
+- Real project status recomputation must pass loaded config into `output_status_for`/`crawl_status_for` and SQLite upsert/update helpers. `ready_for_output` is only valid after current `quality_audit` passes; rows missing `post_type` or valid article-sourced `story_summary` must stay incomplete and keep补抓/summary work visible.
 - `prepare_capture_result.py` must preserve an upstream/detail-confirmed `post_type` and explicit article summary fields (`article_summary`, `故事概要`, `文章摘要`, or `story_summary` with `summary_source=article`) during normalization. Homepage `story_summary` / `raw_text` is candidate context only and must not be promoted to a formal story summary unless an explicit article-summary source is present.
 - Business-table aliases are part of the import contract: `内容类型` must map to `post_type`, and `内容摘要` / `文章摘要` / `摘要` / `故事概要` must map to article-sourced `story_summary`. If these aliases disappear from `models.py` or `prepare_capture_result.py`, rows can be written to Feishu with a post link but empty `帖子类型` / `故事概要`.
 - SQLite raw-payload merging must preserve existing `article_material` when a later homepage/partial import for the same canonical post lacks article material; otherwise summary export can lose the source material needed for Codex-written Chinese `story_summary`.
@@ -104,6 +105,7 @@ This file is the first-stop project memory for future agents working in this rep
   - Wiki: `https://pic6ktmsyi.feishu.cn/wiki/QzfUwyYyTi3zt7kl7TDcSzZKn3f?sheet=oZg2HR`
   - Spreadsheet token: `QkRSshqQDh2dfWtfLtLcikWKnIb`
   - Sheet id: `oZg2HR`
+- Account source reads use `feishu.account_source_range`, default `A1:Z200`. Keep this wide enough for account name, competitor account, internal account, generic account, and future account columns; narrowing it can make batch jobs silently skip target accounts before capture starts.
 - Output workbook is write-only for results:
   - Wiki: `https://pic6ktmsyi.feishu.cn/wiki/BqkSw67zgiYlbikZWx3cqwZ5nAf`
   - Spreadsheet token: `Md8As2SJzhyuBHtMuOmcLqy3nyf`

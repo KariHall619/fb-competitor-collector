@@ -152,14 +152,18 @@ def apply_detail_results(
         enriched = by_key.get(key)
         if not enriched:
             continue
-        enriched["output_status"] = output_status_for(enriched)
-        enriched["crawl_status"] = crawl_status_for(enriched)
-        upsert_post(conn, enriched)
+        enriched["output_status"] = output_status_for(enriched, config)
+        enriched["crawl_status"] = crawl_status_for(enriched, config)
+        upsert_post(conn, enriched, config)
         stored = row_for_post(conn, enriched) or enriched
         enqueue_enrichment_tasks(conn, stored, config=config)
 
 
-def article_material_fields(post: dict[str, Any], material: dict[str, Any]) -> dict[str, Any]:
+def article_material_fields(
+    post: dict[str, Any],
+    material: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     raw_payload = post.get("raw_payload") or "{}"
     try:
         payload = json.loads(raw_payload)
@@ -169,8 +173,8 @@ def article_material_fields(post: dict[str, Any], material: dict[str, Any]) -> d
         payload = {}
     payload["article_material"] = material
     next_post = {**post, "raw_payload": json.dumps(payload, ensure_ascii=False)}
-    next_post["output_status"] = output_status_for(next_post)
-    next_post["crawl_status"] = crawl_status_for(next_post)
+    next_post["output_status"] = output_status_for(next_post, config)
+    next_post["crawl_status"] = crawl_status_for(next_post, config)
     return {
         "raw_payload": next_post["raw_payload"],
         "output_status": next_post["output_status"],
@@ -191,7 +195,7 @@ def run_article_task(config: dict[str, Any], post: dict[str, Any], conn_path: st
     return "fetch", material
 
 
-def run_summary_task(post: dict[str, Any]) -> dict[str, Any]:
+def run_summary_task(post: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
     if has_valid_story_summary(post):
         next_post = {**post}
     else:
@@ -199,8 +203,8 @@ def run_summary_task(post: dict[str, Any]) -> dict[str, Any]:
         if not errors and post.get("summary_source") != "article":
             errors = ["missing_article_summary"]
         raise RuntimeError("requires_codex_chinese_summary:" + ",".join(errors or ["missing_article_summary"]))
-    next_post["output_status"] = output_status_for(next_post)
-    next_post["crawl_status"] = crawl_status_for(next_post)
+    next_post["output_status"] = output_status_for(next_post, config)
+    next_post["crawl_status"] = crawl_status_for(next_post, config)
     return next_post
 
 
@@ -388,7 +392,7 @@ def main() -> int:
                     _source, material = future.result()
                     if not material.get("ok"):
                         raise RuntimeError(material.get("error") or "article_material_fetch_failed")
-                    fields = article_material_fields(post, material)
+                    fields = article_material_fields(post, material, config)
                     update_post_fields_with_audit(conn, post, fields, config=config)
                     stored = row_for_post(conn, post) or post
                     enqueue_enrichment_tasks(conn, stored, config=config)
@@ -408,8 +412,8 @@ def main() -> int:
         task_start = time.monotonic()
         mark_task_running(conn, task["id"])
         try:
-            next_post = run_summary_task(post)
-            upsert_post(conn, next_post)
+            next_post = run_summary_task(post, config)
+            upsert_post(conn, next_post, config)
             mark_task_done(conn, task["id"], duration_ms=int((time.monotonic() - task_start) * 1000))
             completed += 1
         except Exception as exc:

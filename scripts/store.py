@@ -313,31 +313,32 @@ def choose_value(existing: dict[str, Any], incoming: dict[str, Any], column: str
     return new_value if non_empty(new_value) else current
 
 
-def merged_post(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+def merged_post(existing: dict[str, Any], incoming: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
     merged = {column: choose_value(existing, incoming, column) for column in POST_COLUMNS}
     if not merged.get("canonical_post_url"):
         merged["canonical_post_url"] = incoming.get("canonical_post_url") or existing.get("canonical_post_url") or incoming.get("post_url")
     if existing.get("output_status") != "output_synced":
-        computed_output = output_status_for(merged)
-        if merged.get("output_status") != "ready_for_output" or computed_output == "ready_for_output":
-            merged["output_status"] = computed_output
-        merged["crawl_status"] = crawl_status_for(merged)
-    merged.update(audit_fields_for_storage(merged))
+        computed_output = output_status_for(merged, config)
+        merged["output_status"] = computed_output
+        merged["crawl_status"] = crawl_status_for(merged, config)
+    merged.update(audit_fields_for_storage(merged, config))
     return merged
 
 
-def upsert_post(conn: sqlite3.Connection, post: dict[str, Any]) -> str:
+def upsert_post(conn: sqlite3.Connection, post: dict[str, Any], config: dict[str, Any] | None = None) -> str:
     if not post.get("post_url"):
         raise ValueError("post_url is required")
     if not post.get("canonical_post_url"):
         post["canonical_post_url"] = post["post_url"]
-    post.update(audit_fields_for_storage(post))
+    post["output_status"] = output_status_for(post, config)
+    post["crawl_status"] = crawl_status_for(post, config)
+    post.update(audit_fields_for_storage(post, config))
     existing = conn.execute(
         "SELECT * FROM posts WHERE canonical_post_url = ? OR post_url = ?",
         (post["canonical_post_url"], post["post_url"]),
     ).fetchone()
     if existing:
-        post = merged_post(dict(existing), post)
+        post = merged_post(dict(existing), post, config)
         assignments = ", ".join([f"{column} = ?" for column in POST_COLUMNS if column != "post_url"])
         update_values = [post.get(column) for column in POST_COLUMNS if column != "post_url"]
         update_values.extend([post["canonical_post_url"], post["post_url"]])
@@ -365,14 +366,18 @@ def row_for_post(conn: sqlite3.Connection, post: dict[str, Any]) -> dict[str, An
     return dict(row) if row else None
 
 
-def upsert_posts(conn: sqlite3.Connection, posts: list[dict[str, Any]]) -> dict[str, Any]:
+def upsert_posts(
+    conn: sqlite3.Connection,
+    posts: list[dict[str, Any]],
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     inserted: list[dict[str, Any]] = []
     synced_candidates: list[dict[str, Any]] = []
     updated = 0
     errors = 0
     for post in posts:
         try:
-            result = upsert_post(conn, post)
+            result = upsert_post(conn, post, config)
             stored = row_for_post(conn, post) or post
             if result == "inserted":
                 inserted.append(stored)
@@ -835,8 +840,8 @@ def update_post_fields_with_audit(
         return
     refreshed = {
         **stored,
-        "output_status": output_status_for(stored),
-        "crawl_status": crawl_status_for(stored),
+        "output_status": output_status_for(stored, config),
+        "crawl_status": crawl_status_for(stored, config),
     }
     refreshed.update(audit_fields_for_storage(refreshed, config))
     update_post_fields(

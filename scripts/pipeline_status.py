@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from models import COMMENT_LEAD_SOURCES, ESTIMATED_TIME_SOURCES, has_qualified_comment_lead_link
-from field_audit import audit_refetch_stages
+from field_audit import audit_post_fields, audit_refetch_stages
 from story_summary_policy import article_material_for_post, has_valid_story_summary
 from value_utils import parse_bool
 
@@ -69,7 +69,7 @@ def missing_enrichment_stages(post: dict[str, Any], config: dict[str, Any] | Non
     return stages
 
 
-def output_status_for(post: dict[str, Any]) -> str:
+def output_status_for(post: dict[str, Any], config: dict[str, Any] | None = None) -> str:
     explicit = str(post.get("output_status") or "")
     if explicit in {BLOCKED, OUTPUT_SYNCED}:
         return explicit
@@ -78,6 +78,7 @@ def output_status_for(post: dict[str, Any]) -> str:
         and has_confirmed_time(post)
         and has_article_summary(post)
         and has_qualified_comment_lead_link(post)
+        and (config is None or audit_post_fields(post, config).get("field_audit_status") == "passed")
     ):
         return READY_FOR_OUTPUT
     if has_partial_review_signal(post):
@@ -85,8 +86,8 @@ def output_status_for(post: dict[str, Any]) -> str:
     return NEEDS_ENRICHMENT
 
 
-def crawl_status_for(post: dict[str, Any]) -> str:
-    status = output_status_for(post)
+def crawl_status_for(post: dict[str, Any], config: dict[str, Any] | None = None) -> str:
+    status = output_status_for(post, config)
     if status == READY_FOR_OUTPUT:
         return READY_FOR_OUTPUT
     if status == OUTPUT_SYNCED:

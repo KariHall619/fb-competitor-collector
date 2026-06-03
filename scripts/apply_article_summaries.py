@@ -82,10 +82,10 @@ def summary_for_post(post: dict[str, Any], summaries: dict[str, Any]) -> str:
     return next((summaries.get(key) for key in keys if key and summaries.get(key)), "")
 
 
-def applied_fields(post: dict[str, Any], summary: str) -> dict[str, Any]:
+def applied_fields(post: dict[str, Any], summary: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
     next_post = {**post, "story_summary": summary.strip(), "summary_source": "article"}
-    next_post["output_status"] = output_status_for(next_post)
-    next_post["crawl_status"] = crawl_status_for(next_post)
+    next_post["output_status"] = output_status_for(next_post, config)
+    next_post["crawl_status"] = crawl_status_for(next_post, config)
     note = next_post.get("note") or ""
     next_post["note"] = "；".join(
         part
@@ -175,7 +175,11 @@ def next_commands_after_sqlite_apply(args: argparse.Namespace) -> list[dict[str,
     ]
 
 
-def apply_to_posts(posts: list[dict[str, Any]], summaries: dict[str, Any]) -> dict[str, Any]:
+def apply_to_posts(
+    posts: list[dict[str, Any]],
+    summaries: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     applied = 0
     missing = []
     rejected = []
@@ -189,10 +193,10 @@ def apply_to_posts(posts: list[dict[str, Any]], summaries: dict[str, Any]) -> di
         errors = story_summary_errors(candidate)
         if errors:
             rejected.append({"post_url": post.get("post_url"), "errors": errors})
-            post["output_status"] = output_status_for(post)
-            post["crawl_status"] = crawl_status_for(post)
+            post["output_status"] = output_status_for(post, config)
+            post["crawl_status"] = crawl_status_for(post, config)
             continue
-        fields = applied_fields(post, str(summary))
+        fields = applied_fields(post, str(summary), config)
         post.update(fields)
         key = str(post.get("canonical_post_url") or post.get("post_url") or "")
         if key:
@@ -255,7 +259,7 @@ def main() -> int:
             return 1
         conn = connect(config.get("database_path", "data/posts.sqlite"))
         posts = scoped_posts(conn, args)
-        result = apply_to_posts(posts, summaries)
+        result = apply_to_posts(posts, summaries, config)
         for post in posts:
             key = str(post.get("canonical_post_url") or post.get("post_url") or "")
             fields = result["fields_by_key"].get(key)
@@ -304,7 +308,29 @@ def main() -> int:
             )
         )
         return 1
-    result = apply_to_posts(posts, summaries)
+
+    file_config = None
+    if args.config:
+        try:
+            file_config = load_config(args.config)
+        except (FileNotFoundError, JSONDecodeError, ValueError) as exc:
+            print(
+                json.dumps(
+                    summary_apply_failed_result(
+                        stage="config_load",
+                        message="摘要应用配置读取失败；已在写出结果前停止。",
+                        error=str(exc),
+                        summaries_path=args.summaries,
+                        input_path=args.input,
+                        output_path=args.output,
+                        config_path=args.config,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 1
+    result = apply_to_posts(posts, summaries, file_config)
 
     payload["article_summary_applied"] = result["applied"]
     payload["article_summary_missing"] = result["missing"]

@@ -167,7 +167,7 @@ def main() -> int:
         return 1
     conn = connect(config.get("database_path", "data/posts.sqlite"))
     try:
-        result = upsert_posts(conn, posts)
+        result = upsert_posts(conn, posts, config)
     except sqlite3.OperationalError as exc:
         payload = import_failed_result(
             stage="sqlite_write",

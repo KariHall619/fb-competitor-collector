@@ -206,6 +206,7 @@ Rules:
 - If the user supplies a visible expected count or label checklist, missing expected posts/labels is also `coverage_incomplete` even when scrolling itself looked stable.
 - Re-importing the same post must preserve higher-quality stored fields. Do not overwrite confirmed detail time, qualified comment/reply lead links, external landing URLs, valid Chinese article summaries, engagement values, manual `是否采用`, or final output status with weaker partial data.
 - Import and prepare paths must recognize business header aliases for the two fields operators reported missing: `内容类型` is `post_type`, and `内容摘要` / `文章摘要` / `摘要` / `故事概要` are article-sourced `story_summary` fields. If a post has these explicit fields, do not leave the Feishu `帖子类型` / `故事概要` cells empty.
+- Real project status recomputation must use the loaded config. `ready_for_output` is only valid after current `quality_audit` passes, so rows missing `post_type` or a valid article-sourced `story_summary` stay incomplete and keep the corresponding补抓/summary work visible.
 - A historical `enrichment_tasks.status=done` only means that stage was satisfied at that time. If the current row later lacks `post_type`, engagement, article material, or a valid article-based Chinese summary, the normal account job must reopen the non-running task as `pending` and continue the pipeline.
 - `enrichment_worker.py --stages summary` does not generate summaries. It only verifies whether a valid Codex-written Chinese summary has already been applied; otherwise it reports `run_status=needs_codex_summary` with exit code `2` instead of a generic worker failure.
 - `run_account_job.py` automatically handles the normal summary-only path: export scoped requests, run `generate_article_summaries.py`, apply the generated Chinese summaries, recompute completion, then sync. If it still reports `needs_codex_summary` or `summary_auto_apply_failed`, use its scoped `next_commands` first. Do not run an unscoped all-database summary export for an account-specific job.
@@ -221,6 +222,7 @@ Target business sheet: `FB竞品帖子链接`.
 Configured source/output documents:
 
 - Source/read-only account workbook: `source_spreadsheet_url`
+- Account source range: `feishu.account_source_range`, default `A1:Z200`; keep it wide enough so account name, competitor account, internal account, generic account, and future target columns are all read.
 - Output/write workbook: `output_spreadsheet_url`
 - Current output sheet id: `44013b`
 - Current output columns are the Feishu A-K headers from `feishu.field_schema.output_headers`: `账号`, `账户类型`, `帖子链接`, `帖子类型`, `发帖时间`, `文章链接`, `故事概要`, `互动数据（点赞量）`, `浏览量`, `是否采用`, `对应站内链接`.

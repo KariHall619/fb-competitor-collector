@@ -22,6 +22,7 @@ feishu:
   output_spreadsheet_token: ""
   output_spreadsheet_url: ""
   spreadsheet_url: ""
+  account_source_range: "A1:Z200"
   sheets:
     accounts: "账号配置"
     account_detail: ""
