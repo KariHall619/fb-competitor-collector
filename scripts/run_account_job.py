@@ -724,6 +724,13 @@ def append_quality_threshold_args(command: list[Any], args: argparse.Namespace) 
 
 def append_resume_pass_budget(command: list[Any], args: argparse.Namespace) -> None:
     command.extend(["--max-resume-passes", str(auto_resume_pass_limit(getattr(args, "max_resume_passes", 0)))])
+    command.extend(["--enrichment-limit", str(max(1, _int_metric(getattr(args, "enrichment_limit", 50)) or 50))])
+    command.extend(
+        [
+            "--resume-stale-running-seconds",
+            str(max(0, _int_metric(getattr(args, "resume_stale_running_seconds", DEFAULT_RESUME_STALE_RUNNING_SECONDS)))),
+        ]
+    )
 
 
 def full_capture_command(

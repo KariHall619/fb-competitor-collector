@@ -5616,6 +5616,8 @@ def assert_run_account_job_next_commands_force_recover_running() -> None:
             "max_snapshots": 20,
             "min_snapshots": 6,
             "max_resume_passes": 2,
+            "enrichment_limit": 17,
+            "resume_stale_running_seconds": 90,
             "expected_post_count": 0,
             "expected_labels": "",
         },
@@ -5631,6 +5633,8 @@ def assert_run_account_job_next_commands_force_recover_running() -> None:
     assert "--resume-only" in pending["command"]
     assert "--force-recover-running" in pending["command"]
     assert "--max-resume-passes 2" in pending["command"]
+    assert "--enrichment-limit 17" in pending["command"]
+    assert "--resume-stale-running-seconds 90" in pending["command"]
 
 
 def assert_run_account_job_recovery_commands_preserve_resume_budget() -> None:
@@ -5648,6 +5652,8 @@ def assert_run_account_job_recovery_commands_preserve_resume_budget() -> None:
         "max_snapshots": 32,
         "min_snapshots": 6,
         "max_resume_passes": 4,
+        "enrichment_limit": 25,
+        "resume_stale_running_seconds": 120,
         "expected_post_count": 13,
         "expected_labels": "1h,2h",
         "require_coverage_complete": False,
@@ -5670,6 +5676,8 @@ def assert_run_account_job_recovery_commands_preserve_resume_budget() -> None:
     )
     coverage_parts = shlex.split(coverage_commands[0]["command"])
     assert coverage_parts[coverage_parts.index("--max-resume-passes") + 1] == "4"
+    assert coverage_parts[coverage_parts.index("--enrichment-limit") + 1] == "25"
+    assert coverage_parts[coverage_parts.index("--resume-stale-running-seconds") + 1] == "120"
     assert coverage_parts[coverage_parts.index("--expected-post-count") + 1] == "13"
     assert coverage_parts[coverage_parts.index("--expected-labels") + 1] == "1h,2h"
     assert coverage_parts[coverage_parts.index("--max-snapshots") + 1] == "44"
@@ -5685,6 +5693,8 @@ def assert_run_account_job_recovery_commands_preserve_resume_budget() -> None:
     assert sync_commands[1]["reason"] == "sync_failed"
     sync_parts = shlex.split(sync_commands[1]["command"])
     assert sync_parts[sync_parts.index("--max-resume-passes") + 1] == "4"
+    assert sync_parts[sync_parts.index("--enrichment-limit") + 1] == "25"
+    assert sync_parts[sync_parts.index("--resume-stale-running-seconds") + 1] == "120"
     assert "--resume-only" in sync_parts
     assert "--force-recover-running" in sync_parts
 
@@ -5699,6 +5709,8 @@ def assert_run_account_job_recovery_commands_preserve_resume_budget() -> None:
     assert blocked_auth_commands[0]["reason"] == "blocked_auth"
     blocked_auth_parts = shlex.split(blocked_auth_commands[0]["command"])
     assert blocked_auth_parts[blocked_auth_parts.index("--max-resume-passes") + 1] == "4"
+    assert blocked_auth_parts[blocked_auth_parts.index("--enrichment-limit") + 1] == "25"
+    assert blocked_auth_parts[blocked_auth_parts.index("--resume-stale-running-seconds") + 1] == "120"
     assert "--resume-only" in blocked_auth_parts
 
     human_commands = run_account_job.next_commands_for_status(
@@ -5711,6 +5723,8 @@ def assert_run_account_job_recovery_commands_preserve_resume_budget() -> None:
     assert human_commands[0]["reason"] == "human_intervention_required"
     human_parts = shlex.split(human_commands[0]["command"])
     assert human_parts[human_parts.index("--max-resume-passes") + 1] == "4"
+    assert human_parts[human_parts.index("--enrichment-limit") + 1] == "25"
+    assert human_parts[human_parts.index("--resume-stale-running-seconds") + 1] == "120"
     assert "--resume-only" in human_parts
 
 
