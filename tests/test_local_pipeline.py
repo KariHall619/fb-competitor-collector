@@ -4368,11 +4368,19 @@ def assert_enrichment_worker_lead_stage_requires_external_landing_url() -> None:
     }
     invalid_post_type = {"post_type": "文本"}
     valid_post_type = {"post_type": "图文"}
+    strict_audit_config = {
+        "quality_audit": {
+            "low_like_threshold": 10,
+            "required_post_types": ["视频"],
+        }
+    }
     assert enrichment_worker.detail_stage_satisfied(low_quality_engagement, "engagement") is False
     assert enrichment_worker.detail_stage_satisfied(missing_engagement, "engagement") is False
     assert enrichment_worker.detail_stage_satisfied(complete_engagement, "engagement") is True
+    assert enrichment_worker.detail_stage_satisfied(complete_engagement, "engagement", strict_audit_config) is False
     assert enrichment_worker.detail_stage_satisfied(invalid_post_type, "post_type") is False
     assert enrichment_worker.detail_stage_satisfied(valid_post_type, "post_type") is True
+    assert enrichment_worker.detail_stage_satisfied(valid_post_type, "post_type", strict_audit_config) is False
 
     internal_lead = {
         "lead_link_status": "qualified",

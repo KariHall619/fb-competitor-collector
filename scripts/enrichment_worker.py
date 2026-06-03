@@ -198,16 +198,16 @@ def run_summary_task(post: dict[str, Any]) -> dict[str, Any]:
     return next_post
 
 
-def detail_stage_satisfied(post: dict[str, Any], stage: str) -> bool:
+def detail_stage_satisfied(post: dict[str, Any], stage: str, config: dict[str, Any] | None = None) -> bool:
     if stage == "detail_time":
         return has_confirmed_time(post)
     if stage == "lead_link":
         return has_qualified_comment_lead_link(post)
     if stage == "engagement":
-        reasons = set(audit_post_fields(post).get("field_audit_reasons", []))
+        reasons = set(audit_post_fields(post, config).get("field_audit_reasons", []))
         return not reasons.intersection({"likes", "comments", "shares", "likes_low"})
     if stage == "post_type":
-        return "post_type" not in set(audit_post_fields(post).get("field_audit_reasons", []))
+        return "post_type" not in set(audit_post_fields(post, config).get("field_audit_reasons", []))
     return True
 
 
@@ -354,7 +354,7 @@ def main() -> int:
                 post = unit["post"]
                 stored = row_for_post(conn, post) or post
                 for task in unit["tasks"]:
-                    if batch_succeeded and detail_stage_satisfied(stored, task["stage"]):
+                    if batch_succeeded and detail_stage_satisfied(stored, task["stage"], config):
                         mark_task_done(conn, task["id"], duration_ms=duration_ms)
                         completed += 1
                     elif batch_retry_later:
