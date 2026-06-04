@@ -242,6 +242,8 @@ def prepare_record(
     comment_landing_url = comment_lead_landing_url(lead_url_raw, lead_link_source)
     landing_url = comment_landing_url or clean_article_url(raw.get("landing_url") or raw.get("article_url"))
     article_url = landing_url
+    if not lead_url_raw and lead_link_source == "post_cta" and is_external_landing_url(landing_url):
+        lead_url_raw = landing_url
     if comment_landing_url:
         lead_link_status = "qualified"
     elif lead_link_status != "qualified" and lead_url_raw and lead_link_source in QUALIFIED_LEAD_SOURCES and is_external_landing_url(landing_url):

@@ -625,6 +625,116 @@ if (candidate.selected_post_link_kind !== 'post' || candidate.media_link_count !
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_homepage_dom_extractor_reads_common_post_block_metrics_and_lead() -> None:
+    script = """
+const { browserExpression } = require('./scripts/fb_dom_extractors');
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() { return this.innerText; }
+  get href() {
+    if (!this.attrs.href) return '';
+    return new URL(this.attrs.href, global.location.href).href;
+  }
+  getAttribute(name) { return this.attrs[name] || ''; }
+  closest(selector) {
+    let cursor = this;
+    while (cursor) {
+      if (selector === '[role="article"], article' && (cursor.tagName === 'ARTICLE' || cursor.attrs.role === 'article')) return cursor;
+      cursor = cursor.parentElement;
+    }
+    return null;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a[href]') return node.tagName === 'A' && !!node.attrs.href;
+      if (current === 'a') return node.tagName === 'A';
+      if (current === 'span') return node.tagName === 'SPAN';
+      if (current === 'div') return node.tagName === 'DIV';
+      if (current === '[aria-label]') return !!node.attrs['aria-label'];
+      if (current === '[title]') return !!node.attrs.title;
+      if (current === 'h1') return node.tagName === 'H1';
+      if (current === 'h2') return node.tagName === 'H2';
+      if (current === 'article') return node.tagName === 'ARTICLE';
+      if (current === 'div[role="article"]') return node.tagName === 'DIV' && node.attrs.role === 'article';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+const story = new Node('div', { role: 'article' }, [
+  new Node('a', {
+    href: '/LessonsTaughtByLifepage/posts/pfbid0ZP6',
+    'aria-label': 'Thursday, June 4, 2026 at 6:22 PM'
+  }, [], '2h'),
+  new Node('p', {}, [], 'My father-in-law, a brigadier general, had the military police escort me off the base.'),
+  new Node('img', { src: 'https://image.example/story.jpg' }),
+  new Node('div', {}, [
+    new Node('span', {}, [], '46'),
+    new Node('span', {}, [], '152 comments'),
+    new Node('span', {}, [], '3 shares')
+  ]),
+  new Node('div', {}, [], 'View more comments'),
+  new Node('div', {}, [
+    new Node('span', {}, [], 'Author'),
+    new Node('strong', {}, [], 'Lessons Taught By Life'),
+    new Node('span', {}, [], 'Part 3 - ENDING:'),
+    new Node('a', { href: 'https://kaylestore.net/my-father-in-law-a-brigadier-general/' }, [], 'https://kaylestore.net/my-father-in-law-a-brigadier.../')
+  ])
+]);
+const body = new Node('body', {}, [
+  new Node('h1', {}, [], 'Lessons Taught By Life'),
+  story
+]);
+global.document = {
+  title: 'Lessons Taught By Life | Facebook',
+  body,
+  querySelectorAll: (selector) => body.querySelectorAll(selector)
+};
+global.location = new URL('https://www.facebook.com/LessonsTaughtByLifepage');
+const result = eval(browserExpression(1200));
+if (result.real_post_count !== 1) {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(1);
+}
+const candidate = result.candidates[0];
+if (candidate.likes !== 46 || candidate.comments !== 152 || candidate.shares !== 3) {
+  console.error(JSON.stringify(candidate, null, 2));
+  process.exit(2);
+}
+if (candidate.lead_link_status !== 'qualified' || candidate.lead_link_source !== 'comment_reply') {
+  console.error(JSON.stringify(candidate, null, 2));
+  process.exit(3);
+}
+if (!candidate.lead_url_raw.includes('kaylestore.net') || candidate.landing_url !== candidate.lead_url_raw) {
+  console.error(JSON.stringify(candidate, null, 2));
+  process.exit(4);
+}
+if (candidate.posted_at !== '2026年6月4日 18:22') {
+  console.error(JSON.stringify(candidate, null, 2));
+  process.exit(5);
+}
+"""
+    result = run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_dom_extractor_keeps_path_photo_without_parent_post() -> None:
     script = """
 const { browserExpression } = require('./scripts/fb_dom_extractors');
@@ -13360,6 +13470,7 @@ def main() -> int:
     assert_dom_extractor_excludes_profile_shell_with_external_link()
     assert_dom_extractor_blocks_visitor_preview()
     assert_dom_extractor_prefers_parent_post_over_photo_link()
+    assert_homepage_dom_extractor_reads_common_post_block_metrics_and_lead()
     assert_dom_extractor_keeps_path_photo_without_parent_post()
     assert_detail_engagement_is_anchored_to_main_post()
     assert_detail_enrichment_ignores_page_shell_ad_links()

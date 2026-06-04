@@ -74,6 +74,18 @@ function browserExpression(maxText = 1200) {
         return false;
       }
     };
+    const parseCount = (value) => {
+      const text = clean(value).replace(/,/g, '');
+      const match = text.match(/([\\d.]+)\\s*([kKmMwW万]?)/);
+      if (!match) return null;
+      let number = Number(match[1]);
+      if (!Number.isFinite(number)) return null;
+      const unit = String(match[2] || '').toLowerCase();
+      if (unit === 'k') number *= 1000;
+      if (unit === 'm') number *= 1000000;
+      if (unit === 'w' || unit === '万') number *= 10000;
+      return Math.round(number);
+    };
     const relativeTimeText = (text) => /^(just now|yesterday|\\d+\\s*(m|min|h|hr|d|day|w|wk)|刚刚|\\d+\\s*分钟|\\d+\\s*小时|昨天|\\d+\\s*天|\\d+\\s*周)$/i.test(clean(text));
     const absoluteTimeText = (text) => /^(20\\d\\d[年/-]\\d{1,2}[月/-]\\d{1,2}日?(?:\\s+\\d{1,2}:\\d{2})?|\\d{1,2}月\\d{1,2}日(?:\\s+\\d{1,2}:\\d{2})?)$/i.test(clean(text));
     const timeText = (text) => relativeTimeText(text) || absoluteTimeText(text);
@@ -101,12 +113,123 @@ function browserExpression(maxText = 1200) {
         .join(' ')
     );
     const profileShellText = (text) => /\\d+\\s*万次赞\\s*[•·]\\s*\\d+\\s*万位粉丝|followers?\\s*[•·]\\s*\\d+|个人资料\\s+公共主页|Intro\\s+Photos\\s+Videos/i.test(clean(text));
+    const engagementMetrics = (node) => {
+      const result = {
+        raw: '',
+        views: null,
+        likes: null,
+        reactions: null,
+        comments: null,
+        shares: null,
+        source: 'homepage_post_block',
+      };
+      const countToken = '([\\\\d.,]+\\\\s*(?:K|M|万|w)?)';
+      const setMetric = (key, value, rawText) => {
+        const parsed = parseCount(value);
+        if (parsed === null || parsed === undefined) return;
+        if (result[key] === null || result[key] === undefined) result[key] = parsed;
+        if (key === 'reactions' && (result.likes === null || result.likes === undefined)) result.likes = parsed;
+        if (rawText) result.raw = result.raw || clean(rawText);
+      };
+      const readMetricText = (text) => {
+        const item = clean(text);
+        if (!item || item.length > 220) return;
+        const patterns = [
+          ['views', new RegExp(countToken + '\\\\s*(?:views?|plays?|次播放|播放|浏览)', 'i')],
+          ['comments', new RegExp(countToken + '\\\\s*(?:comments?|评论)', 'i')],
+          ['shares', new RegExp(countToken + '\\\\s*(?:shares?|分享)', 'i')],
+          ['reactions', new RegExp('(?:All reactions|reactions?|likes?|赞)[^0-9]{0,20}' + countToken, 'i')],
+          ['reactions', new RegExp(countToken + '\\\\s*(?:reactions?|likes?|赞)', 'i')],
+        ];
+        for (const [key, pattern] of patterns) {
+          const match = item.match(pattern);
+          if (match) setMetric(key, match[1], item);
+        }
+      };
+      for (const metricNode of [...node.querySelectorAll('a, span, div, [aria-label], [title]')]) {
+        const ownerArticle = metricNode.closest?.('[role="article"], article');
+        if (ownerArticle && ownerArticle !== node) continue;
+        for (const text of [
+          metricNode.getAttribute?.('aria-label') || '',
+          metricNode.getAttribute?.('title') || '',
+          metricNode.innerText || metricNode.textContent || '',
+        ]) {
+          readMetricText(text);
+        }
+      }
+      const lines = textLines(fullText(node));
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index];
+        readMetricText(line);
+        const slashCluster = line.match(new RegExp('^' + countToken + '\\\\s*[/|]\\\\s*' + countToken + '\\\\s*[/|]\\\\s*' + countToken + '$', 'i'));
+        if (slashCluster) {
+          setMetric('reactions', slashCluster[1], line);
+          setMetric('comments', slashCluster[2], line);
+          setMetric('shares', slashCluster[3], line);
+        }
+        const triple = lines.slice(index, index + 3);
+        const nextText = lines.slice(index + 3, index + 8).join(' ');
+        if (
+          triple.length === 3
+          && new RegExp('^' + countToken + '$', 'i').test(triple[0])
+          && new RegExp('^' + countToken + '\\\\s*(?:comments?|评论)$', 'i').test(triple[1])
+          && new RegExp('^' + countToken + '\\\\s*(?:shares?|分享)$', 'i').test(triple[2])
+        ) {
+          setMetric('reactions', triple[0], triple.join('；'));
+          readMetricText(triple[1]);
+          readMetricText(triple[2]);
+        }
+        if (
+          triple.length === 3
+          && triple.every((item) => new RegExp('^' + countToken + '$', 'i').test(item))
+          && /\\bLike\\b|\\bComment\\b|\\bShare\\b|赞|评论|分享/i.test(nextText)
+        ) {
+          setMetric('reactions', triple[0], triple.join('；'));
+          setMetric('comments', triple[1], triple.join('；'));
+          setMetric('shares', triple[2], triple.join('；'));
+        }
+      }
+      const parts = [];
+      if (result.views !== null && result.views !== undefined) parts.push('浏览量：' + result.views);
+      if (result.likes !== null && result.likes !== undefined) parts.push('点赞量：' + result.likes);
+      if (result.comments !== null && result.comments !== undefined) parts.push('评论数：' + result.comments);
+      if (result.shares !== null && result.shares !== undefined) parts.push('分享数：' + result.shares);
+      result.raw = parts.join('；') || result.raw;
+      return result;
+    };
     const engagementText = (text) => {
       const lines = String(text || '').split('\\n').map(clean).filter(Boolean);
       const matches = lines.filter((line) => /\\b\\d+(?:\\.\\d+)?\\s*(?:K|M|万)?\\s*(?:views|plays|likes|comments|shares)\\b|\\d+(?:\\.\\d+)?\\s*万?\\s*(?:次播放|赞|评论|分享)|All reactions/i.test(line));
       return [...new Set(matches)].slice(0, 12).join('；');
     };
     const textLines = (text) => String(text || '').split('\\n').map(clean).filter(Boolean);
+    const selectHomepageLeadLink = (node, externalLinks) => {
+      if (!externalLinks.length) return null;
+      const authorNames = pageNames.map((name) => name.toLowerCase());
+      const scored = externalLinks.map((link, index) => {
+        let cursor = link.element;
+        let score = 0;
+        let blockText = '';
+        for (let depth = 0; cursor && depth < 6; depth += 1) {
+          const text = clean(cursor.innerText || cursor.textContent || '');
+          if (text && (!blockText || text.length < blockText.length)) blockText = text;
+          if (/\\bAuthor\\b|作者/i.test(text)) score += 30;
+          if (/\\bReply\\b|回复|\\bLike\\b/i.test(text)) score += 10;
+          if (authorNames.some((name) => name && text.toLowerCase().includes(name))) score += 20;
+          if (cursor === node) break;
+          cursor = cursor.parentElement;
+        }
+        if (index === 0) score += 3;
+        return { link, score, blockText };
+      }).sort((a, b) => b.score - a.score);
+      const selected = scored[0];
+      if (!selected) return null;
+      return {
+        href: selected.link.href,
+        source: selected.score >= 30 ? 'comment_reply' : 'post_cta',
+        excerpt: selected.blockText.slice(0, 300),
+      };
+    };
     const nearestPostBlockForTimeLink = (timeLink, article) => {
       let node = timeLink?.element || null;
       let best = null;
@@ -144,6 +267,7 @@ function browserExpression(maxText = 1200) {
       const postLinks = anchors.filter((a) => postHref(a.href));
       const selectedPostLink = meta.postLink || bestPostLink(postLinks);
       const externalLinks = anchors.filter((a) => externalHref(a.href));
+      const leadLink = selectHomepageLeadLink(node, externalLinks);
       const timeLinks = anchors.filter((a) => timeText(a.text) || timeText(a.aria));
       const rawSelectedTimeLink = meta.timeLink || timeLinks[0] || {};
       const selectedTimeLink = {
@@ -167,18 +291,30 @@ function browserExpression(maxText = 1200) {
       const timeTextValue = selectedTimeLink.text || selectedTimeLink.aria || '';
       const storyText = meta.splitFromTime ? storyTextNearTime(text, timeTextValue) : compactStoryText(text);
       if (profileShellText(storyText)) return null;
+      const metrics = engagementMetrics(node);
       return {
         post_url: selectedPostLink?.href || '',
         selected_post_link_kind: postHrefKind(selectedPostLink?.href || ''),
         media_link_count: postLinks.filter((item) => postHrefKind(item.href) === 'media').length,
-        article_url: externalLinks[0]?.href || '',
+        article_url: leadLink?.href || externalLinks[0]?.href || '',
+        lead_url_raw: leadLink?.href || '',
+        landing_url: leadLink?.href || externalLinks[0]?.href || '',
+        lead_link_status: leadLink?.href ? 'qualified' : '',
+        lead_link_source: leadLink?.source || '',
+        comment_lead_excerpt: leadLink?.excerpt || '',
         story_summary: (storyText || text).slice(0, 500),
         post_time_text: timeTextValue,
         posted_at_raw: exactTime.posted_at_raw,
         posted_at: exactTime.posted_at,
         time_source: exactTime.time_source,
         time_confirmed: Boolean(exactTime.posted_at),
-        engagement_data: engagementText(text),
+        engagement_data: metrics.raw || engagementText(text),
+        engagement_source: metrics.raw ? metrics.source : '',
+        reactions: metrics.reactions,
+        likes: metrics.likes,
+        comments: metrics.comments,
+        shares: metrics.shares,
+        views: metrics.views,
         raw_text: text.slice(0, ${Number(maxText) || 1200}),
         source_surface: sourceSurface,
         source_split: meta.splitFromTime ? 'time_anchor' : 'article',

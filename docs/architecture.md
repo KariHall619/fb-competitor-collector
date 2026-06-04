@@ -41,13 +41,14 @@ For each account:
 
 1. Start at the account homepage top.
 2. Discover all in-window candidates using relative labels only as coverage/window clues.
-3. Keep valid Facebook content candidates even if fields are incomplete.
-4. Open detail/comment surfaces for exact time, lead link, engagement, post type, and article material.
-5. Store candidates and enrichment tasks in SQLite.
-6. Generate/apply Chinese story summaries from article material.
-7. Run strict quality gate.
-8. Sync only complete rows to the formal Feishu table.
-9. Report candidate count, final usable count, completion blockers, and special failures.
+3. Treat a normal homepage post block as the primary extraction unit: collect exact time from the time anchor, visible engagement metrics, and account-owned homepage lead links before opening detail pages.
+4. Keep valid Facebook content candidates even if fields are incomplete.
+5. Open detail/comment surfaces only for missing or special-case exact time, lead link, engagement, post type, and article material.
+6. Store candidates and enrichment tasks in SQLite.
+7. Generate/apply Chinese story summaries from article material.
+8. Run strict quality gate.
+9. Sync only complete rows to the formal Feishu table.
+10. Report candidate count, final usable count, completion blockers, and special failures.
 
 For multi-account jobs, repeat the full single-account loop account by account through `run_accounts_job.py`. Do not hand-stitch manual loops in chat.
 

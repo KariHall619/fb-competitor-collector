@@ -379,10 +379,12 @@ def comment_lead_landing_url(lead_url_raw: Any, lead_link_source: Any) -> str:
 
 def has_qualified_comment_lead_link(post: dict[str, Any]) -> bool:
     landing_url = post.get("landing_url") or post.get("article_url")
+    source = post.get("lead_link_source")
+    if source in COMMENT_LEAD_SOURCES and not post.get("lead_url_raw"):
+        return False
     return (
         post.get("lead_link_status") == "qualified"
-        and post.get("lead_link_source") in QUALIFIED_LEAD_SOURCES
-        and bool(post.get("lead_url_raw"))
+        and source in QUALIFIED_LEAD_SOURCES
         and is_external_landing_url(landing_url)
     )
 
@@ -568,9 +570,13 @@ def normalize_post(raw: dict[str, Any], defaults: dict[str, Any] | None = None) 
     article_url = clean_article_url(first_value(raw, ARTICLE_URL_KEYS))
     lead_landing_url = comment_lead_landing_url(lead_url_raw, lead_link_source)
     landing_url = lead_landing_url or clean_article_url(raw.get("landing_url") or article_url)
+    if not lead_url_raw and lead_link_source == "post_cta" and is_external_landing_url(landing_url):
+        lead_url_raw = landing_url
     if lead_landing_url:
         article_url = lead_landing_url
     if lead_link_status != "qualified" and lead_landing_url:
+        lead_link_status = "qualified"
+    elif lead_link_status != "qualified" and lead_url_raw and lead_link_source in QUALIFIED_LEAD_SOURCES and is_external_landing_url(landing_url):
         lead_link_status = "qualified"
     story_summary = first_value(raw, SUMMARY_KEYS)
     relative_time_text = raw.get("relative_time_text") or raw.get("post_time_text") or ""
