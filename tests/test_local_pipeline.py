@@ -395,6 +395,197 @@ if (!first || first.story_summary.includes('A bride discovers') || first.story_s
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_dom_extractor_prefers_article_main_post_when_comments_have_times() -> None:
+    script = """
+const { browserExpression } = require('./scripts/fb_dom_extractors');
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() { return this.innerText; }
+  get href() {
+    if (!this.attrs.href) return '';
+    return new URL(this.attrs.href, global.location.href).href;
+  }
+  getAttribute(name) { return this.attrs[name] || ''; }
+  closest(selector) {
+    let cursor = this;
+    while (cursor) {
+      if (selector === '[role="article"], article' && (cursor.tagName === 'ARTICLE' || cursor.attrs.role === 'article')) return cursor;
+      cursor = cursor.parentElement;
+    }
+    return null;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a[href]') return node.tagName === 'A' && !!node.attrs.href;
+      if (current === 'a') return node.tagName === 'A';
+      if (current === 'span') return node.tagName === 'SPAN';
+      if (current === 'div') return node.tagName === 'DIV';
+      if (current === '[aria-label]') return !!node.attrs['aria-label'];
+      if (current === '[title]') return !!node.attrs.title;
+      if (current === 'h1') return node.tagName === 'H1';
+      if (current === 'h2') return node.tagName === 'H2';
+      if (current === 'article') return node.tagName === 'ARTICLE';
+      if (current === 'div[role="article"]') return node.tagName === 'DIV' && node.attrs.role === 'article';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+const article = new Node('div', { role: 'article' }, [
+  new Node('a', { href: '/healingjourneys.mani/posts/pfbid-main' }, [], '5h'),
+  new Node('p', {}, [], 'A woman is abandoned by her family but turns the situation around before nightfall.'),
+  new Node('span', {}, [], '41'),
+  new Node('span', {}, [], '12 comments'),
+  new Node('span', {}, [], '5 shares'),
+  new Node('div', {}, [
+    new Node('span', {}, [], 'Author'),
+    new Node('strong', {}, [], 'Healing Journeys'),
+    new Node('a', { href: '/healingjourneys.mani/posts/pfbid-main?comment_id=comment-1' }, [], '1h'),
+    new Node('span', {}, [], 'Part 2 is here'),
+    new Node('a', { href: 'https://kaylestore.net/healing-journey-story/' }, [], 'Read Part 2')
+  ])
+]);
+const body = new Node('body', {}, [
+  new Node('h1', {}, [], 'Healing Journeys'),
+  article
+]);
+global.document = {
+  title: 'Healing Journeys | Facebook',
+  body,
+  querySelectorAll: (selector) => body.querySelectorAll(selector)
+};
+global.location = new URL('https://www.facebook.com/healingjourneys.mani');
+const result = eval(browserExpression(1200));
+if (result.real_post_count !== 1) {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(1);
+}
+const candidate = result.candidates[0];
+if (candidate.source_split !== 'article' || candidate.post_time_text !== '5h') {
+  console.error(JSON.stringify(candidate, null, 2));
+  process.exit(2);
+}
+if (!candidate.post_url.includes('/posts/pfbid-main') || candidate.post_url.includes('comment_id=')) {
+  console.error(JSON.stringify(candidate, null, 2));
+  process.exit(3);
+}
+if (candidate.lead_link_source !== 'comment_reply' || !candidate.lead_url_raw.includes('kaylestore.net')) {
+  console.error(JSON.stringify(candidate, null, 2));
+  process.exit(4);
+}
+"""
+    result = run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def assert_dom_extractor_strips_comment_id_from_candidate_post_url() -> None:
+    script = """
+const { browserExpression } = require('./scripts/fb_dom_extractors');
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() { return this.innerText; }
+  get href() {
+    if (!this.attrs.href) return '';
+    return new URL(this.attrs.href, global.location.href).href;
+  }
+  getAttribute(name) { return this.attrs[name] || ''; }
+  closest(selector) {
+    let cursor = this;
+    while (cursor) {
+      if (selector === '[role="article"], article' && (cursor.tagName === 'ARTICLE' || cursor.attrs.role === 'article')) return cursor;
+      cursor = cursor.parentElement;
+    }
+    return null;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a[href]') return node.tagName === 'A' && !!node.attrs.href;
+      if (current === 'a') return node.tagName === 'A';
+      if (current === 'span') return node.tagName === 'SPAN';
+      if (current === 'div') return node.tagName === 'DIV';
+      if (current === '[aria-label]') return !!node.attrs['aria-label'];
+      if (current === '[title]') return !!node.attrs.title;
+      if (current === 'h1') return node.tagName === 'H1';
+      if (current === 'h2') return node.tagName === 'H2';
+      if (current === 'article') return node.tagName === 'ARTICLE';
+      if (current === 'div[role="article"]') return node.tagName === 'DIV' && node.attrs.role === 'article';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+const article = new Node('div', { role: 'article' }, [
+  new Node('a', { href: '/healingjourneys.mani/posts/pfbid-main?comment_id=1483583460190913&__cft__[0]=abc' }, [], '2h'),
+  new Node('span', {}, [], 'Author'),
+  new Node('p', {}, [], 'A late afternoon highway encounter turns into a family survival story.'),
+  new Node('span', {}, [], 'LikeReply'),
+  new Node('span', {}, [], '4'),
+  new Node('span', {}, [], '2 comments'),
+  new Node('span', {}, [], '1 share')
+]);
+const body = new Node('body', {}, [
+  new Node('h1', {}, [], 'Healing Journeys'),
+  article
+]);
+global.document = {
+  title: 'Healing Journeys | Facebook',
+  body,
+  querySelectorAll: (selector) => body.querySelectorAll(selector)
+};
+global.location = new URL('https://www.facebook.com/healingjourneys.mani');
+const result = eval(browserExpression(1000));
+if (result.real_post_count !== 1) {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(1);
+}
+const candidate = result.candidates[0];
+if (candidate.post_url.includes('comment_id=') || candidate.post_url.includes('__cft__')) {
+  console.error(JSON.stringify(candidate, null, 2));
+  process.exit(2);
+}
+if (!candidate.raw_fb_url.includes('comment_id=')) {
+  console.error(JSON.stringify(candidate, null, 2));
+  process.exit(3);
+}
+"""
+    result = run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_dom_extractor_excludes_profile_shell_with_external_link() -> None:
     script = """
 const { browserExpression } = require('./scripts/fb_dom_extractors');
@@ -13167,6 +13358,52 @@ def assert_run_account_job_promotes_human_intervention_status() -> None:
     assert worker_status == "human_intervention_required"
 
 
+def assert_run_account_job_next_commands_preserve_posted_window() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/windowed",
+            "account_name": "Windowed Page",
+            "account_type": "competitor",
+            "sync": True,
+            "sync_sheet": "tAmT37",
+            "sync_audit": False,
+            "dry_run": False,
+            "strict_ready_only": False,
+            "resume_only": False,
+            "max_snapshots": 20,
+            "min_snapshots": 6,
+            "max_resume_passes": 2,
+            "enrichment_limit": 50,
+            "resume_stale_running_seconds": 1800,
+            "expected_post_count": 0,
+            "expected_labels": "",
+            "posted_after": "2026-06-04 12:00",
+            "posted_before": "2026-06-05 00:00",
+        },
+    )()
+    commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260604"],
+        run_status="coverage_incomplete",
+        completion={"post_count": 1, "has_auto_enrichment_work": True, "auto_open_task_count": 1},
+        discover_coverage={"source": "discover", "complete": False, "incomplete": True, "reasons": ["coverage_incomplete"]},
+    )
+    for item in commands:
+        argv = shlex.split(item["command"])
+        assert "--posted-after" in argv, item["command"]
+        assert argv[argv.index("--posted-after") + 1] == "2026-06-04 12:00"
+        assert "--posted-before" in argv, item["command"]
+        assert argv[argv.index("--posted-before") + 1] == "2026-06-05 00:00"
+        assert "--sync-sheet" in argv
+        assert argv[argv.index("--sync-sheet") + 1] == "tAmT37"
+
+
 def assert_enrichment_worker_reports_human_intervention_batch(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import enrichment_worker
@@ -13211,7 +13448,7 @@ exit 1
         enrichment_worker.subprocess.run = fake_run
         result = enrichment_worker.run_detail_batch(
             "config/settings.yaml",
-            {"performance": {"detail_timeout_seconds": 1}},
+            {"performance": {"detail_timeout_seconds": 5}},
             [{"post_url": "https://facebook.com/example/posts/one"}],
             {"detail_time"},
             "260602",
@@ -13600,6 +13837,8 @@ def main() -> int:
     assert_mobile_dom_extractor_can_see_story_links()
     assert_dom_extractor_does_not_treat_story_clock_as_post_time()
     assert_dom_extractor_splits_multi_post_container()
+    assert_dom_extractor_prefers_article_main_post_when_comments_have_times()
+    assert_dom_extractor_strips_comment_id_from_candidate_post_url()
     assert_dom_extractor_excludes_profile_shell_with_external_link()
     assert_dom_extractor_blocks_visitor_preview()
     assert_dom_extractor_prefers_parent_post_over_photo_link()
@@ -13819,6 +14058,7 @@ def main() -> int:
         assert_run_account_job_blocked_opencli_resume_command_matches_context()
         assert_run_account_job_promotes_discover_coverage_status()
         assert_run_account_job_promotes_human_intervention_status()
+        assert_run_account_job_next_commands_preserve_posted_window()
         assert_enrichment_worker_reports_human_intervention_batch(tmp_path)
 
     print("local pipeline acceptance passed")

@@ -64,6 +64,75 @@ function browserExpression(maxText = 1200) {
       if (realPost) return realPost;
       return links.find((item) => postHrefKind(item.href) === 'media') || links[0] || null;
     };
+    const cleanFacebookContentUrl = (href) => {
+      if (!href) return '';
+      try {
+        const parsed = new URL(href, location.href);
+        parsed.hash = '';
+        for (const key of [...parsed.searchParams.keys()]) {
+          if (key === 'comment_id' || key === 'reply_comment_id' || key === 'fbclid' || key.startsWith('utm_') || key.startsWith('__')) {
+            parsed.searchParams.delete(key);
+          }
+        }
+        parsed.hostname = parsed.hostname.replace(/^www\\./i, '');
+        return parsed.href;
+      } catch {
+        return String(href || '');
+      }
+    };
+    const postIdentityKey = (href) => {
+      if (!href) return '';
+      try {
+        const parsed = new URL(href, location.href);
+        parsed.hash = '';
+        const parts = parsed.pathname.split('/').filter(Boolean);
+        const storyFbid = parsed.searchParams.get('story_fbid');
+        const photoFbid = parsed.searchParams.get('fbid');
+        const id = parsed.searchParams.get('id');
+        if (storyFbid && id) return 'story:' + id + ':' + storyFbid;
+        if (parts.includes('posts')) {
+          const index = parts.indexOf('posts');
+          if (index > 0 && parts[index + 1]) {
+            if (index >= 2 && parts[index - 2] === 'groups') return 'group-post:' + parts[index - 1] + ':' + parts[index + 1];
+            return 'post:' + parts[index - 1] + ':' + parts[index + 1];
+          }
+        }
+        if (parts.includes('reel')) {
+          const index = parts.indexOf('reel');
+          if (parts[index + 1]) return 'reel:' + parts[index + 1];
+        }
+        if (parts.includes('videos')) {
+          const index = parts.indexOf('videos');
+          if (parts[index + 1]) return 'video:' + parts[index + 1];
+        }
+        if (parts.includes('video')) {
+          const index = parts.indexOf('video');
+          if (parts[index + 1]) return 'video:' + parts[index + 1];
+        }
+        if (parts.includes('watch') && parsed.searchParams.get('v')) return 'video:' + parsed.searchParams.get('v');
+        if ((parsed.pathname.includes('photo.php') || parts.join('/') === 'photo') && photoFbid) return 'photo:' + photoFbid;
+        if (parts.includes('photos')) {
+          const index = parts.indexOf('photos');
+          const tail = parts.slice(index + 1).filter((part) => !['a', 'p', 'photo'].includes(part));
+          const numericTail = tail.filter((part) => /^\\d{6,}$/.test(part));
+          const photoId = numericTail.at(-1) || tail.at(-1);
+          if (photoId) return 'photo:' + photoId;
+        }
+        if (parts.includes('share')) {
+          const index = parts.indexOf('share');
+          if (parts[index + 1]) return 'share:' + parts.slice(index + 1).join(':');
+        }
+        if (parsed.hostname === 'fb.watch' && parts[0]) return 'fb-watch:' + parts[0];
+        for (const key of [...parsed.searchParams.keys()]) {
+          if (key === 'comment_id' || key === 'reply_comment_id' || key === 'fbclid' || key.startsWith('utm_') || key.startsWith('__')) {
+            parsed.searchParams.delete(key);
+          }
+        }
+        return parsed.href;
+      } catch {
+        return String(href || '');
+      }
+    };
     const externalHref = (href) => {
       if (!href) return false;
       try {
@@ -283,8 +352,8 @@ function browserExpression(maxText = 1200) {
       const firstLine = text.split('\\n').map(clean).find(Boolean) || '';
       const ownerMatched = !pageNames.length || pageNames.some((name) => firstLine === name || firstLine.includes(name));
       const reactionSignals = /All reactions|Like\\s+Comment\\s+Share|Like\\nComment\\nShare|\\b\\d+(?:\\.\\d+)?\\s*(?:K|M|万)?\\s*(?:views|plays|likes|comments|shares)\\b|\\d+(?:\\.\\d+)?\\s*万?\\s*(?:次播放|赞|评论|分享)|views|plays|Full Story|完整动态|次播放|赞|评论|分享/i.test(text);
-      const commentSignals = /(^|\\n)Like\\nReply(\\n|$)|Write a comment|回复/i.test(text);
-      const looksLikeComment = commentSignals && !reactionSignals && externalLinks.length === 0;
+      const commentSignals = /(^|\\n)Like\\nReply(\\n|$)|\\bLikeReply\\b|Write a comment|回复/i.test(text);
+      const looksLikeComment = commentSignals && !reactionSignals && externalLinks.length === 0 && postLinks.length === 0;
       const looksLikePost = postLinks.length > 0 && (timeLinks.length > 0 || reactionSignals || externalLinks.length > 0) && !looksLikeComment;
       if (!looksLikePost) return null;
       if (pageNames.length && !ownerMatched && externalLinks.length === 0 && !reactionSignals) return null;
@@ -293,7 +362,8 @@ function browserExpression(maxText = 1200) {
       if (profileShellText(storyText)) return null;
       const metrics = engagementMetrics(node);
       return {
-        post_url: selectedPostLink?.href || '',
+        post_url: cleanFacebookContentUrl(selectedPostLink?.href || ''),
+        raw_fb_url: selectedPostLink?.href || '',
         selected_post_link_kind: postHrefKind(selectedPostLink?.href || ''),
         media_link_count: postLinks.filter((item) => postHrefKind(item.href) === 'media').length,
         article_url: leadLink?.href || externalLinks[0]?.href || '',
@@ -352,7 +422,7 @@ function browserExpression(maxText = 1200) {
     const candidateKeys = new Set();
     const pushCandidate = (candidate) => {
       if (!candidate?.post_url) return false;
-      const key = [candidate.post_url, candidate.post_time_text || '', candidate.posted_at || ''].join('|');
+      const key = postIdentityKey(candidate.post_url) || [candidate.post_url, candidate.post_time_text || '', candidate.posted_at || ''].join('|');
       if (candidateKeys.has(key)) return false;
       candidateKeys.add(key);
       candidates.push(candidate);
@@ -362,8 +432,19 @@ function browserExpression(maxText = 1200) {
       const anchors = nodeAnchors(article);
       const timeLinks = anchors.filter((a) => timeText(a.text) || timeText(a.aria));
       const postLinks = anchors.filter((a) => postHref(a.href));
+      const distinctRealPostKeys = new Set(
+        postLinks
+          .filter((item) => postHrefKind(item.href) === 'post')
+          .map((item) => postIdentityKey(item.href))
+          .filter(Boolean)
+      );
+      const preferArticleCandidate = distinctRealPostKeys.size <= 1;
+      let articlePushed = false;
       let splitCount = 0;
-      if (timeLinks.length > 1 || postLinks.length > 1) {
+      if (preferArticleCandidate) {
+        articlePushed = pushCandidate(candidateFromNode(article));
+      }
+      if (!articlePushed && (timeLinks.length > 1 || postLinks.length > 1)) {
         for (const timeLink of timeLinks) {
           const block = nearestPostBlockForTimeLink(timeLink, article);
           if (!block) continue;
@@ -377,7 +458,7 @@ function browserExpression(maxText = 1200) {
           }
         }
       }
-      if (!splitCount) {
+      if (!articlePushed && !splitCount) {
         pushCandidate(candidateFromNode(article));
       }
     }

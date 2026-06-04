@@ -825,6 +825,13 @@ def append_summary_scope_args(command: list[Any], args: argparse.Namespace, targ
         command.extend(["--account-type", args.account_type])
 
 
+def append_posted_window_args(command: list[Any], args: argparse.Namespace) -> None:
+    if getattr(args, "posted_after", ""):
+        command.extend(["--posted-after", args.posted_after])
+    if getattr(args, "posted_before", ""):
+        command.extend(["--posted-before", args.posted_before])
+
+
 def resume_command(base: list[Any], primary_date: str, *, force_recover_running: bool = False) -> list[Any]:
     command = list(base)
     if primary_date:
@@ -967,6 +974,7 @@ def next_commands_for_status(
         base.append("--dry-run")
     if getattr(args, "strict_ready_only", False):
         base.append("--strict-ready-only")
+    append_posted_window_args(base, args)
     append_quality_threshold_args(base, args)
     commands: list[dict[str, Any]] = []
     primary_date = target_dates[-1] if target_dates else ""
