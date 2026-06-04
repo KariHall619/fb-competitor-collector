@@ -187,6 +187,119 @@ function syntheticHoverTimeExpression(target, timeoutMs = 1200) {
   })()`;
 }
 
+function realMouseTooltipTimeExpression(timeoutMs = 1800) {
+  return `(async () => {
+    const helpers = ${browserExactTimeHelpersExpression()};
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const timeoutMs = Math.max(300, Number(${JSON.stringify(timeoutMs)}) || 1800);
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const tooltip = [...document.querySelectorAll('[role="tooltip"], div, span')]
+        .map((el) => helpers.clean(el.innerText || el.textContent || ""))
+        .find((text) => helpers.parseExactFacebookTime(text));
+      if (tooltip) {
+        return {
+          posted_at_raw: tooltip,
+          posted_at: helpers.parseExactFacebookTime(tooltip),
+          time_source: "real_mouse_tooltip",
+        };
+      }
+      await sleep(100);
+    }
+    return { posted_at_raw: "", posted_at: "", time_source: "" };
+  })()`;
+}
+
+function embeddedPublishTimeExpression(postUrl = "") {
+  return `(() => {
+    const postUrl = ${JSON.stringify(postUrl || "")};
+    const ids = [];
+    try {
+      const parsed = new URL(postUrl || location.href, location.href);
+      for (const part of parsed.pathname.split("/").filter(Boolean)) {
+        if (/^\\d{6,}$/.test(part) || /^pfbid/i.test(part)) ids.push(part);
+      }
+      for (const key of ["story_fbid", "fbid", "v"]) {
+        const value = parsed.searchParams.get(key);
+        if (value) ids.push(value);
+      }
+    } catch {
+      // Ignore malformed URLs; without a stable id this fallback should not run.
+    }
+    const uniqueIds = [...new Set(ids.filter(Boolean))];
+    if (!uniqueIds.length) return { posted_at_raw: "", posted_at: "", time_source: "" };
+    const html = document.documentElement?.innerHTML || "";
+    const unescapeLite = (value) => String(value || "")
+      .replace(/\\\\u0025/g, "%")
+      .replace(/\\\\u0026/g, "&")
+      .split("\\\\/").join("/");
+    const format = (seconds) => {
+      const date = new Date(Number(seconds) * 1000);
+      if (!Number.isFinite(date.getTime())) return "";
+      const parts = new Intl.DateTimeFormat("zh-CN", {
+        timeZone: "Asia/Shanghai",
+        year: "numeric",
+        month: "numeric",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }).formatToParts(date);
+      const value = (type) => parts.find((part) => part.type === type)?.value || "";
+      return value("year") + "年" + Number(value("month")) + "月" + Number(value("day")) + "日 " + value("hour").padStart(2, "0") + ":" + value("minute").padStart(2, "0");
+    };
+    const windows = [];
+    for (const id of uniqueIds) {
+      let index = html.indexOf(id);
+      while (index >= 0 && windows.length < 20) {
+        windows.push(html.slice(Math.max(0, index - 1500), Math.min(html.length, index + 1500)));
+        index = html.indexOf(id, index + id.length);
+      }
+    }
+    for (const id of uniqueIds) {
+      let index = html.indexOf(id);
+      while (index >= 0) {
+        const local = unescapeLite(html.slice(Math.max(0, index - 500), Math.min(html.length, index + 500)));
+        const matches = [
+          ...local.matchAll(/publish_time(?:\\\\+)?"?\\s*:\\s*(\\d{9,12})/ig),
+          ...local.matchAll(/publish_time[^0-9]{0,24}(\\d{9,12})/ig),
+        ];
+        const match = matches.at(-1);
+        if (!match) {
+          index = html.indexOf(id, index + id.length);
+          continue;
+        }
+        const postedAt = format(match[1]);
+        if (postedAt) {
+          return {
+            posted_at_raw: "publish_time:" + match[1],
+            posted_at: postedAt,
+            time_source: "embedded_publish_time",
+          };
+        }
+        index = html.indexOf(id, index + id.length);
+      }
+    }
+    for (const windowText of windows.map(unescapeLite)) {
+      const matches = [
+        ...windowText.matchAll(/publish_time(?:\\\\+)?"?\\s*:\\s*(\\d{9,12})/ig),
+        ...windowText.matchAll(/publish_time[^0-9]{0,24}(\\d{9,12})/ig),
+      ];
+      const match = matches.at(-1);
+      if (!match) continue;
+      const postedAt = format(match[1]);
+      if (postedAt) {
+        return {
+          posted_at_raw: "publish_time:" + match[1],
+          posted_at: postedAt,
+          time_source: "embedded_publish_time",
+        };
+      }
+    }
+    return { posted_at_raw: "", posted_at: "", time_source: "" };
+  })()`;
+}
+
 function detailEngagementBrowserExpression(target) {
   return `(() => {
     const target = ${JSON.stringify(target || null)};
@@ -238,14 +351,6 @@ function detailEngagementBrowserExpression(target) {
       .filter((item) => item.score > 0)
       .sort((a, b) => b.score - a.score || a.text.length - b.text.length);
     const root = scored[0]?.node || null;
-    if (!root) {
-      return {
-        raw: "",
-        source: "detail_main_post_dom",
-        confidence: "unanchored",
-        warnings: ["main_post_root_not_found"],
-      };
-    }
 
     const result = {
       raw: "",
@@ -257,7 +362,7 @@ function detailEngagementBrowserExpression(target) {
       comments: null,
       shares: null,
       views: null,
-      root_text_preview: clean(root.innerText || root.textContent || "").slice(0, 600),
+      root_text_preview: clean(root?.innerText || root?.textContent || "").slice(0, 600),
       warnings: [],
     };
     const setMetric = (key, value, rawText) => {
@@ -283,7 +388,7 @@ function detailEngagementBrowserExpression(target) {
         if (match) setMetric(key, match[1], item);
       }
     };
-    const metricNodes = [...root.querySelectorAll('a, span, div, [aria-label], [title]')];
+    const metricNodes = root ? [...root.querySelectorAll('a, span, div, [aria-label], [title]')] : [];
     for (const node of metricNodes) {
       if (node === root) continue;
       const ownerArticle = node.closest?.('[role="article"], article');
@@ -297,7 +402,7 @@ function detailEngagementBrowserExpression(target) {
       }
     }
 
-    const lines = linesFrom(root.innerText || root.textContent || "");
+    const lines = root ? linesFrom(root.innerText || root.textContent || "") : [];
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
       readMetricText(line);
@@ -332,8 +437,47 @@ function detailEngagementBrowserExpression(target) {
     if (result.comments === null || result.comments === undefined) missing.push("comments");
     if (result.shares === null || result.shares === undefined) missing.push("shares");
     if (!result.raw) {
-      result.confidence = "anchored_missing_metrics";
-      result.warnings.push("main_post_metrics_not_found");
+      if (/\\/reel\\//i.test(globalThis.location?.pathname || "")) {
+        const reelButtons = [...document.querySelectorAll('[role="button"], div[aria-label], span[aria-label]')]
+          .map((node) => {
+            const rect = node.getBoundingClientRect?.();
+            return {
+              node,
+              label: clean(node.getAttribute?.("aria-label") || ""),
+              text: clean(node.innerText || node.textContent || ""),
+              rect,
+              top: rect ? (rect.top ?? rect.y ?? 0) : 0,
+              left: rect ? (rect.left ?? rect.x ?? 0) : 0,
+            };
+          })
+          .filter((item) => item.rect && item.rect.width > 0 && item.rect.height > 0)
+          .filter((item) => item.top > 80 && item.top < (window.innerHeight || 800) - 40)
+          .filter((item) => item.left > (window.innerWidth || 1200) * 0.55)
+          .filter((item) => /^(Like|Comment|Share)$/i.test(item.label))
+          .sort((a, b) => a.top - b.top);
+        const byLabel = {};
+        for (const item of reelButtons) {
+          if (!byLabel[item.label.toLowerCase()]) byLabel[item.label.toLowerCase()] = item;
+        }
+        if (byLabel.like && byLabel.comment && byLabel.share) {
+          setMetric("reactions", byLabel.like.text, byLabel.like.text);
+          setMetric("comments", byLabel.comment.text, byLabel.comment.text);
+          setMetric("shares", byLabel.share.text, byLabel.share.text);
+          const reelParts = [];
+          if (result.likes !== null && result.likes !== undefined) reelParts.push("点赞量：" + result.likes);
+          if (result.comments !== null && result.comments !== undefined) reelParts.push("评论数：" + result.comments);
+          if (result.shares !== null && result.shares !== undefined) reelParts.push("分享数：" + result.shares);
+          result.detail_engagement_data = reelParts.join("；");
+          result.raw = result.detail_engagement_data;
+          result.confidence = "reel_action_buttons";
+          result.source = "detail_reel_action_buttons";
+          result.root_text_preview = clean(document.body?.innerText || document.body?.textContent || "").slice(0, 600);
+        }
+      }
+      if (!result.raw) {
+        result.confidence = "anchored_missing_metrics";
+        result.warnings.push(root ? "main_post_metrics_not_found" : "main_post_root_not_found");
+      }
     } else if (missing.length) {
       result.confidence = "anchored_incomplete_metrics";
       result.warnings.push("missing_" + missing.join("_"));
@@ -824,6 +968,7 @@ module.exports = {
   commentModeBrowserExpression,
   detailEngagementBrowserExpression,
   detailPostTypeBrowserExpression,
+  embeddedPublishTimeExpression,
   exactTimeFromTargetExpression,
   expandCommentsExpression,
   focusDetailConversationExpression,
@@ -831,6 +976,7 @@ module.exports = {
   leadLinkScanBrowserExpression,
   pageStateExpression,
   postCtaLeadLinkScanBrowserExpression,
+  realMouseTooltipTimeExpression,
   sameNormalizedUrl,
   syntheticHoverTimeExpression,
 };

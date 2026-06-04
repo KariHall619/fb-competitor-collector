@@ -218,6 +218,8 @@ def utc_now() -> str:
 
 
 ESTIMATED_TIME_SOURCES = {"relative_hour", "relative_estimated", "relative_label"}
+RECHECKABLE_TIME_SOURCES = {"synthetic_hover_tooltip"}
+STRONG_TIME_SOURCES = {"real_mouse_tooltip", "embedded_publish_time"}
 PROTECTED_FINAL_STATUSES = {"ready_for_output", "output_synced"}
 
 
@@ -226,6 +228,15 @@ def has_confirmed_time_value(post: dict[str, Any]) -> bool:
         post.get("posted_at")
         and parse_bool(post.get("time_confirmed"))
         and str(post.get("time_source") or "") not in ESTIMATED_TIME_SOURCES
+    )
+
+
+def has_stronger_time_value(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    return bool(
+        incoming.get("posted_at")
+        and parse_bool(incoming.get("time_confirmed"))
+        and str(existing.get("time_source") or "") in RECHECKABLE_TIME_SOURCES
+        and (str(incoming.get("time_source") or "").startswith("dom_") or str(incoming.get("time_source") or "") in STRONG_TIME_SOURCES)
     )
 
 
@@ -316,6 +327,8 @@ def choose_value(existing: dict[str, Any], incoming: dict[str, Any], column: str
             return current
         return new_value if non_empty(new_value) else current
     if column in {"posted_at", "posted_date", "time_source", "time_confirmed"}:
+        if has_stronger_time_value(existing, incoming):
+            return new_value if non_empty(new_value) else current
         if has_confirmed_time_value(existing) and not has_confirmed_time_value(incoming):
             return current
         return new_value if non_empty(new_value) else current

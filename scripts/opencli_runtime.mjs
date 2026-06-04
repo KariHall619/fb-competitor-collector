@@ -320,7 +320,7 @@ async function ensureFacebookTab({ opencliCommand, session, accountUrl }) {
       tabs: tabs.slice(0, 10),
     };
   }
-  if (accountUrl && !matched) {
+  if (accountUrl) {
     const opened = await runOpencli(["browser", session, "open", accountUrl, "--tab", selected.page], { command: opencliCommand });
     if (!opened.ok) {
       return {
@@ -328,7 +328,10 @@ async function ensureFacebookTab({ opencliCommand, session, accountUrl }) {
         status: "facebook_tab_wrong_account",
         exit_code: 5,
         action_required: "human_intervention_required",
-        message: "已发现 Facebook 标签页，但无法在该标签页打开目标账号主页。请手动打开目标账号主页后重试。",
+        human_intervention_required: true,
+        message: matched
+          ? "已发现目标 Facebook 标签页，但无法重新打开目标账号主页。请手动回到账号主页顶部后重试。"
+          : "已发现 Facebook 标签页，但无法在该标签页打开目标账号主页。请手动打开目标账号主页后重试。",
         stdout: opened.stdout.trim(),
         stderr: opened.stderr.trim(),
         tab: selected,
@@ -340,7 +343,9 @@ async function ensureFacebookTab({ opencliCommand, session, accountUrl }) {
       tab: refreshed,
       open_tab_count: tabs.length,
       facebook_tab_count: facebookTabs.length,
-      tab_access_mode: refreshed.current ? "current_tab_opened_target" : "direct_tab_opened_target",
+      tab_access_mode: matched
+        ? (refreshed.current ? "current_tab_refreshed_target" : "direct_tab_refreshed_target")
+        : (refreshed.current ? "current_tab_opened_target" : "direct_tab_opened_target"),
       opened_target_url: accountUrl,
     };
   }

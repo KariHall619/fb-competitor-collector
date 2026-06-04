@@ -1199,6 +1199,66 @@ if (currentPageMatchesAccount('https://www.facebook.com/LessonsTaughtByLifepage'
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_opencli_runtime_reopens_matched_account_tab() -> None:
+    script = """
+import { ensureFacebookTab } from './scripts/opencli_runtime.mjs';
+const calls = [];
+const command = [
+  'node',
+  '--input-type=module',
+  '-e',
+  `
+const args = process.argv.slice(1);
+if (args[0] === 'browser' && args[2] === 'bind') process.exit(0);
+if (args[0] === 'browser' && args[2] === 'tab' && args[3] === 'list') {
+  console.log(JSON.stringify([{ page: 'tab-healing', url: 'https://www.facebook.com/healingjourneys.mani?comment_id=old', title: 'Healing Journeys', active: true }]));
+  process.exit(0);
+}
+if (args[0] === 'browser' && args[2] === 'open') {
+  console.log(JSON.stringify({ ok: true, opened: args[3] }));
+  process.exit(0);
+}
+console.error(JSON.stringify(args));
+process.exit(64);
+  `,
+];
+const result = await ensureFacebookTab({
+  opencliCommand: command,
+  session: 'fb-competitor-healingjourneys-mani',
+  accountUrl: 'https://www.facebook.com/healingjourneys.mani',
+});
+if (!result.ok) {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(1);
+}
+if (result.tab_access_mode !== 'current_tab_refreshed_target') {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(2);
+}
+if (result.opened_target_url !== 'https://www.facebook.com/healingjourneys.mani') process.exit(3);
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def assert_opencli_discovery_scroll_avoids_messenger_dialog() -> None:
+    extract_text = (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
+    adapter_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
+    for text in (extract_text, adapter_text):
+        assert "closeBlockingDialogs" in text
+        assert "isBlockedOverlay" in text
+        assert "visibility', 'hidden'" in text
+        assert "Messenger|Chats|Chat history|PIN" in text
+        assert "target_score" in text
+        scroll_slice = text[text.index("async function scrollDown") : text.index("function captureCoverageState")]
+        assert "&& !isBlockedOverlay(el)" in scroll_slice
+        assert "feedScore(scrollables[0]) >= 50" in scroll_slice
+        assert "feedScore(b) - feedScore(a)" in scroll_slice
+    capture_slice = extract_text[extract_text.index("async function captureSnapshots") : extract_text.index("async function main")]
+    assert '"current_visible_position"' not in capture_slice
+    assert capture_slice.index("await scrollToTop") < capture_slice.index('readSnapshot(index, "from_top")')
+
+
 def assert_opencli_extract_blocks_wrong_account_tab(tmp_path: Path) -> None:
     config = tmp_path / "settings_wrong_account.yaml"
     fake_opencli = tmp_path / "fake-opencli-wrong-account"
@@ -1230,8 +1290,8 @@ if is_browser("wait"):
     print("{}")
     sys.exit(0)
 if is_browser("open"):
-    print("{}")
-    sys.exit(0)
+    print("cannot open target", file=sys.stderr)
+    sys.exit(1)
 print("unexpected fake opencli args: " + json.dumps(sys.argv), file=sys.stderr)
 sys.exit(64)
 """,
@@ -1256,8 +1316,7 @@ sys.exit(64)
     data = json.loads(result.stdout)
     assert data["status"] == "facebook_tab_wrong_account"
     assert data["human_intervention_required"] is True
-    assert data["expected_account_url"] == "https://www.facebook.com/healingjourneys.mani"
-    assert data["actual_url"] == "https://www.facebook.com/LessonsTaughtByLifepage"
+    assert data["message"].startswith("已发现 Facebook 标签页")
 
 
 def assert_detail_adapter_uses_canonical_navigation_url() -> None:
@@ -3595,6 +3654,40 @@ def assert_sqlite_upsert_preserves_enriched_fields(tmp_path: Path) -> None:
     assert stored["adoption_status"] == "采用"
 
 
+def assert_sqlite_upsert_allows_stronger_time_to_replace_synthetic(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, row_for_post, upsert_post
+
+    conn = connect(tmp_path / "time-strength-upsert.sqlite")
+    synthetic = normalize_post(
+        {
+            "account_url": "https://www.facebook.com/storyhub",
+            "post_url": "https://www.facebook.com/storyhub/posts/pfbid-time",
+            "posted_at": "2026年6月4日 07:30",
+            "posted_date": "260604",
+            "time_confirmed": True,
+            "time_source": "synthetic_hover_tooltip",
+        }
+    )
+    upsert_post(conn, synthetic)
+    stronger = normalize_post(
+        {
+            "account_url": "https://www.facebook.com/storyhub",
+            "post_url": "https://www.facebook.com/storyhub/posts/pfbid-time",
+            "posted_at": "2026年6月4日 17:30",
+            "posted_date": "260604",
+            "time_confirmed": True,
+            "time_source": "real_mouse_tooltip",
+        }
+    )
+    upsert_post(conn, stronger)
+    stored = row_for_post(conn, synthetic)
+    assert stored is not None
+    assert stored["posted_at"] == "2026年6月4日 17:30"
+    assert stored["time_source"] == "real_mouse_tooltip"
+
+
 def assert_sqlite_upsert_preserves_article_material_payload(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
@@ -5272,6 +5365,99 @@ if (result.likes !== null || result.reactions !== null || result.raw.includes('2
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_detail_engagement_reads_visible_reel_action_buttons() -> None:
+    script = """
+const { detailEngagementBrowserExpression } = require('./scripts/fb_detail_extractors.js');
+
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '', rect = {}) {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.rect = { x: 0, y: 0, width: 10, height: 10, ...rect };
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() { return this.innerText; }
+  getAttribute(name) { return this.attrs[name] || ''; }
+  getBoundingClientRect() { return this.rect; }
+  closest() { return null; }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === '[role="button"]') return node.attrs.role === 'button';
+      if (current === 'div[aria-label]') return node.tagName === 'DIV' && !!node.attrs['aria-label'];
+      if (current === 'span[aria-label]') return node.tagName === 'SPAN' && !!node.attrs['aria-label'];
+      if (current === '[role="article"]') return node.attrs.role === 'article';
+      if (current === 'article') return node.tagName === 'ARTICLE';
+      if (current === 'a') return node.tagName === 'A';
+      if (current === 'span') return node.tagName === 'SPAN';
+      if (current === 'div') return node.tagName === 'DIV';
+      if (current === '[aria-label]') return !!node.attrs['aria-label'];
+      if (current === '[title]') return !!node.attrs.title;
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+
+const body = new Node('body', {}, [
+  new Node('div', { role: 'button', 'aria-label': 'Like' }, [], '48', { x: 795, y: 456, width: 48, height: 65 }),
+  new Node('div', { role: 'button', 'aria-label': 'Comment' }, [], '26', { x: 795, y: 521, width: 48, height: 65 }),
+  new Node('div', { role: 'button', 'aria-label': 'Share' }, [], '1', { x: 795, y: 586, width: 48, height: 65 }),
+  new Node('div', { role: 'button', 'aria-label': 'Like' }, [], '360K', { x: 1148, y: 1105, width: 48, height: 65 }),
+  new Node('div', { role: 'button', 'aria-label': 'Comment' }, [], '8.6K', { x: 1148, y: 1170, width: 48, height: 65 }),
+  new Node('div', { role: 'button', 'aria-label': 'Share' }, [], '46K', { x: 1148, y: 1235, width: 48, height: 65 }),
+]);
+global.location = new URL('https://www.facebook.com/reel/1530098688844368');
+global.window = { innerHeight: 800, innerWidth: 1280 };
+global.document = {
+  body,
+  querySelectorAll: (selector) => body.querySelectorAll(selector),
+};
+const result = eval(detailEngagementBrowserExpression(null));
+if (result.confidence !== 'reel_action_buttons' || result.likes !== 48 || result.comments !== 26 || result.shares !== 1) {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(1);
+}
+if (result.raw.includes('360000') || result.raw.includes('8600') || result.raw.includes('46000')) {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(2);
+}
+"""
+    result = run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def assert_detail_embedded_publish_time_extracts_target_reel() -> None:
+    script = """
+const { embeddedPublishTimeExpression } = require('./scripts/fb_detail_extractors.js');
+global.location = new URL('https://www.facebook.com/reel/1530098688844368');
+global.document = {
+  documentElement: {
+    innerHTML: 'noise publish_time\\\\\\\\\\":1780419601,\\\\\\\\\\"story_fbid\\\\\\\\\\":[\\\\\\\\\\"1542354473914573\\\\\\\\\\"] more publish_time\\\\\\\\\\":1780470053,\\\\\\\\\\"story_fbid\\\\\\\\\\":[\\\\\\\\\\"1530098688844368\\\\\\\\\\"]'
+  }
+};
+const result = eval(embeddedPublishTimeExpression('https://www.facebook.com/reel/1530098688844368'));
+if (result.posted_at !== '2026年6月3日 15:00' || result.time_source !== 'embedded_publish_time') {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(1);
+}
+"""
+    result = run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_detail_post_type_expression_classifies_business_types() -> None:
     script = """
 import detailExtractors from './scripts/fb_detail_extractors.js';
@@ -5901,6 +6087,33 @@ global.document = {
 """
     result = run(["node", "-e", script])
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def assert_detail_adapter_real_mouse_hover_fallback_is_wired() -> None:
+    adapter_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
+    detail_text = (ROOT / "scripts" / "fb_detail_extractors.js").read_text(encoding="utf-8")
+    worker_text = (ROOT / "scripts" / "enrichment_worker.py").read_text(encoding="utf-8")
+    assert "async function readRealMouseTooltipTime" in adapter_text
+    assert "page.hover('a, abbr, span', { nth: Number(target.index) })" in adapter_text
+    assert "realMouseTooltipTimeExpression(timeoutMs)" in adapter_text
+    assert "function realMouseTooltipTimeExpression" in detail_text
+    assert 'time_source: "real_mouse_tooltip"' in detail_text
+    assert "nextPost.engagement_raw = nextPost.engagement_data" in adapter_text
+    assert "allowRealMouseHover" in adapter_text
+    assert "{ name: 'allow-real-mouse-hover'" in adapter_text
+    assert '"--allow-real-mouse-hover"' in worker_text
+    assert '"--real-mouse-tooltip-wait-ms"' in worker_text
+
+
+def assert_detail_adapter_prefers_real_mouse_time_when_enabled() -> None:
+    adapter_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
+    extract_start = adapter_text.index("async function extractExactTime")
+    extract_end = adapter_text.index("async function readRealMouseTooltipTime")
+    extract_slice = adapter_text[extract_start:extract_end]
+    assert "if (options.allowRealMouseHover)" in extract_slice
+    assert "hoverExact = await readRealMouseTooltipTime" in extract_slice
+    assert "exact = hoverExact" in extract_slice
+    assert extract_slice.index("hoverExact = await readRealMouseTooltipTime") < extract_slice.index("syntheticHoverTimeExpression")
 
 
 def assert_opencli_detail_enrichment_supports_target_date_filter() -> None:
@@ -6552,6 +6765,93 @@ raise SystemExit(73)
     task = conn.execute("SELECT status, attempts, next_run_at, locked_at FROM enrichment_tasks WHERE stage = 'detail_time'").fetchone()
     assert task["status"] == "pending"
     assert task["attempts"] == 0
+    assert task["next_run_at"]
+    assert task["locked_at"] is None
+
+
+def assert_enrichment_worker_keeps_unsatisfied_detail_stage_pending(tmp_path: Path) -> None:
+    config = tmp_path / "settings_worker_unsatisfied_detail.yaml"
+    db_path = tmp_path / "worker-unsatisfied-detail.sqlite"
+    fake_opencli = tmp_path / "fake-opencli-unsatisfied-detail"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config_text = config.read_text(encoding="utf-8")
+    config_text = config_text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
+    config_text = config_text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    config.write_text(config_text, encoding="utf-8")
+    sample = tmp_path / "unsatisfied_detail_posts.json"
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_name": "Pending Detail",
+                        "account_url": "https://www.facebook.com/pendingdetail",
+                        "account_type": "competitor",
+                        "post_url": "https://www.facebook.com/pendingdetail/posts/one",
+                        "relative_time_text": "1h",
+                        "story_summary": "Visible homepage candidate.",
+                        "crawled_at": "2026-06-03T12:00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
+    assert imported.returncode == 0, imported.stdout
+    write_fake_opencli_adapter(
+        fake_opencli,
+        """#!/usr/bin/env python3
+import json
+from pathlib import Path
+args = sys.argv
+input_path = Path(args[args.index("--input") + 1])
+output_path = Path(args[args.index("--output") + 1])
+payload = json.loads(input_path.read_text(encoding="utf-8"))
+output_path.write_text(json.dumps({"ok": True, "posts": payload["posts"]}, ensure_ascii=False), encoding="utf-8")
+print(json.dumps({"ok": True, "post_count": len(payload["posts"])}))
+""",
+    )
+
+    worker = run(
+        [
+            PYTHON,
+            "scripts/enrichment_worker.py",
+            "--config",
+            str(config),
+            "--stages",
+            "detail_time",
+            "--account-url",
+            "https://www.facebook.com/pendingdetail",
+            "--account-type",
+            "competitor",
+            "--date",
+            "260603",
+            "--limit",
+            "10",
+        ]
+    )
+    assert worker.returncode == 0, worker.stdout
+    data = json.loads(worker.stdout)
+    assert data["run_status"] == "incomplete_pending_tasks"
+    assert data["retry_later"] is True
+    assert data["requeued"] == 1
+    assert data["failed"] == 0
+    assert data["ok"] is True
+    assert data["task_counts"].get("detail_time:pending") == 1
+    assert "detail_time:failed" not in data["task_counts"]
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from store import connect
+
+    conn = connect(db_path)
+    task = conn.execute(
+        "SELECT status, attempts, last_error, next_run_at, locked_at FROM enrichment_tasks WHERE stage = 'detail_time'"
+    ).fetchone()
+    assert task["status"] == "pending"
+    assert task["attempts"] == 0
+    assert task["last_error"] == "detail_time still missing"
     assert task["next_run_at"]
     assert task["locked_at"] is None
 
@@ -14420,6 +14720,8 @@ def main() -> int:
     assert_dom_extractor_keeps_path_photo_without_parent_post()
     assert_detail_engagement_is_anchored_to_main_post()
     assert_detail_engagement_ignores_relative_time_labels()
+    assert_detail_engagement_reads_visible_reel_action_buttons()
+    assert_detail_embedded_publish_time_extracts_target_reel()
     assert_detail_enrichment_ignores_page_shell_ad_links()
     assert_detail_enrichment_detects_plain_text_comment_links()
     assert_detail_enrichment_detects_post_cta_watch_more_links()
@@ -14487,6 +14789,7 @@ def main() -> int:
         hot_after_many_data = json.loads(hot_after_many.stdout)
         assert hot_after_many_data["count"] == 1, hot_after_many.stdout
         assert_sqlite_upsert_preserves_enriched_fields(tmp_path)
+        assert_sqlite_upsert_allows_stronger_time_to_replace_synthetic(tmp_path)
         assert_sqlite_upsert_preserves_article_material_payload(tmp_path)
         assert_sqlite_upsert_resyncs_previously_synced_rows(tmp_path)
         assert_output_synced_rows_missing_business_fields_reopen_enrichment(tmp_path)
@@ -14542,6 +14845,8 @@ def main() -> int:
         assert_detail_time_helpers_parse_exact_facebook_time()
         assert_detail_time_target_anchors_to_current_post()
         assert_synthetic_hover_ignores_existing_page_times()
+        assert_detail_adapter_real_mouse_hover_fallback_is_wired()
+        assert_detail_adapter_prefers_real_mouse_time_when_enabled()
         assert_opencli_detail_enrichment_supports_target_date_filter()
         assert_opencli_discovery_eval_has_timeout_guard()
         assert_opencli_detail_enrichment_rejects_string_false_time()
@@ -14557,6 +14862,7 @@ def main() -> int:
         assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path)
         assert_detail_results_match_facebook_url_variants(tmp_path)
         assert_enrichment_worker_requeues_opencli_session_busy(tmp_path)
+        assert_enrichment_worker_keeps_unsatisfied_detail_stage_pending(tmp_path)
         assert_enrichment_worker_lead_stage_requires_external_landing_url()
         assert_post_cta_lead_source_qualifies_for_quality_gate()
         assert_stale_running_enrichment_tasks_are_recovered(tmp_path)

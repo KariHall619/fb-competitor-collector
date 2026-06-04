@@ -206,6 +206,17 @@ async function evalPage(opencliCommand, session, tab, js) {
 
 async function scrollToTop(opencliCommand, session, tab) {
   await evalPage(opencliCommand, session, tab, `(() => {
+    const closeBlockingDialogs = () => {
+      for (const node of [...document.querySelectorAll('[role="dialog"], [aria-label="Messenger"], [aria-label="Chats"]')]) {
+        const text = String(node.innerText || node.textContent || '');
+        if (!/Messenger|Chats|Chat history|PIN|New message|聊天|消息/i.test(text)) continue;
+        const closeButton = node.querySelector('[aria-label="Close"], [aria-label="关闭"], [aria-label*="Close chat"]');
+        closeButton?.click?.();
+        node.style.setProperty('display', 'none', 'important');
+        node.style.setProperty('visibility', 'hidden', 'important');
+      }
+    };
+    closeBlockingDialogs();
     const candidates = [
       ...document.querySelectorAll('[role="main"], [data-pagelet*="ProfileTimeline"], [aria-label*="Timeline"], [aria-label*="Posts"]')
     ];
@@ -235,6 +246,29 @@ async function readCurrentPageIdentity(opencliCommand, session, tab) {
 async function scrollDown(opencliCommand, session, tab, pixels) {
   return await evalPage(opencliCommand, session, tab, `(() => {
     const requested = ${Number(pixels) || 1400};
+    const isBlockedOverlay = (el) => {
+      const dialog = el.closest?.('[role="dialog"], [aria-label="Messenger"], [aria-label="Chats"]');
+      if (!dialog) return false;
+      const text = String(dialog.innerText || dialog.textContent || '');
+      return /Messenger|Chats|Chat history|PIN|New message|聊天|消息/i.test(text);
+    };
+    const feedScore = (el) => {
+      const attr = [
+        el.getAttribute?.('role') || '',
+        el.getAttribute?.('aria-label') || '',
+        el.getAttribute?.('data-pagelet') || '',
+        el.id || '',
+        el.className || '',
+      ].join(' ');
+      const text = String(el.innerText || el.textContent || '').slice(0, 2000);
+      let score = 0;
+      if (el.matches?.('[role="main"]')) score += 100;
+      if (/ProfileTimeline|Timeline|Posts|pagelet_timeline|recent/i.test(attr)) score += 70;
+      if (/Follow|Followers|About|Photos|Videos|Reels|Posts/i.test(text)) score += 8;
+      if (/Messenger|Chats|Chat history|PIN/i.test(text)) score -= 200;
+      if (isBlockedOverlay(el)) score -= 500;
+      return score;
+    };
     const visibleEnough = (el) => {
       const rect = el.getBoundingClientRect?.();
       if (!rect) return false;
@@ -246,15 +280,16 @@ async function scrollDown(opencliCommand, session, tab, pixels) {
       const style = getComputedStyle(el);
       const overflow = [style.overflowY, style.overflow].join(' ');
       return visibleEnough(el)
+        && !isBlockedOverlay(el)
         && el.scrollHeight > el.clientHeight + 120
         && /(auto|scroll)/i.test(overflow);
     }).sort((a, b) => {
-      const aMain = a.matches?.('[role="main"], [data-pagelet*="ProfileTimeline"], [aria-label*="Timeline"], [aria-label*="Posts"]') ? 1 : 0;
-      const bMain = b.matches?.('[role="main"], [data-pagelet*="ProfileTimeline"], [aria-label*="Timeline"], [aria-label*="Posts"]') ? 1 : 0;
-      if (aMain !== bMain) return bMain - aMain;
+      const scoreDelta = feedScore(b) - feedScore(a);
+      if (scoreDelta) return scoreDelta;
       return (b.clientHeight || 0) - (a.clientHeight || 0);
     });
-    const target = scrollables[0] || document.scrollingElement || document.documentElement;
+    const pageScroller = document.scrollingElement || document.documentElement;
+    const target = scrollables[0] && feedScore(scrollables[0]) >= 50 ? scrollables[0] : pageScroller;
     const before = target === document.scrollingElement || target === document.documentElement
       ? (window.scrollY || document.documentElement.scrollTop || 0)
       : target.scrollTop;
@@ -273,6 +308,7 @@ async function scrollDown(opencliCommand, session, tab, pixels) {
       target: target === document.scrollingElement || target === document.documentElement ? 'window' : 'container',
       target_role: target.getAttribute?.('role') || '',
       target_label: target.getAttribute?.('aria-label') || '',
+      target_score: feedScore(target),
       body_length: document.body?.innerText?.length || 0,
       scroll_height: target.scrollHeight || document.documentElement?.scrollHeight || document.body?.scrollHeight || 0,
     };
@@ -393,10 +429,6 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
     });
     return true;
   };
-
-  if (!(await readSnapshot(-1, "current_visible_position"))) {
-    return { blockedExtraction, snapshots, posts: [], stable_snapshot_count: 0, stopReason };
-  }
 
   await scrollToTop(opencliCommand, session, tab);
   for (let index = 0; index < Math.max(1, MAX_SNAPSHOTS); index += 1) {

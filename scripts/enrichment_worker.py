@@ -158,6 +158,10 @@ def run_detail_batch(
             str(int(deep_get(config, "lead_link.resolve_timeout_seconds", 20)) * 1000),
             "--synthetic-tooltip-wait-ms",
             str(deep_get(config, "performance.synthetic_tooltip_wait_ms", 1200)),
+            "--allow-real-mouse-hover",
+            "true",
+            "--real-mouse-tooltip-wait-ms",
+            str(deep_get(config, "performance.real_mouse_tooltip_wait_ms", 1800)),
             *detail_args_for_stages(stages),
         ]
         if target_date:
@@ -471,6 +475,14 @@ def main() -> int:
                     if batch_succeeded and detail_stage_satisfied(stored, task["stage"], config):
                         mark_task_done(conn, task["id"], duration_ms=duration_ms)
                         completed += 1
+                    elif batch_succeeded:
+                        mark_task_pending(
+                            conn,
+                            task["id"],
+                            reason=f"{task['stage']} still missing",
+                            retry_seconds=int(deep_get(config, "performance.detail_retry_seconds", 60)),
+                        )
+                        retry_later += 1
                     elif batch_retry_later:
                         mark_task_pending(conn, task["id"], reason=batch_error or "retry_later", retry_seconds=0)
                         retry_later += 1

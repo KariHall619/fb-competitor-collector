@@ -13,6 +13,7 @@ const {
   commentModeBrowserExpression,
   detailEngagementBrowserExpression,
   detailPostTypeBrowserExpression,
+  embeddedPublishTimeExpression,
   exactTimeFromTargetExpression,
   expandCommentsExpression,
   focusDetailConversationExpression,
@@ -20,6 +21,7 @@ const {
   leadLinkScanBrowserExpression,
   pageStateExpression,
   postCtaLeadLinkScanBrowserExpression,
+  realMouseTooltipTimeExpression,
   sameNormalizedUrl,
   syntheticHoverTimeExpression,
 } = require(path.join(projectRoot, 'scripts', 'fb_detail_extractors.js'));
@@ -292,6 +294,17 @@ async function resolveLandingUrl(href, allowedDomains = [], timeoutMs = 20000) {
 
 async function scrollToTop(page) {
   await page.evaluate(`(() => {
+    const closeBlockingDialogs = () => {
+      for (const node of [...document.querySelectorAll('[role="dialog"], [aria-label="Messenger"], [aria-label="Chats"]')]) {
+        const text = String(node.innerText || node.textContent || '');
+        if (!/Messenger|Chats|Chat history|PIN|New message|聊天|消息/i.test(text)) continue;
+        const closeButton = node.querySelector('[aria-label="Close"], [aria-label="关闭"], [aria-label*="Close chat"]');
+        closeButton?.click?.();
+        node.style.setProperty('display', 'none', 'important');
+        node.style.setProperty('visibility', 'hidden', 'important');
+      }
+    };
+    closeBlockingDialogs();
     const candidates = [
       ...document.querySelectorAll('[role="main"], [data-pagelet*="ProfileTimeline"], [aria-label*="Timeline"], [aria-label*="Posts"]')
     ];
@@ -310,6 +323,29 @@ async function scrollDown(page, pixels) {
     const requested = ${Number(pixels) || 520};
     const viewportStep = Math.max(320, Math.floor((window.innerHeight || 800) * 0.55));
     const delta = Math.min(requested, viewportStep);
+    const isBlockedOverlay = (el) => {
+      const dialog = el.closest?.('[role="dialog"], [aria-label="Messenger"], [aria-label="Chats"]');
+      if (!dialog) return false;
+      const text = String(dialog.innerText || dialog.textContent || '');
+      return /Messenger|Chats|Chat history|PIN|New message|聊天|消息/i.test(text);
+    };
+    const feedScore = (el) => {
+      const attr = [
+        el.getAttribute?.('role') || '',
+        el.getAttribute?.('aria-label') || '',
+        el.getAttribute?.('data-pagelet') || '',
+        el.id || '',
+        el.className || '',
+      ].join(' ');
+      const text = String(el.innerText || el.textContent || '').slice(0, 2000);
+      let score = 0;
+      if (el.matches?.('[role="main"]')) score += 100;
+      if (/ProfileTimeline|Timeline|Posts|pagelet_timeline|recent/i.test(attr)) score += 70;
+      if (/Follow|Followers|About|Photos|Videos|Reels|Posts/i.test(text)) score += 8;
+      if (/Messenger|Chats|Chat history|PIN/i.test(text)) score -= 200;
+      if (isBlockedOverlay(el)) score -= 500;
+      return score;
+    };
     const visibleEnough = (el) => {
       const rect = el.getBoundingClientRect?.();
       if (!rect) return false;
@@ -321,15 +357,16 @@ async function scrollDown(page, pixels) {
       const style = getComputedStyle(el);
       const overflow = [style.overflowY, style.overflow].join(' ');
       return visibleEnough(el)
+        && !isBlockedOverlay(el)
         && el.scrollHeight > el.clientHeight + 120
         && /(auto|scroll)/i.test(overflow);
     }).sort((a, b) => {
-      const aMain = a.matches?.('[role="main"], [data-pagelet*="ProfileTimeline"], [aria-label*="Timeline"], [aria-label*="Posts"]') ? 1 : 0;
-      const bMain = b.matches?.('[role="main"], [data-pagelet*="ProfileTimeline"], [aria-label*="Timeline"], [aria-label*="Posts"]') ? 1 : 0;
-      if (aMain !== bMain) return bMain - aMain;
+      const scoreDelta = feedScore(b) - feedScore(a);
+      if (scoreDelta) return scoreDelta;
       return (b.clientHeight || 0) - (a.clientHeight || 0);
     });
-    const target = scrollables[0] || document.scrollingElement || document.documentElement;
+    const pageScroller = document.scrollingElement || document.documentElement;
+    const target = scrollables[0] && feedScore(scrollables[0]) >= 50 ? scrollables[0] : pageScroller;
     const before = target === document.scrollingElement || target === document.documentElement
       ? (window.scrollY || document.documentElement.scrollTop || 0)
       : target.scrollTop;
@@ -348,6 +385,7 @@ async function scrollDown(page, pixels) {
       target: target === document.scrollingElement || target === document.documentElement ? 'window' : 'container',
       target_role: target.getAttribute?.('role') || '',
       target_label: target.getAttribute?.('aria-label') || '',
+      target_score: feedScore(target),
       body_length: document.body?.innerText?.length || 0,
       scroll_height: target.scrollHeight || document.documentElement?.scrollHeight || document.body?.scrollHeight || 0,
     };
@@ -489,7 +527,8 @@ async function extractExactTime(page, post, options) {
   if (options.skipTime) {
     return { posted_at_raw: '', posted_at: '', time_source: '', skipped: true };
   }
-  if (hasConfirmedTime(post)) {
+  const shouldRecheckExisting = hasConfirmedTime(post) && post.time_source === 'synthetic_hover_tooltip';
+  if (hasConfirmedTime(post) && !shouldRecheckExisting) {
     return {
       posted_at_raw: post.posted_at_raw || '',
       posted_at: post.posted_at || '',
@@ -499,10 +538,45 @@ async function extractExactTime(page, post, options) {
   }
   const target = await readPage(page, headerTimeTargetExpression(detailNavigationUrl(post)));
   let exact = await readPage(page, exactTimeFromTargetExpression(target));
+  let hoverExact = null;
+  if (options.allowRealMouseHover) {
+    hoverExact = await readRealMouseTooltipTime(page, target, options.realMouseTooltipWaitMs);
+    if (hoverExact?.posted_at) {
+      exact = hoverExact;
+    }
+  }
+  const embeddedExact = await readPage(page, embeddedPublishTimeExpression(detailNavigationUrl(post)));
+  if (embeddedExact?.posted_at && (!exact?.posted_at || exact.time_source === 'synthetic_hover_tooltip')) {
+    exact = embeddedExact;
+  }
   if (!exact?.posted_at) {
     exact = await readPage(page, syntheticHoverTimeExpression(target, options.syntheticTooltipWaitMs));
   }
+  if (!exact?.posted_at && hoverExact?.posted_at) {
+    exact = hoverExact;
+  }
+  if (!exact?.posted_at && shouldRecheckExisting) {
+    exact = {
+      posted_at_raw: post.posted_at_raw || '',
+      posted_at: post.posted_at || '',
+      time_source: post.time_source || '',
+      preserved_existing: true,
+      rechecked_existing: true,
+    };
+  }
   return { ...(exact || {}), target };
+}
+
+async function readRealMouseTooltipTime(page, target, timeoutMs = 1800) {
+  if (!target || target.index === undefined || target.index === null || typeof page.hover !== 'function') {
+    return { posted_at_raw: '', posted_at: '', time_source: '', skipped: true };
+  }
+  try {
+    await page.hover('a, abbr, span', { nth: Number(target.index) });
+  } catch (error) {
+    return { posted_at_raw: '', posted_at: '', time_source: '', error: String(error?.message || error) };
+  }
+  return readPage(page, realMouseTooltipTimeExpression(timeoutMs));
 }
 
 async function extractLeadLink(page, post, options) {
@@ -642,9 +716,10 @@ async function enrichCurrentDetailPage(page, post, options) {
   } else if (!options.skipPostType) {
     nextPost.note = appendSemicolonNote(nextPost.note, '帖子类型待补采：详情页未能判断图文/视频/仅图片/仅文字');
   }
-  if (engagement.raw && ['anchored', 'anchored_incomplete_metrics'].includes(engagement.confidence)) {
+  if (engagement.raw && ['anchored', 'anchored_incomplete_metrics', 'reel_action_buttons'].includes(engagement.confidence)) {
     nextPost.engagement_data = engagement.detail_engagement_data || engagement.raw;
     nextPost.detail_engagement_data = engagement.detail_engagement_data || engagement.raw;
+    nextPost.engagement_raw = nextPost.engagement_data;
     nextPost.engagement_source = engagement.source;
     nextPost.engagement_confidence = engagement.confidence;
     if (engagement.likes !== null && engagement.likes !== undefined) nextPost.likes = engagement.likes;
@@ -695,6 +770,8 @@ async function detail(page, kwargs) {
     replyExpandRounds: intArg(kwargs['reply-expand-rounds'], 3),
     resolveTimeoutMs: intArg(kwargs['resolve-timeout-ms'], 20000),
     syntheticTooltipWaitMs: intArg(kwargs['synthetic-tooltip-wait-ms'], 1200),
+    realMouseTooltipWaitMs: intArg(kwargs['real-mouse-tooltip-wait-ms'], 1800),
+    allowRealMouseHover: boolArg(kwargs['allow-real-mouse-hover']),
   };
   const enriched = [];
   const details = [];
@@ -774,6 +851,8 @@ cli({
     { name: 'reply-expand-rounds', type: 'int', default: 3, help: 'Reply expansion rounds' },
     { name: 'resolve-timeout-ms', type: 'int', default: 20000, help: 'Landing URL redirect timeout in milliseconds' },
     { name: 'synthetic-tooltip-wait-ms', type: 'int', default: 1200, help: 'Synthetic hover tooltip wait in milliseconds' },
+    { name: 'real-mouse-tooltip-wait-ms', type: 'int', default: 1800, help: 'Real mouse hover tooltip wait in milliseconds' },
+    { name: 'allow-real-mouse-hover', type: 'bool', default: false, help: 'Use OpenCLI page.hover when synthetic tooltip extraction fails' },
   ],
   columns: ['ok', 'mode', 'post_count', 'status'],
   func: async (page, kwargs) => {
