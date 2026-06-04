@@ -56,11 +56,11 @@ For multi-account jobs, repeat the full single-account loop account by account t
 
 The intended operator experience is a separate automation surface that does not interrupt other Chrome usage:
 
-- Project scripts do not pre-open, select, bind, or close Chrome tabs directly.
-- Account discovery and detail enrichment both call `opencli facebook fb-competitor-posts ...` directly through the configured OpenCLI command.
+- Account discovery uses OpenCLI Browser Bridge session primitives through `scripts/opencli_extract_current_tab.mjs`: bind the configured session, open the target account URL in a matched Facebook tab, scroll from the homepage top, and evaluate the project DOM extractor against that tab.
+- Detail enrichment calls `opencli facebook fb-competitor-posts ...` through the configured OpenCLI command.
 - The adapter is initialized with `opencli browser <session> init facebook/fb-competitor-posts` and installed into the real OpenCLI home at `~/.opencli/clis/facebook/fb-competitor-posts.js` by `scripts/install_opencli_adapter.py`.
 - The committed adapter implementation source is `scripts/opencli_fb_competitor_posts.js`; runtime code must not copy adapters into project-local `data/opencli-home` or override `HOME`.
-- The adapter opens and navigates its own background browser session through OpenCLI's official `cli({ browser: true, strategy: Strategy.COOKIE })` mechanism.
+- Discovery and detail both remain OpenCLI Browser Bridge routes; do not replace either with Playwright, CDP-only scraping, userscripts, or manual chat-loop extraction.
 - Never close the user's original manual Facebook tab.
 
 ## Human Blockers

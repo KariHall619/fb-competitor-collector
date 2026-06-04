@@ -136,7 +136,7 @@ def audit_post_fields(post: dict[str, Any], config: dict[str, Any] | None = None
         likes_number = int(likes) if likes is not None and likes != "" else None
     except (TypeError, ValueError):
         likes_number = None
-    if likes_number is not None and likes_number <= cfg["low_like_threshold"]:
+    if likes_number is not None and likes_number < cfg["low_like_threshold"]:
         reasons.append("likes_low")
     if post.get("post_type") not in set(cfg["required_post_types"]):
         reasons.append("post_type")

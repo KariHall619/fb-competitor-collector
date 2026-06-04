@@ -37,7 +37,7 @@ Expected live-capture state:
 - daemon is reachable.
 - Browser Bridge extension is connected to the same normal Chrome profile where Facebook is logged in.
 - `fb-competitor-posts` adapter exists in the real OpenCLI home at `~/.opencli/clis/facebook/fb-competitor-posts.js`; refresh it with `python3 scripts/install_opencli_adapter.py --config config/settings.yaml`.
-- target Facebook account is reachable in the logged-in Chrome profile; the adapter opens/navigates its own background browser session.
+- target Facebook account is reachable in the logged-in Chrome profile; discovery binds an OpenCLI browser session and opens the target account in a matched Facebook tab before scrolling from the homepage top.
 
 Recovery order:
 
@@ -46,7 +46,7 @@ Recovery order:
 3. If Browser Bridge remains disconnected, the operator must enable/install/connect the extension in the business Chrome profile.
 4. If account homepage opening fails, rerun the original batch/account command after recovery, not a partial manual loop.
 
-Do not switch to Playwright, CDP-only scraping, old Chrome Extension scripts, or random existing Facebook tabs.
+Do not switch to Playwright, CDP-only scraping, old Chrome Extension scripts, userscripts, or chat-staged manual loops.
 
 ## Facebook Login And Page State
 

@@ -474,6 +474,12 @@ function detailEngagementBrowserExpression(target) {
           setMetric("reactions", byLabel.like.text, byLabel.like.text);
           setMetric("comments", byLabel.comment.text, byLabel.comment.text);
           setMetric("shares", byLabel.share.text, byLabel.share.text);
+          if (
+            (result.likes !== null && result.likes !== undefined || result.comments !== null && result.comments !== undefined)
+            && (result.shares === null || result.shares === undefined)
+          ) {
+            result.shares = 0;
+          }
           const reelParts = [];
           if (result.likes !== null && result.likes !== undefined) reelParts.push("点赞量：" + result.likes);
           if (result.comments !== null && result.comments !== undefined) reelParts.push("评论数：" + result.comments);

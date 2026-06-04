@@ -288,11 +288,10 @@ def discover_homepage_once(
     started = time.monotonic()
     config = load_config(args.config)
     command = [
-        *opencli_command(config),
-        "facebook",
-        "fb-competitor-posts",
-        "--mode",
-        "discover",
+        "node",
+        "scripts/opencli_extract_current_tab.mjs",
+        "--config",
+        args.config,
         "--account-url",
         args.account_url,
         "--max-text",
@@ -305,12 +304,6 @@ def discover_homepage_once(
         str(normalize_date_text(args.target_date) if args.target_date else ""),
         "--scroll-pixels",
         str(getattr(args, "scroll_pixels", 520)),
-        "--window",
-        "background",
-        "--site-session",
-        "persistent",
-        "-f",
-        "json",
     ]
     posted_after = getattr(args, "posted_after", "")
     posted_before = getattr(args, "posted_before", "")

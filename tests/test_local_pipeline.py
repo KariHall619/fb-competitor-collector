@@ -1175,17 +1175,17 @@ def assert_account_and_worker_call_opencli_adapter() -> None:
     extract_text = (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
     assert "scripts/run_project_opencli.py" not in account_text
     discover_slice = account_text[account_text.index("def discover_homepage_once") : account_text.index("def expected_coverage_incomplete")]
-    assert '"scripts/opencli_extract_current_tab.mjs"' not in discover_slice
-    assert '"facebook"' in discover_slice
-    assert '"fb-competitor-posts"' in discover_slice
-    assert '"discover"' in discover_slice
-    assert '"--window"' in discover_slice
-    assert '"background"' in discover_slice
-    assert '"--site-session"' in discover_slice
-    assert '"persistent"' in discover_slice
-    assert "opencli_command(config)" in discover_slice
+    assert '"node"' in discover_slice
+    assert '"scripts/opencli_extract_current_tab.mjs"' in discover_slice
+    assert '"--config"' in discover_slice
+    assert '"--account-url"' in discover_slice
+    assert '"--posted-after"' in discover_slice
+    assert '"--posted-before"' in discover_slice
+    assert '"--window"' not in discover_slice
+    assert '"--site-session"' not in discover_slice
     assert (ROOT / "scripts" / "opencli_runtime.mjs").exists()
     assert (ROOT / "scripts" / "opencli_extract_current_tab.mjs").exists()
+    assert "commandFromConfig(config)" in runtime_text
     assert "defaultAccountSession(config, accountUrl)" in runtime_text
     assert "currentPageMatchesAccount" in extract_text
     assert "facebook_tab_wrong_account" in account_text
@@ -2144,7 +2144,7 @@ def assert_field_audit_marks_refetchable_missing_fields(tmp_path: Path) -> None:
         "lead_link_status": "qualified",
         "lead_link_source": "comment",
         "summary_source": "article",
-        "likes": 6,
+        "likes": 5,
         "comments": 3,
         "shares": 1,
     }
@@ -5493,7 +5493,7 @@ class Node {
 const body = new Node('body', {}, [
   new Node('div', { role: 'button', 'aria-label': 'Like' }, [], '48', { x: 795, y: 456, width: 48, height: 65 }),
   new Node('div', { role: 'button', 'aria-label': 'Comment' }, [], '26', { x: 795, y: 521, width: 48, height: 65 }),
-  new Node('div', { role: 'button', 'aria-label': 'Share' }, [], '1', { x: 795, y: 586, width: 48, height: 65 }),
+  new Node('div', { role: 'button', 'aria-label': 'Share' }, [], 'Share', { x: 795, y: 586, width: 48, height: 65 }),
   new Node('div', { role: 'button', 'aria-label': 'Like' }, [], '360K', { x: 1148, y: 1105, width: 48, height: 65 }),
   new Node('div', { role: 'button', 'aria-label': 'Comment' }, [], '8.6K', { x: 1148, y: 1170, width: 48, height: 65 }),
   new Node('div', { role: 'button', 'aria-label': 'Share' }, [], '46K', { x: 1148, y: 1235, width: 48, height: 65 }),
@@ -5505,7 +5505,7 @@ global.document = {
   querySelectorAll: (selector) => body.querySelectorAll(selector),
 };
 const result = eval(detailEngagementBrowserExpression(null));
-if (result.confidence !== 'reel_action_buttons' || result.likes !== 48 || result.comments !== 26 || result.shares !== 1) {
+if (result.confidence !== 'reel_action_buttons' || result.likes !== 48 || result.comments !== 26 || result.shares !== 0) {
   console.error(JSON.stringify(result, null, 2));
   process.exit(1);
 }
@@ -7060,7 +7060,7 @@ def assert_enrichment_worker_lead_stage_requires_external_landing_url() -> None:
         "shares": 1,
     }
     complete_engagement = {
-        "likes": 8,
+        "likes": 5,
         "comments": 3,
         "shares": 1,
     }
