@@ -258,11 +258,13 @@ def discover_homepage_once(
     min_snapshots: int,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any], int]:
     started = time.monotonic()
+    config = load_config(args.config)
     command = [
-        "node",
-        "scripts/opencli_extract_current_tab.mjs",
-        "--config",
-        args.config,
+        *opencli_command(config),
+        "facebook",
+        "fb-competitor-posts",
+        "--mode",
+        "discover",
         "--account-url",
         args.account_url,
         "--max-text",
@@ -275,6 +277,10 @@ def discover_homepage_once(
         str(normalize_date_text(args.target_date) if args.target_date else ""),
         "--scroll-pixels",
         str(getattr(args, "scroll_pixels", 520)),
+        "--window",
+        "background",
+        "-f",
+        "json",
     ]
     posted_after = getattr(args, "posted_after", "")
     posted_before = getattr(args, "posted_before", "")
@@ -282,7 +288,7 @@ def discover_homepage_once(
         command.extend(["--posted-after", posted_after])
     if posted_before:
         command.extend(["--posted-before", posted_before])
-    discover = run_command(command)
+    discover = run_command(command, timeout=max(240, int(max_snapshots) * 12))
     payload = parse_json_output(discover)
     payload["returncode"] = discover.returncode
     payload["snapshot_budget"] = {
@@ -541,6 +547,8 @@ def completion_requires_opencli(completion: dict[str, Any]) -> bool:
 def should_run_worker_for_completion(completion: dict[str, Any]) -> bool:
     if not completion.get("open_task_count"):
         return False
+    if _int_metric(completion.get("auto_open_task_count")) > 0:
+        return True
     if completion.get("has_summary_only_work") and not has_pre_summary_auto_enrichment_work(completion):
         return False
     return True
@@ -1329,14 +1337,17 @@ def worker_failure_summary(worker_passes: list[dict[str, Any]]) -> dict[str, Any
 
 
 def has_pre_summary_auto_enrichment_work(completion: dict[str, Any]) -> bool:
-    """Return True only when article material still needs machine fetching.
+    """Return True only when all summary work is blocked on material fetching.
 
     Post type, engagement, exact time, and lead-link refetches can continue in
-    parallel with summary generation once article material exists. Blocking
-    summaries on those independent OpenCLI stages leaves Feishu rows with empty
-    story summaries even though the summary source is already available.
+    parallel with summary generation once article material exists. Some account
+    scopes can contain both material-ready posts and posts still waiting on
+    article material; in that mixed case we should generate the ready summaries
+    instead of letting one failed material fetch block the whole scoped job.
     """
 
+    if _int_metric(completion.get("requires_codex_summary_count")) > 0:
+        return False
     for key in ("open_task_stage_counts", "missing_stage_counts"):
         counts = completion.get(key)
         if not isinstance(counts, dict):

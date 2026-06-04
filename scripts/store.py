@@ -299,6 +299,8 @@ def merge_raw_payload(existing_value: Any, incoming_value: Any) -> Any:
     incoming_payload = payload_dict(incoming_value)
     if existing_payload and incoming_payload:
         merged = {**existing_payload, **incoming_payload}
+        if "coverage_note" in incoming_payload and not incoming_payload.get("coverage_note"):
+            merged.pop("coverage_note", None)
         if has_article_material_payload(existing_value) and not has_article_material_payload(incoming_value):
             merged["article_material"] = existing_payload["article_material"]
         return json.dumps(merged, ensure_ascii=False)
@@ -317,8 +319,8 @@ def choose_value(existing: dict[str, Any], incoming: dict[str, Any], column: str
     if column in {"last_seen_at", "crawled_at"}:
         return new_value if non_empty(new_value) else current
     if column == "coverage_note":
-        if new_value is not None:
-            return new_value
+        if "coverage_note" in incoming:
+            return new_value or ""
         return current
     if column in {"field_audit_status", "field_audit_reasons", "field_audit_note"}:
         return new_value if new_value is not None else current

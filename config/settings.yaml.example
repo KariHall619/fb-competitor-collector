@@ -30,6 +30,7 @@ feishu:
     all_posts: "全量内容库"
     daily_new: "每日新增"
     filter_result: "筛选结果"
+    sheet2: ""
     errors: "异常记录"
   write_mode:
     all_posts: append

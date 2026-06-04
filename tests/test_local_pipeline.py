@@ -1151,6 +1151,8 @@ def assert_opencli_adapter_scaffold_contract() -> None:
     assert "coverage_incomplete" in script_text
     assert "default: 520" in script_text
     assert "older_than_time_window" in script_text
+    assert "everSawInsideWindow" in script_text
+    assert "timeWindow.enabled && everSawInsideWindow" in script_text
     assert "{ name: 'posted-after'" in script_text
     assert "{ name: 'posted-before'" in script_text
 
@@ -1171,10 +1173,13 @@ def assert_account_and_worker_call_opencli_adapter() -> None:
     extract_text = (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
     assert "scripts/run_project_opencli.py" not in account_text
     discover_slice = account_text[account_text.index("def discover_homepage_once") : account_text.index("def expected_coverage_incomplete")]
-    assert '"scripts/opencli_extract_current_tab.mjs"' in discover_slice
-    assert '"--window"' not in discover_slice
-    assert '"fb-competitor-posts"' not in discover_slice
-    assert "opencli_command(config)" not in discover_slice
+    assert '"scripts/opencli_extract_current_tab.mjs"' not in discover_slice
+    assert '"facebook"' in discover_slice
+    assert '"fb-competitor-posts"' in discover_slice
+    assert '"discover"' in discover_slice
+    assert '"--window"' in discover_slice
+    assert '"background"' in discover_slice
+    assert "opencli_command(config)" in discover_slice
     assert (ROOT / "scripts" / "opencli_runtime.mjs").exists()
     assert (ROOT / "scripts" / "opencli_extract_current_tab.mjs").exists()
     assert "defaultAccountSession(config, accountUrl)" in runtime_text
@@ -3901,6 +3906,7 @@ def assert_sqlite_upsert_clears_resolved_coverage_note(tmp_path: Path) -> None:
     stored_resolved = row_for_post(conn, resolved)
     assert stored_resolved is not None
     assert stored_resolved["coverage_note"] == ""
+    assert "coverage_note" not in json.loads(stored_resolved["raw_payload"])
     resolved_summary = enrichment_completion_summary(conn, [stored_resolved], {})
     assert resolved_summary["coverage_incomplete_count"] == 0
     assert resolved_summary["coverage_health"] == "complete"
@@ -4787,7 +4793,7 @@ def assert_filter_sync_can_target_sheet_and_posted_at_window(tmp_path: Path) -> 
     config_text = config.read_text(encoding="utf-8").replace(
         "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'filter_posted_window.sqlite'}"
     )
-    config_text = config_text.replace('filter_result: "筛选结果"', 'filter_result: "筛选结果"\n    sheet2: "Sheet2"')
+    config_text = config_text.replace('sheet2: ""', 'sheet2: "Sheet2"')
     config.write_text(config_text, encoding="utf-8")
 
     imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
@@ -8302,9 +8308,13 @@ def assert_run_account_job_waits_for_material_before_summary_command() -> None:
         discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
     )
 
-    assert run_account_job.has_pre_summary_auto_enrichment_work(completion) is True
-    assert [item["reason"] for item in commands] == ["pending_enrichment"]
-    assert "export_summary_requests.py" not in commands[0]["command"]
+    assert run_account_job.has_pre_summary_auto_enrichment_work(completion) is False
+    assert [item["reason"] for item in commands] == [
+        "pending_enrichment",
+        "needs_codex_summary",
+        "needs_codex_summary",
+    ]
+    assert "export_summary_requests.py" in commands[1]["command"]
 
 
 def assert_run_account_job_skips_worker_for_summary_only_completion() -> None:
@@ -9209,9 +9219,14 @@ def assert_run_account_job_waits_for_article_material_before_summary_export() ->
         discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
     )
     assert status == "incomplete_pending_tasks"
-    assert [item["reason"] for item in commands] == ["pending_enrichment"]
-    assert run_account_job.has_pre_summary_auto_enrichment_work(completion) is True
+    assert [item["reason"] for item in commands] == [
+        "pending_enrichment",
+        "needs_codex_summary",
+        "needs_codex_summary",
+    ]
+    assert run_account_job.has_pre_summary_auto_enrichment_work(completion) is False
     assert "--resume-only" in commands[0]["command"]
+    assert "export_summary_requests.py" in commands[1]["command"]
     assert "export_summary_requests.py" not in commands[0]["command"]
 
 

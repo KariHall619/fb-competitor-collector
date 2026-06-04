@@ -30,6 +30,7 @@ feishu:
     all_posts: "44013b"
     daily_new: "44013b"
     filter_result: "44013b"
+    sheet2: "tAmT37"
     errors: "异常记录"
   write_mode:
     all_posts: append

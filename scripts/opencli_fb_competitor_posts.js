@@ -416,6 +416,7 @@ async function discover(page, kwargs) {
   let noMovementCount = 0;
   let previousScrollHeight = 0;
   let oldPostWindowCount = 0;
+  let everSawInsideWindow = false;
   for (let index = 0; index < maxSnapshots; index += 1) {
     const extraction = await readPage(page, browserExpression(maxText));
     if (extraction.capture_blocked) {
@@ -444,6 +445,7 @@ async function discover(page, kwargs) {
       seen.set(key, candidate);
       newPosts += 1;
     }
+    if (insideWindowPosts > 0) everSawInsideWindow = true;
     snapshots.push({
       index,
       body_length: extraction.body_length || 0,
@@ -461,7 +463,7 @@ async function discover(page, kwargs) {
     });
     stable = seen.size === previousSeenCount ? stable + 1 : 0;
     previousSeenCount = seen.size;
-    oldPostWindowCount = timeWindow.enabled && oldWindowPosts > 0 && insideWindowPosts === 0
+    oldPostWindowCount = timeWindow.enabled && everSawInsideWindow && oldWindowPosts > 0 && insideWindowPosts === 0
       ? oldPostWindowCount + 1
       : 0;
     if (oldPostWindowCount >= oldPostStopSnapshots) {
