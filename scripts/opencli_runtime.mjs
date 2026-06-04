@@ -225,22 +225,70 @@ function normalizeTabs(payload) {
   }));
 }
 
-async function ensureFacebookTab({ opencliCommand, session, accountUrl, runCommand = runOpencli }) {
-  const bind = await runCommand(["browser", session, "bind"], { command: opencliCommand });
-  if (!bind.ok) {
+function findTabByPage(tabs, page) {
+  const target = String(page || "").trim();
+  if (!target) return null;
+  return tabs.find((tab) => String(tab.page || "") === target) || null;
+}
+
+async function listTabs({ opencliCommand, session, runCommand = runOpencli }) {
+  const tabsResult = await runCommand(["browser", session, "tab", "list"], { command: opencliCommand });
+  if (!tabsResult.ok) {
     return {
       ok: false,
-      status: "opencli_bind_failed",
+      status: "opencli_tab_list_failed",
       exit_code: 69,
-      message: "OpenCLI Browser Bridge 无法绑定当前 Chrome 标签页；请先安装并启用 OpenCLI 扩展，保持目标 Facebook 页面在当前 Chrome 窗口可见。",
-      stdout: bind.stdout.trim(),
-      stderr: bind.stderr.trim(),
+      message: "OpenCLI Browser Bridge 无法读取 Chrome 标签页列表；请先安装并启用 OpenCLI 扩展，确认正常 Chrome profile 已连接。",
+      stdout: tabsResult.stdout.trim(),
+      stderr: tabsResult.stderr.trim(),
+    };
+  }
+  return { ok: true, tabs: normalizeTabs(parseJsonOutput(tabsResult)) };
+}
+
+async function ensureFacebookTab({ opencliCommand, session, accountUrl, tabPage = "", runCommand = runOpencli }) {
+  const listed = await listTabs({ opencliCommand, session, runCommand });
+  if (!listed.ok) return listed;
+
+  const tabs = listed.tabs;
+  const explicit = findTabByPage(tabs, tabPage);
+  if (tabPage && !explicit) {
+    return {
+      ok: false,
+      status: "tab_page_missing",
+      exit_code: 5,
+      action_required: "human_intervention_required",
+      message: "自动化指定的 Chrome 标签页不存在或已被关闭；请重新运行账号作业，让脚本重新打开目标账号主页。",
+      tab_page: tabPage,
+      account_url: accountUrl || "",
+      open_tab_count: tabs.length,
+      tabs: tabs.slice(0, 10),
+    };
+  }
+  if (explicit) {
+    if (!facebookTab(explicit) || (accountUrl && !matchesAccount(explicit, accountUrl))) {
+      return {
+        ok: false,
+        status: "tab_page_mismatch",
+        exit_code: 5,
+        action_required: "human_intervention_required",
+        message: "自动化指定的 Chrome 标签页不是目标 Facebook 账号主页；为避免占用用户当前标签页，已停止本次采集。",
+        tab_page: tabPage,
+        account_url: accountUrl || "",
+        tab: explicit,
+        open_tab_count: tabs.length,
+        facebook_tab_count: tabs.filter(facebookTab).length,
+      };
+    }
+    return {
+      ok: true,
+      tab: explicit,
+      open_tab_count: tabs.length,
+      facebook_tab_count: tabs.filter(facebookTab).length,
+      tab_access_mode: "explicit_tab",
     };
   }
 
-  const tabsResult = await runCommand(["browser", session, "tab", "list"], { command: opencliCommand });
-  const tabsPayload = parseJsonOutput(tabsResult);
-  const tabs = normalizeTabs(tabsPayload);
   const facebookTabs = tabs.filter(facebookTab);
   const selected = facebookTabs.find((tab) => matchesAccount(tab, accountUrl)) || (!accountUrl ? facebookTabs[0] : null);
   if (!selected) {
@@ -250,8 +298,8 @@ async function ensureFacebookTab({ opencliCommand, session, accountUrl, runComma
       exit_code: 5,
       action_required: "human_intervention_required",
       message: accountUrl
-        ? "未发现与目标账号匹配的 Facebook 标签页。请先在正常 Chrome 中打开该账号主页，并确认业务人员肉眼可见帖子列表。"
-        : "未发现已打开的 Facebook 标签页。请先在正常 Chrome 中打开业务人员肉眼可见帖子列表的 Facebook 页面。",
+        ? "未发现与目标账号匹配的 Facebook 标签页；脚本不会绑定或占用当前活动标签页。请重新运行批量入口自动打开账号主页，或手动打开目标账号主页后重试。"
+        : "未发现已打开的 Facebook 标签页；脚本不会绑定或占用当前活动标签页。请先打开业务人员肉眼可见帖子列表的 Facebook 页面后重试。",
       account_url: accountUrl || "",
       open_tab_count: tabs.length,
       facebook_tab_count: facebookTabs.length,
@@ -343,12 +391,13 @@ function createOpenedTabTracker({ opencliCommand, session, closeEnabled = true, 
   return {
     closeAll,
     forget,
+    has: (tab) => openedTabs.has(tabPageId(tab)),
     remember,
     snapshot,
   };
 }
 
-async function evaluateInSession({ opencliCommand, session, js, tab, allowSelectFallback = true }) {
+async function evaluateInSession({ opencliCommand, session, js, tab, allowSelectFallback = false }) {
   const args = ["browser", session, "eval", js];
   if (tab) args.push("--tab", tab);
   const direct = await runOpencli(args, { command: opencliCommand });
@@ -421,6 +470,8 @@ export {
   evaluateInSession,
   extractArgs,
   facebookTab,
+  findTabByPage,
+  listTabs,
   loadOpencliContext,
   matchesAccount,
   outputJson,

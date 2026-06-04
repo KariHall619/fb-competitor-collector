@@ -38,7 +38,7 @@ def main() -> int:
     parser.add_argument("--hot-views", action="store_true")
     parser.add_argument("--hot-likes", action="store_true")
     parser.add_argument("--sync", action="store_true")
-    parser.add_argument("--sync-audit", action="store_true", help="Write auditable candidates with missing-field markers.")
+    parser.add_argument("--sync-audit", "--ledger-sync", dest="sync_audit", action="store_true", help="Write auditable candidates with missing-field markers.")
     parser.add_argument("--sync-partial", action="store_true")
     parser.add_argument("--strict-ready-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true")
@@ -135,7 +135,7 @@ def main() -> int:
         print(json.dumps(attach_sync_top_level(base_summary, result), ensure_ascii=False, indent=2))
         return sync_cli_exit_code(result)
 
-    if (args.sync or args.sync_audit) and not args.strict_ready_only:
+    if args.sync_audit:
         headers = configured_output_headers(config)
         output_posts, skipped_posts = audit_output_candidates(posts)
         if not output_posts:
@@ -175,7 +175,7 @@ def main() -> int:
         print(json.dumps(attach_sync_top_level(base_summary, result), ensure_ascii=False, indent=2))
         return sync_cli_exit_code(result)
 
-    if args.sync and args.strict_ready_only:
+    if args.sync:
         headers = configured_output_headers(config)
         ready_posts, skipped_posts = ready_for_output(posts, config)
         errors = output_quality_errors(ready_posts, config)

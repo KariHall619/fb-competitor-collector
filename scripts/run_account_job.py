@@ -199,22 +199,23 @@ def discover_homepage_once(
     min_snapshots: int,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any], int]:
     started = time.monotonic()
-    discover = run_command(
-        [
-            "node",
-            "scripts/opencli_extract_current_tab.mjs",
-            "--config",
-            args.config,
-            "--account-url",
-            args.account_url,
-            "--max-text",
-            str(args.max_text),
-            "--max-snapshots",
-            str(max_snapshots),
-            "--min-snapshots",
-            str(min_snapshots),
-        ]
-    )
+    command = [
+        "node",
+        "scripts/opencli_extract_current_tab.mjs",
+        "--config",
+        args.config,
+        "--account-url",
+        args.account_url,
+        "--max-text",
+        str(args.max_text),
+        "--max-snapshots",
+        str(max_snapshots),
+        "--min-snapshots",
+        str(min_snapshots),
+    ]
+    if getattr(args, "tab_page", ""):
+        command.extend(["--tab-page", args.tab_page])
+    discover = run_command(command)
     payload = parse_json_output(discover)
     payload["returncode"] = discover.returncode
     payload["snapshot_budget"] = {
@@ -500,6 +501,8 @@ def run_worker_pass(
         ]
         if args.account_name:
             command.extend(["--account-name", args.account_name])
+        if getattr(args, "tab_page", ""):
+            command.extend(["--tab-page", args.tab_page])
         if target_date:
             command.extend(["--target-date", target_date])
         worker = run_command(command)
@@ -588,7 +591,7 @@ def run_sync(
     posts: list[dict[str, Any]],
     conn: Any,
 ) -> dict[str, Any]:
-    if not args.sync:
+    if not (args.sync or getattr(args, "sync_audit", False)):
         completion = enrichment_completion_summary(conn, posts, config)
         return {
             "ok": True,
@@ -615,7 +618,7 @@ def run_sync(
         "all_posts",
         "append",
         args.dry_run,
-        audit=not args.strict_ready_only,
+        audit=bool(getattr(args, "sync_audit", False)),
         partial=False,
         conn=conn,
     )
@@ -885,6 +888,8 @@ def next_commands_for_status(
         base.extend(["--account-name", args.account_name])
     if args.sync:
         base.append("--sync")
+    if getattr(args, "sync_audit", False):
+        base.append("--sync-audit")
     if args.dry_run:
         base.append("--dry-run")
     if getattr(args, "strict_ready_only", False):
@@ -1852,7 +1857,9 @@ def main() -> int:
     parser.add_argument("--last-hours", type=int, default=24)
     parser.add_argument("--resume-only", action="store_true", help="Skip homepage discovery and resume SQLite enrichment/sync only.")
     parser.add_argument("--sync", action="store_true")
+    parser.add_argument("--sync-audit", "--ledger-sync", dest="sync_audit", action="store_true", help="Compatibility ledger mode: write auditable incomplete candidates with missing-field markers.")
     parser.add_argument("--strict-ready-only", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--tab-page", default="", help="OpenCLI tab page id opened by automation; avoids binding or selecting the user's current tab.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--max-resume-passes",
@@ -1951,7 +1958,7 @@ def main() -> int:
         emit_result(partial_result)
         return 1
     feishu_auth_preflight = {"ok": True, "skipped": True}
-    if args.sync and not args.dry_run:
+    if (args.sync or getattr(args, "sync_audit", False)) and not args.dry_run:
         current_posts = scoped_posts(
             conn,
             account_name=args.account_name,
@@ -2307,16 +2314,21 @@ def main() -> int:
             result["next_commands"].append({"reason": "quality_threshold_failed", "description": action, "command": result["next_commands"][0]["command"] if result["next_commands"] else ""})
     result["next_commands"] = result["next_commands"][:4]
     strict_completion_exit = not args.allow_incomplete_success
-    if strict_completion_exit and result["run_status"] != "complete" and sync_result.get("ok", True):
+    if strict_completion_exit and result["run_status"] != "complete":
         result["exit_status_reason"] = "incomplete_run_status"
-    if result.get("quality_threshold_failed") and sync_result.get("ok", True):
+    if result.get("quality_threshold_failed"):
         result["exit_status_reason"] = "quality_threshold_failed"
     emit_result(result)
     if result.get("quality_threshold_failed"):
         return 2
     if strict_completion_exit and result["run_status"] != "complete":
         return 2
-    return 0 if sync_result.get("ok", True) else 1
+    if not sync_result.get("ok", True):
+        sync_gate_status = sync_failed_status(sync_result)
+        if not strict_completion_exit and sync_gate_status in {"quality_gate", "audit_output_gate", "partial_gate"}:
+            return 0
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

@@ -682,14 +682,15 @@ def assert_opencli_extract_script_requires_human_intervention() -> None:
     assert "browser.user.claimTab" not in script_text
 
 
-def assert_opencli_runtime_keeps_current_bound_tab() -> None:
+def assert_opencli_runtime_avoids_binding_current_tab() -> None:
     script_text = (ROOT / "scripts" / "opencli_runtime.mjs").read_text(encoding="utf-8")
     ensure_start = script_text.index("async function ensureFacebookTab")
     evaluate_start = script_text.index("async function evaluateInSession")
     ensure_body = script_text[ensure_start:evaluate_start]
+    assert '"browser", session, "bind"' not in ensure_body
     assert '"tab", "select", selected.page' not in ensure_body
-    assert 'tab_access_mode: selected.current ? "current_tab" : "direct_tab"' in ensure_body
-    assert "allowSelectFallback = true" in script_text
+    assert 'tab_access_mode: "explicit_tab"' in ensure_body
+    assert "allowSelectFallback = false" in script_text
     assert '"tab", "select", tab' in script_text
     assert 'tab_access_mode: "select_fallback"' in script_text
     assert "select_fallback" in (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
@@ -706,9 +707,6 @@ import { ensureFacebookTab } from './scripts/opencli_runtime.mjs';
 const calls = [];
 async function runCommand(args) {
   calls.push(args);
-  if (args.slice(0, 3).join(' ') === 'browser fb-competitor bind') {
-    return { ok: true, stdout: '{}', stderr: '' };
-  }
   if (args.slice(0, 4).join(' ') === 'browser fb-competitor tab list') {
     return {
       ok: true,
@@ -734,6 +732,50 @@ if (result.ok || result.status !== 'facebook_tab_missing' || !result.account_url
 }
 if (!/目标账号/.test(result.message)) {
   console.error(result.message);
+  process.exit(3);
+}
+if (calls.some((args) => args.includes('bind'))) {
+  console.error(JSON.stringify(calls));
+  process.exit(4);
+}
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def assert_opencli_runtime_uses_explicit_tab_page_only() -> None:
+    script = """
+import { ensureFacebookTab } from './scripts/opencli_runtime.mjs';
+
+const calls = [];
+async function runCommand(args) {
+  calls.push(args);
+  if (args.slice(0, 4).join(' ') === 'browser fb-competitor tab list') {
+    return {
+      ok: true,
+      stdout: JSON.stringify([
+        { page: 'target-page', url: 'https://www.facebook.com/targetaccount', title: 'Target Account' },
+        { page: 'other-page', url: 'https://www.facebook.com/otheraccount', title: 'Other Account' }
+      ]),
+      stderr: ''
+    };
+  }
+  return { ok: false, stdout: '', stderr: 'unexpected command' };
+}
+
+const result = await ensureFacebookTab({
+  opencliCommand: ['opencli'],
+  session: 'fb-competitor',
+  accountUrl: 'https://www.facebook.com/targetaccount',
+  tabPage: 'target-page',
+  runCommand,
+});
+if (!result.ok || result.tab.page !== 'target-page' || result.tab_access_mode !== 'explicit_tab') {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(2);
+}
+if (calls.some((args) => args.includes('bind') || args.includes('select'))) {
+  console.error(JSON.stringify(calls));
   process.exit(3);
 }
 """
@@ -2966,7 +3008,6 @@ def assert_strict_sync_completion_uses_full_candidate_scope(tmp_path: Path) -> N
             "--input",
             str(sample),
             "--sync",
-            "--strict-ready-only",
             "--dry-run",
         ]
     )
@@ -2986,7 +3027,7 @@ def assert_strict_sync_completion_uses_full_candidate_scope(tmp_path: Path) -> N
     assert completion["has_incomplete_enrichment"] is True
 
 
-def assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path: Path) -> None:
+def assert_minimal_incomplete_candidate_requires_audit_sync(tmp_path: Path) -> None:
     config = tmp_path / "settings_minimal_ledger.yaml"
     sample = tmp_path / "minimal_ledger.json"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
@@ -3018,16 +3059,12 @@ def assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path: Path) -> Non
     assert sync.returncode == 1, sync.stdout
     sync_data = json.loads(sync.stdout)
     assert sync_data["complete"] is False
-    assert sync_data["run_status"] == "synced_ledger_incomplete"
-    assert sync_data["feishu_sync"]["audit_output"] is True
-    assert sync_data["feishu_sync"]["ok"] is True
-    assert sync_data["feishu_sync"]["complete"] is False
-    assert sync_data["feishu_sync"]["output_candidates"] == 1
-    assert sync_data["feishu_sync"]["audit_missing_field_counts"]["exact_time"] == 1
-    assert sync_data["feishu_sync"]["audit_missing_field_counts"]["lead_link"] == 1
-    assert sync_data["feishu_sync"]["audit_missing_field_counts"]["article_summary"] == 1
-    assert "精确时间：1 条" in sync_data["feishu_sync"]["audit_missing_field_notes"]
-    assert '"rows": 1' in sync.stdout
+    assert sync_data["run_status"] == "quality_gate"
+    assert sync_data["feishu_sync"]["stage"] == "quality_gate"
+    assert sync_data["feishu_sync"]["run_status"] == "quality_gate"
+    assert sync_data["feishu_sync"]["ready_for_output"] == 0
+    assert sync_data["feishu_sync"]["needs_enrichment_skipped"] == 1
+    assert "audit_output" not in sync_data["feishu_sync"]
 
     strict = run(
         [
@@ -3038,12 +3075,23 @@ def assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path: Path) -> Non
             "--input",
             str(sample),
             "--sync",
-            "--strict-ready-only",
             "--dry-run",
         ]
     )
     assert strict.returncode == 1, strict.stdout
     assert '"ready_for_output": 0' in strict.stdout
+
+    audit = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--sync-audit", "--dry-run"])
+    assert audit.returncode == 1, audit.stdout
+    audit_data = json.loads(audit.stdout)
+    assert audit_data["run_status"] == "synced_ledger_incomplete"
+    assert audit_data["feishu_sync"]["audit_output"] is True
+    assert audit_data["feishu_sync"]["output_candidates"] == 1
+    assert audit_data["feishu_sync"]["audit_missing_field_counts"]["exact_time"] == 1
+    assert audit_data["feishu_sync"]["audit_missing_field_counts"]["lead_link"] == 1
+    assert audit_data["feishu_sync"]["audit_missing_field_counts"]["article_summary"] == 1
+    assert "精确时间：1 条" in audit_data["feishu_sync"]["audit_missing_field_notes"]
+    assert '"rows": 1' in audit.stdout
 
 
 def assert_sqlite_upsert_preserves_enriched_fields(tmp_path: Path) -> None:
@@ -3564,7 +3612,7 @@ def assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path: Path) -> 
             str(config),
             "--input",
             str(prepared),
-            "--sync",
+            "--sync-audit",
             "--dry-run",
         ]
     )
@@ -3874,7 +3922,7 @@ def assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_p
             str(config),
             "--input",
             str(sample),
-            "--sync",
+            "--sync-audit",
             "--dry-run",
         ]
     )
@@ -3894,7 +3942,6 @@ def assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_p
             "--input",
             str(sample),
             "--sync",
-            "--strict-ready-only",
             "--dry-run",
         ]
     )
@@ -3998,7 +4045,6 @@ def assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path: Path) ->
             "--input",
             str(sample),
             "--sync",
-            "--strict-ready-only",
             "--dry-run",
         ]
     )
@@ -4044,7 +4090,6 @@ def assert_article_url_alone_does_not_qualify_lead_link(tmp_path: Path) -> None:
             "--input",
             str(sample),
             "--sync",
-            "--strict-ready-only",
             "--dry-run",
         ]
     )
@@ -4091,7 +4136,6 @@ def assert_filter_sync_applies_output_quality_gate(tmp_path: Path) -> None:
             "--date",
             "260527",
             "--sync",
-            "--strict-ready-only",
             "--dry-run",
         ]
     )
@@ -4142,7 +4186,7 @@ def assert_filter_sync_reports_audit_missing_field_counts(tmp_path: Path) -> Non
             str(config),
             "--date",
             "260527",
-            "--sync",
+            "--sync-audit",
             "--dry-run",
         ]
     )
@@ -4203,7 +4247,6 @@ def assert_quality_gate_requires_comment_lead_source(tmp_path: Path) -> None:
             "--input",
             str(sample),
             "--sync",
-            "--strict-ready-only",
             "--dry-run",
         ]
     )
@@ -4260,7 +4303,6 @@ def assert_quality_gate_rejects_internal_landing_url(tmp_path: Path) -> None:
             "--input",
             str(sample),
             "--sync",
-            "--strict-ready-only",
             "--dry-run",
         ]
     )
@@ -5192,9 +5234,11 @@ def assert_thirteen_incomplete_candidates_are_imported_for_enrichment(tmp_path: 
     assert sync.returncode == 1, sync.stdout
     sync_data = json.loads(sync.stdout)
     assert sync_data["complete"] is False
-    assert sync_data["run_status"] == "synced_ledger_incomplete"
-    assert sync_data["feishu_sync"]["audit_output"] is True
-    assert sync_data["feishu_sync"]["output_candidates"] == 13
+    assert sync_data["run_status"] == "quality_gate"
+    assert sync_data["feishu_sync"]["stage"] == "quality_gate"
+    assert sync_data["feishu_sync"]["run_status"] == "quality_gate"
+    assert sync_data["feishu_sync"]["ready_for_output"] == 0
+    assert sync_data["feishu_sync"]["needs_enrichment_skipped"] == 13
 
     audit = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--sync-audit", "--dry-run"])
     assert audit.returncode == 1, audit.stdout
@@ -5866,6 +5910,8 @@ def assert_enrichment_worker_scopes_tasks_to_account(tmp_path: Path) -> None:
 
 def assert_enrichment_worker_scope_includes_unknown_date_candidates(tmp_path: Path) -> None:
     config = tmp_path / "settings_worker_unknown_date.yaml"
+    fake_bin = tmp_path / "fake-bin"
+    fake_node = fake_bin / "node"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
     config.write_text(
         config.read_text(encoding="utf-8").replace(
@@ -5902,6 +5948,34 @@ def assert_enrichment_worker_scope_includes_unknown_date_candidates(tmp_path: Pa
         upsert_post(conn, post)
         enqueue_enrichment_tasks_for_posts(conn, [post])
 
+    fake_bin.mkdir()
+    fake_node.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+input_path = Path(args[args.index("--input") + 1])
+output_path = Path(args[args.index("--output") + 1])
+payload = json.loads(input_path.read_text(encoding="utf-8"))
+posts = []
+for post in payload.get("posts", []):
+    next_post = dict(post)
+    next_post.update({
+        "posted_at": "2026年6月2日 12:00",
+        "posted_date": "260602",
+        "time_confirmed": True,
+        "time_source": "detail",
+    })
+    posts.append(next_post)
+output_path.write_text(json.dumps({"ok": True, "posts": posts}, ensure_ascii=False), encoding="utf-8")
+""",
+        encoding="utf-8",
+    )
+    fake_node.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     worker = run(
         [
             PYTHON,
@@ -5918,13 +5992,16 @@ def assert_enrichment_worker_scope_includes_unknown_date_candidates(tmp_path: Pa
             "competitor",
             "--limit",
             "10",
-        ]
+        ],
+        env=env,
     )
-    assert worker.returncode == 1, worker.stdout
+    assert worker.returncode == 0, worker.stdout
     data = json.loads(worker.stdout)
+    assert data["run_status"] == "complete"
     assert data["scope"]["enabled"] is True
     assert data["scope"]["post_count"] == 2
     assert data["input_tasks"] == 2
+    assert data["completed"] == 2
 
 
 def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> None:
@@ -5979,7 +6056,7 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
     assert data["post_count"] == 1
     assert data["run_status"] == "incomplete_pending_tasks"
     assert data["complete"] is False
-    assert data["feishu_sync"]["run_status"] == "synced_ledger_incomplete"
+    assert data["feishu_sync"]["run_status"] == "quality_gate"
     assert data["enrichment_completion"]["open_task_count"] > 0
     assert data["quality_summary"]["run_status"] == "incomplete_pending_tasks"
     assert data["quality_summary"]["coverage_health"] == "not_run"
@@ -5995,7 +6072,7 @@ def assert_run_account_job_resume_status_reports_incomplete(tmp_path: Path) -> N
     assert any("精确时间" in note for note in data["quality_summary"]["stage_pressure_notes"])
     assert data["quality_summary"]["top_field_gaps"]
     assert data["quality_summary"]["feishu_sync"]["enabled"] is True
-    assert data["quality_summary"]["feishu_sync"]["run_status"] == "synced_ledger_incomplete"
+    assert data["quality_summary"]["feishu_sync"]["run_status"] == "quality_gate"
     blocker_codes = [item["code"] for item in data["completion_blockers"]]
     assert blocker_codes[0] == "stage_detail_time"
     assert "field_gaps" in blocker_codes
@@ -7376,11 +7453,11 @@ if args[:2] == ["sheets", "+info"]:
 if args[:2] == ["sheets", "+read"]:
     print(json.dumps({{"data": {{"valueRange": {{"values": []}}}}}}))
     sys.exit(0)
-if args[:2] == ["sheets", "+write"]:
+if args[:2] in (["sheets", "+write"], ["sheets", "+append"]):
     range_value = args[args.index("--range") + 1]
     values = json.loads(args[args.index("--values") + 1])
     existing = json.loads(writes_path.read_text(encoding="utf-8")) if writes_path.exists() else []
-    existing.append({{"range": range_value, "values": values}})
+    existing.append({{"command": args[:2], "range": range_value, "values": values}})
     writes_path.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
     print(json.dumps({{"ok": True, "rows": len(values)}}))
     sys.exit(0)
@@ -7456,8 +7533,10 @@ sys.exit(1)
     assert "post_type" not in stored_after["field_audit_reasons"]
     writes = json.loads(writes_file.read_text(encoding="utf-8"))
     values = writes[-1]["values"]
-    headers = values[0]
-    row = values[1]
+    from field_schema import DEFAULT_OUTPUT_HEADERS
+
+    headers = DEFAULT_OUTPUT_HEADERS
+    row = values[-1]
     assert row[headers.index("帖子类型")] == "图文"
     assert row[headers.index("故事概要")] == stored_after["story_summary"]
     assert "文章概要" not in row[headers.index("是否采用")]
@@ -7566,9 +7645,10 @@ exit 1
         assert data["preflight_worker_passes"][0]["ok"] is True
         assert data["preflight_worker_passes"][0]["results"][0]["completed"] == 1
         assert data["summary_auto_apply"]["ok"] is True
-        assert data["feishu_sync"]["ok"] is True
-        assert data["feishu_sync"]["dry_run"] is True
-        assert data["feishu_sync"]["output_candidates"] == 1
+        assert data["feishu_sync"]["ok"] is False
+        assert data["feishu_sync"]["run_status"] == "quality_gate"
+        assert data["feishu_sync"]["ready_for_output"] == 0
+        assert data["feishu_sync"]["needs_enrichment_skipped"] == 1
         assert data["quality_summary"]["missing_stage_counts"]["post_type"] == 1
         assert data["quality_summary"]["open_task_stage_counts"]["post_type"] == 1
         assert "article_material" not in data["quality_summary"]["open_task_stage_counts"]
@@ -8569,7 +8649,7 @@ import pathlib
 import sys
 calls_path = pathlib.Path(r"{opencli_calls_file}")
 calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
-calls.append(sys.argv)
+calls.append({{"argv": sys.argv, "kind": "opencli"}})
 calls_path.write_text(json.dumps(calls), encoding="utf-8")
 if sys.argv[1:4] == ["browser", "fb-competitor", "tab"] and len(sys.argv) >= 6 and sys.argv[4] == "new":
     print(json.dumps({{"page": "opened-" + str(len(calls)), "url": sys.argv[5]}}))
@@ -8592,6 +8672,10 @@ calls_path = pathlib.Path(r"{calls_file}")
 calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
 calls.append(sys.argv)
 calls_path.write_text(json.dumps(calls), encoding="utf-8")
+opencli_calls_path = pathlib.Path(r"{opencli_calls_file}")
+opencli_calls = json.loads(opencli_calls_path.read_text(encoding="utf-8")) if opencli_calls_path.exists() else []
+opencli_calls.append({{"argv": sys.argv, "kind": "account_job"}})
+opencli_calls_path.write_text(json.dumps(opencli_calls), encoding="utf-8")
 account_url = sys.argv[sys.argv.index("--account-url") + 1]
 account_name = sys.argv[sys.argv.index("--account-name") + 1]
 account_type = sys.argv[sys.argv.index("--account-type") + 1]
@@ -8693,10 +8777,16 @@ sys.exit(code)
     assert "--resume-only" not in internal_calls[0]
     assert "--resume-only" in internal_calls[1]
     assert "--force-recover-running" in internal_calls[1]
+    assert "--tab-page" in internal_calls[0]
+    assert "--tab-page" in internal_calls[1]
+    assert internal_calls[0][internal_calls[0].index("--tab-page") + 1] == internal_calls[1][internal_calls[1].index("--tab-page") + 1]
     assert "export_summary_requests.py" not in internal_calls[1]
     opencli_calls = json.loads(opencli_calls_file.read_text(encoding="utf-8"))
-    assert len([call for call in opencli_calls if "new" in call]) == 2
-    assert len([call for call in opencli_calls if "close" in call]) == 2
+    assert len([call for call in opencli_calls if call["kind"] == "opencli" and "new" in call["argv"]]) == 2
+    assert len([call for call in opencli_calls if call["kind"] == "opencli" and "close" in call["argv"]]) == 2
+    first_close_index = next(index for index, call in enumerate(opencli_calls) if call["kind"] == "opencli" and "close" in call["argv"])
+    second_new_index = [index for index, call in enumerate(opencli_calls) if call["kind"] == "opencli" and "new" in call["argv"]][1]
+    assert first_close_index < second_new_index
     assert all("--target-date" in call and "260603" in call for call in calls)
     assert all("--sync" in call and "--dry-run" in call for call in calls)
 
@@ -8747,7 +8837,7 @@ sys.exit(code)
     internal_status = next(item for item in status_only_data["accounts"] if item["account_url"] == "https://www.facebook.com/internalone")
     assert internal_status["auto_follow_attempted"] is False
 
-    previous_opencli_call_count = len(json.loads(opencli_calls_file.read_text(encoding="utf-8")))
+    previous_opencli_call_count = len([call for call in json.loads(opencli_calls_file.read_text(encoding="utf-8")) if call["kind"] == "opencli"])
     no_open_result = run(
         [
             PYTHON,
@@ -8765,7 +8855,7 @@ sys.exit(code)
         env={**os.environ, "PYTHON": str(fake_python)},
     )
     assert no_open_result.returncode == 0, no_open_result.stdout
-    assert len(json.loads(opencli_calls_file.read_text(encoding="utf-8"))) == previous_opencli_call_count
+    assert len([call for call in json.loads(opencli_calls_file.read_text(encoding="utf-8")) if call["kind"] == "opencli"]) == previous_opencli_call_count
 
 
 def assert_run_accounts_job_auto_follows_coverage_recovery(tmp_path: Path) -> None:
@@ -12508,7 +12598,9 @@ def assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path: Path
     assert job.returncode == 0, job.stdout
     data = json.loads(job.stdout)
     assert data["post_count"] == 2
-    assert data["feishu_sync"]["output_candidates"] == 2
+    assert data["feishu_sync"]["run_status"] == "quality_gate"
+    assert data["feishu_sync"]["ready_for_output"] == 0
+    assert data["feishu_sync"]["needs_enrichment_skipped"] == 2
 
 
 def assert_expected_coverage_marks_missing_posts() -> None:
@@ -13383,7 +13475,7 @@ def assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path: Path) -> 
         ),
         encoding="utf-8",
     )
-    formal = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--sync", "--strict-ready-only", "--dry-run"])
+    formal = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--sync", "--dry-run"])
     assert formal.returncode == 1, formal.stdout
     assert '"ready_for_output": 0' in formal.stdout
 
@@ -13436,8 +13528,9 @@ def main() -> int:
     assert_opencli_extract_has_under_capture_guards()
     assert_opencli_extract_stable_end_is_complete_coverage()
     assert_opencli_extract_script_requires_human_intervention()
-    assert_opencli_runtime_keeps_current_bound_tab()
+    assert_opencli_runtime_avoids_binding_current_tab()
     assert_opencli_runtime_requires_matching_account_tab()
+    assert_opencli_runtime_uses_explicit_tab_page_only()
     assert_opencli_tab_tracker_closes_only_registered_tabs()
     assert_opencli_detail_session_lock_recovers_stale_files()
     assert_opencli_detail_enrichment_reuses_tab_with_fallback()
@@ -13516,7 +13609,7 @@ def main() -> int:
         assert_export_summary_requests_skips_rows_without_material(tmp_path)
         assert_enrich_article_summaries_prefers_article_url(tmp_path)
         assert_sync_feishu_strict_marks_ready_rows_synced(tmp_path)
-        assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path)
+        assert_minimal_incomplete_candidate_requires_audit_sync(tmp_path)
         assert_strict_sync_completion_uses_full_candidate_scope(tmp_path)
         assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path)
         assert_prepare_capture_preserves_type_and_article_summary(tmp_path)

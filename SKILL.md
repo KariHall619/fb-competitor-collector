@@ -5,26 +5,45 @@ description: Use when a business user wants to collect visible Facebook competit
 
 # FB Competitor Collector
 
-This skill turns business-language requests into the first-stage FB competitor workflow:
+This skill turns business-language requests into the full FB competitor collection workflow:
 
 ```text
-Chrome 已登录主页可见内容
--> 用 3h/12h/1d 等相对时间确定候选窗口
--> 打开候选帖子详情页确认精确发帖时间和评论引流链接
--> 标准化 -> SQLite 去重入库 -> 飞书同步 -> 条件筛选
+用户自然语言请求
+-> 配置/依赖预检和可自动修复项
+-> OpenCLI 在业务 Chrome profile 中打开目标账号主页或帖子详情
+-> 首页候选发现 + 详情页精确字段补抓
+-> SQLite 去重入库 + 自动补抓/摘要生成
+-> 严格质量门通过后写入飞书
+-> Codex 汇报账号、帖子数、完整度和特殊异常
 ```
 
 Keep the user-facing interaction in natural language. Do not ask business users to run shell commands unless they explicitly want commands.
+
+## Standard End-to-End Workflow
+
+For every capture/write request, follow this order unless the user explicitly asks for a read-only check:
+
+1. Interpret scope first: all enabled accounts from Feishu, one named/source-sheet account, a direct account URL not yet in the sheet, a direct post URL, or existing local/JSON/CSV rows already in SQLite/import files. If the scope is ambiguous and cannot be inferred from config or the user text, ask one concise question before running capture.
+2. Run the environment/config preflight before live capture, import with real sync, or Feishu write. Use `python3 scripts/check_env.py --config config/settings.yaml`; for real-write jobs use the same Feishu auth preflight behavior as the scripts.
+3. Fix what Codex can fix silently, then re-check. Examples: `lark-cli` user-mode setup, `tokenStatus=needs_refresh` recovery through `lark-cli doctor`, and bounded OpenCLI daemon/doctor recovery through `check_env.py --fix-opencli`.
+4. Stop and give the user exact manual steps only for blockers Codex cannot solve: Facebook logged out, visitor preview, CAPTCHA/risk control, wrong Chrome profile, Browser Bridge extension not connected to the business Chrome profile after bounded recovery, or target page not visibly loading real posts. Do not import or sync visitor-preview data.
+5. Use OpenCLI Browser Bridge only. The job should operate on a tab/page id it opened or explicitly matched in the user's normal logged-in Chrome profile, and it must not bind or take over the user's current active tab.
+6. For each account, start from the account homepage top, discover all in-window candidates, open each candidate detail/comment surface for exact time, engagement, lead link, article material, post type, and summary work, and keep incomplete candidates in SQLite/enrichment queues.
+7. Do not write the formal Feishu output until the current scoped rows pass the strict final quality gate. Missing fields trigger automatic scoped resume/enrichment/summary generation first; only explicit `--sync-audit` / `--ledger-sync` requests may write incomplete audit rows.
+8. For multi-account requests, repeat the single-account flow account by account through `run_accounts_job.py`; do not hand-stitch manual loops. Continue later accounts when a recoverable per-account issue occurs, but preserve top-level recovery commands for the original batch scope.
+9. Finish by reporting the business result in Codex: accounts attempted, per-account candidate count, final synced/usable count, whether all fields are complete, unresolved blockers, and any extreme special cases such as a post with almost no fields captured.
 
 ## Live Capture Rule
 
 Live Facebook capture has exactly one supported route:
 
 ```text
-OpenCLI Browser Bridge reads the user's normal Chrome tab where Facebook is already logged in and posts are visibly loaded.
+OpenCLI Browser Bridge reads an explicitly matched Facebook tab in the user's normal logged-in Chrome profile. Business batch jobs open account homepage tabs through OpenCLI and pass the returned `--tab-page` into child jobs; scripts must not bind or occupy the user's current active tab.
 ```
 
 If OpenCLI Browser Bridge is unavailable, stop and report the setup issue. Do not use another browser automation route for live Facebook capture.
+
+The desired operator experience is a separate automation surface that does not interrupt the user using other apps or other Chrome windows. Current scripts support page-id/tab isolation through OpenCLI `tab new` + `--tab-page`; if a future requirement demands strict new-window isolation, verify or add explicit OpenCLI/script support before documenting it as implemented.
 
 If only the OpenCLI daemon is down, run the project environment check with `--fix-opencli` or execute bounded OpenCLI doctor/daemon recovery before asking the user. If the daemon is running but the Chrome extension is not connected to the business Chrome profile, that remains a human/profile setup blocker.
 
@@ -47,7 +66,7 @@ Map common requests as follows:
 - “采集竞品调研账户第一个账号今天的帖子”
   - Run the resumable account job as the business entrypoint: `python3 scripts/run_account_job.py --config config/settings.yaml --account-url <url> --target-date YYMMDD --sync`.
   - Use `scripts/read_accounts.py` if the first account URL is needed from Feishu.
-  - Ask the user to keep the target Facebook account page open in normal Chrome if no matching tab is available.
+  - Prefer letting the batch/single-account job open the account homepage through OpenCLI and pass `--tab-page`; ask the user to keep the target page open only when automation cannot open or match it.
   - Treat relative labels such as `3h`, `12h`, and `1d` as homepage candidate-window clues only.
   - If the user says they can see a known checklist such as “13 条” or `38m,1h,2h...`, pass `--expected-post-count` and/or `--expected-labels` into `run_account_job.py`; do not call the run complete when the expected coverage is missing.
   - Expected labels can use common variants such as `1h`, `1 hour ago`, `1 小时`, or `1小时`; the coverage check normalizes these for matching.
@@ -76,6 +95,12 @@ Map common requests as follows:
   - Non-`complete` batch runs return nonzero by default. Use `--allow-incomplete-success` only for explicit preview/backward-compatibility checks where JSON will be inspected.
   - Do not manually loop account commands in chat; that is how later accounts, detail enrichment, or summary export steps get skipped.
 
+- “采集这个帖子/补抓这条帖子/这条不在库里”
+  - Treat a direct Facebook post/photo/video/reel/watch/share URL as a narrow scoped capture/enrichment request.
+  - If the post is not in SQLite, import the URL as a candidate with the provided account context when available, then run the account-scoped resume/enrichment path so exact time, lead link, engagement, post type, article material, and summary are filled before sync.
+  - If the post is already in SQLite, do not re-import weaker partial data over stronger fields. Run the emitted `next_commands` or a scoped `run_account_job.py --resume-only --force-recover-running --sync` for its account/date scope, and report which required fields remain missing.
+  - If the account URL/date cannot be inferred from the post or existing record, ask for the account page URL or visible account name before running live capture.
+
 - “把这份抓取结果导入内容库”
   - Use `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --no-sync`.
   - If no file is provided, ask for the JSON/CSV file or pasted rows.
@@ -83,7 +108,7 @@ Map common requests as follows:
 - “把结果同步到飞书”
   - Confirm `feishu.output_spreadsheet_url` is configured.
   - Prefer the emitted `next_commands` or `scripts/run_account_job.py --resume-only --force-recover-running --sync` for account-scoped capture results so pending enrichment is reported.
-  - Direct `import_existing_result.py --sync`, `filter_posts.py --sync`, and `sync_feishu.py` can still upsert ledger rows, but their `run_status`, `completion_blockers`, and `enrichment_completion` must be reported if incomplete.
+  - Direct `import_existing_result.py --sync`, `filter_posts.py --sync`, and `sync_feishu.py` strict-sync complete rows only. If scoped rows remain incomplete, report their `run_status`, `completion_blockers`, and `enrichment_completion` instead of presenting the sync as done.
 
 - “筛选 5 月 21 日的竞品帖子”
   - Use `python3 scripts/filter_posts.py --config config/settings.yaml --date YYMMDD --account-type competitor`.
@@ -101,7 +126,7 @@ Run all commands from the skill root.
 | --- | --- |
 | Environment check | `python3 scripts/check_env.py --config config/settings.yaml` |
 | Read Feishu accounts | `python3 scripts/read_accounts.py --config config/settings.yaml` |
-| Current Chrome tab extraction | OpenCLI Browser Bridge `bind -> tab list/select -> eval(scripts/fb_dom_extractors.js)` |
+| Current/explicit Chrome tab extraction | OpenCLI Browser Bridge `tab list -> direct --tab eval(scripts/fb_dom_extractors.js)`; `--tab-page` is preferred and no unconditional bind is allowed |
 | Verify OpenCLI Browser Bridge backend | `scripts/check_opencli_runtime_backend.mjs` from the OpenCLI Browser Bridge runtime |
 | Verify FB exact timestamp capture | `scripts/opencli_verify_exact_time.mjs --run` from the OpenCLI Browser Bridge runtime |
 | Import existing JSON/CSV | `python3 scripts/import_existing_result.py --config config/settings.yaml --input <file> --no-sync` |
@@ -176,17 +201,17 @@ Rules:
 - Parent post links are best-effort dedupe helpers. If a parent link is available, store it in `parent_post_url`; if not, keep the original `raw_fb_url` / `post_url` and leave later similarity review to a separate pass.
 - Formal output requires a lead link posted by the account in the comment area, a comment reply, or a main-post CTA such as `Watch more`. The link must resolve outside Facebook/Meta and be stored as `landing_url`; set `lead_link_status=qualified`.
 - A comment/reply lead link already captured from the homepage or post comments is authoritative. Detail-page enrichment must not overwrite it with unrelated external links from right-column ads, suggested posts, feed ads, or other page surfaces. A `post_cta` link is valid only when it is anchored inside the current main post article and the CTA text clearly represents an outbound story/action button such as `Watch more`.
-- Missing share count, parent post URL, exact time, summary, or lead link must not drop the candidate at capture time. Keep the candidate as `needs_enrichment`; normal `--sync` may still upsert it to the formal Feishu table with a `待补抓：...` marker in `是否采用`.
-- Normal `--sync` writes confirmed Facebook post candidates to the formal Feishu ledger even when fields are incomplete. Estimated time, missing article summary, missing lead link, missing engagement, missing post type, or incomplete coverage must be marked in `是否采用` as `待补抓：...`.
+- Missing share count, parent post URL, exact time, summary, or lead link must not drop the candidate at capture time. Keep the candidate as `needs_enrichment` in SQLite and the enrichment queue; normal business `--sync` must not upsert incomplete rows to the formal Feishu table.
+- Normal business `--sync` writes only strict final rows: `ready_for_output` plus current `quality_audit` passed. Estimated time, missing article summary, missing lead link, missing engagement, missing post type, or incomplete coverage stays local and is reported in Codex output. Use explicit `--sync-audit` or `--ledger-sync` only when the operator asks to preview/write incomplete ledger rows with `待补抓：...` markers in `是否采用`.
 - Feishu upsert must not downgrade previously filled `帖子类型` or article-sourced `故事概要` to blank when a later partial/audit row for the same post is still incomplete. Manual `是否采用` values stay protected; system `待补抓：...` markers may update or clear as gaps change.
 - `output_synced` rows still have to pass the current quality audit. If an old synced row is missing `帖子类型` or a valid article-sourced `故事概要`, the next import/upsert should turn it back into an incomplete row and reopen `post_type`, `article_material`, and/or `summary` tasks.
-- Use `--strict-ready-only` only when the operator explicitly wants to sync complete `ready_for_output` rows. In strict mode, reject estimated relative-time sources such as `relative_estimated`, `relative_hour`, or `relative_label`, and reject non-article Chinese summaries.
+- `--sync` is already strict ready-only output. Reject estimated relative-time sources such as `relative_estimated`, `relative_hour`, or `relative_label`, and reject non-article Chinese summaries. `--strict-ready-only` remains only for old command compatibility.
 - Relative labels such as `19m`, `2h`, `12h`, or `1d` are homepage windowing clues only. Use them to decide which visible posts should be opened for detail enrichment and where the scroll boundary probably is. Do not convert them into `posted_at` for formal output. Confirm `posted_at` from Facebook's timestamp tooltip or DOM attributes such as `aria-label`, `title`, `datetime`, or `data-tooltip-*`.
 - Timestamp tooltip capture is automated by the skill. First try synthetic page hover through OpenCLI Browser Bridge; if Facebook does not show the tooltip, the skill may use OpenCLI Browser Bridge mouse movement as an automated fallback. Do not ask the business user to manually hover timestamps.
 - Human intervention is only for blocking states such as login expiry, visitor preview, CAPTCHA/risk control, the wrong Chrome profile, or a page where posts are not visibly loaded.
 - Before deleting any remaining relative-time fallback code, run the exact-time verifier against a real logged-in Facebook tab through the trusted OpenCLI Browser Bridge runtime and require `status=exact_time_confirmed`.
 - Short posts must be kept if they have a valid FB content URL. If comment/reply/main-post CTA lead link, landing URL, article summary, engagement, or exact time is missing, keep them as `needs_enrichment` instead of dropping them.
-- For scale-out runs, first import visible candidates as `partial_review`, then resume queued enrichment stages in SQLite. Normal formal `--sync` upserts auditable candidates by post URL and fills missing-field reasons in `是否采用`; use `--strict-ready-only` only when the operator explicitly wants the legacy ready-only gate.
+- For scale-out runs, first import visible candidates into SQLite, then resume queued enrichment stages, generate/apply summaries, pass the quality gate, and only then run strict formal `--sync`. Use explicit `--sync-audit` / `--ledger-sync` only when the operator asks for legacy auditable ledger rows with missing-field reasons in `是否采用`.
 - For business capture-and-write requests, prefer `run_account_job.py` over manual stage stitching. The job result must be interpreted by `run_status`: `complete` means the scoped job finished; `synced_ledger_incomplete`, `incomplete_pending_tasks`, `coverage_incomplete`, or `needs_codex_summary` means Feishu may have ledger rows but the capture job is not done.
 - For “all target accounts” capture-and-write requests, prefer `run_accounts_job.py` over manual loops. The batch result is complete only when every account-level `run_status` is `complete`; otherwise report the affected accounts and the emitted per-account `next_commands`. The batch entrypoint automatically follows same-account machine-runnable recovery commands before reporting incomplete.
 - Report the account-job `quality_summary` in user-facing updates: `coverage_health`, `ledger_candidate_count` / `ledger_usable_rate`, `final_usable_count` / `final_usable_rate`, `top_field_gaps`, `stage_pressure_notes`, and `feishu_sync.run_status`. Treat a high ledger rate with a low final rate as an explicit补抓 state, not as bad write quality or full completion. Use `open_task_stage_counts`, `missing_stage_counts`, and `stage_pressure` to say which stage should resume next.
@@ -208,7 +233,7 @@ Rules:
 - `run_account_job.py --resume-only` recovers scoped stale `running` enrichment tasks before worker passes. The default stale window is conservative at 30 minutes to avoid duplicate detail navigation; use the generated `--force-recover-running` resume command after a known Codex/terminal interruption when scoped candidates or running tasks already exist.
 - Use `--sync-partial --dry-run` only for business preview output that must not affect the formal table.
 - `run_capture_pipeline.py` also reports `quality_summary`, top-level `completion_blockers`, `feishu_sync`, and `enrichment_tasks`; if it returns `complete=false`, treat the result as imported/queued work, not as final collection completion. Use `--fail-on-incomplete` when a caller must not accept incomplete partial imports.
-- Stable no-new-post extraction stop is normal completion. Business account capture defaults to `--max-snapshots 32 --min-snapshots 6` so Facebook virtualized feeds get multiple scroll samples before stopping. If current-tab extraction returns raw snapshot-cap `coverage_incomplete=true`, `run_account_job.py` and `run_capture_pipeline.py` automatically retry once from the page top with a higher snapshot budget before reporting the run. If it remains incomplete after the automatic retry, keep rows visible in the ledger and mark coverage as `待补抓：覆盖不足`.
+- Stable no-new-post extraction stop is normal completion. Business account capture defaults to `--max-snapshots 32 --min-snapshots 6` so Facebook virtualized feeds get multiple scroll samples before stopping. If current-tab extraction returns raw snapshot-cap `coverage_incomplete=true`, `run_account_job.py` and `run_capture_pipeline.py` automatically retry once from the page top with a higher snapshot budget before reporting the run. If it remains incomplete after the automatic retry, keep rows in local SQLite/enrichment state and mark coverage as `待补抓：覆盖不足`; do not strict-sync them to the formal Feishu output.
 - `coverage_note` should clear after a later same-post homepage rerun proves coverage complete. Do not preserve an old coverage marker forever, or the batch can keep reporting `coverage_incomplete` after the user-visible coverage has already been fixed.
 - If the user supplies a visible expected count or label checklist, missing expected posts/labels is also `coverage_incomplete` even when scrolling itself looked stable.
 - Re-importing the same post must preserve higher-quality stored fields. Do not overwrite confirmed detail time, qualified comment/reply/main-post CTA lead links, external landing URLs, valid Chinese article summaries, engagement values, manual `是否采用`, or final output status with weaker partial data.
@@ -247,18 +272,18 @@ Before real sync:
 
 If Feishu sync fails, report the exact `lark-cli` error and keep local SQLite results intact.
 
-## Current MVP Boundary
+## Current Product Boundary
 
-First stage only:
+In scope for this collector:
 
-- collect visible FB post links and text from the same-profile capture window
-- import links
-- normalize fields
+- collect visible FB post candidates from the same-profile OpenCLI Browser Bridge capture surface
+- confirm detail-page exact time, engagement, post type, account-owned lead link, landing URL, article material, and article-based Chinese `story_summary`
+- import, normalize, and preserve incomplete candidates for補抓
 - SQLite storage and dedupe
-- Feishu sync
-- filtering
+- strict final Feishu sync
+- local filtering and audit/preview flows
 
-Do not implement article generation, site publishing, FB lead-post generation, subagent chaining, or hot-theme similarity matching in this stage.
+Out of scope unless explicitly requested: source article writing, site publishing, FB lead-post generation, subagent chaining, hot-theme similarity matching, or other downstream marketing workflows.
 
 ## Project-Owned Extractors
 

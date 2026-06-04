@@ -30,6 +30,7 @@ const { value, has } = extractArgs(Array.isArray(PROCESS.argv) ? PROCESS.argv.sl
 const INPUT = value("--input");
 const OUTPUT = value("--output");
 const CONFIG = value("--config", "config/settings.yaml");
+const TAB_PAGE = value("--tab-page", "");
 const LIMIT = Number(value("--limit", "0"));
 const TARGET_DATE = value("--target-date", "");
 const ALLOW_REAL_MOUSE_HOVER = has("--allow-real-mouse-hover");
@@ -273,6 +274,7 @@ async function evalPayload(context, js) {
     session: context.session,
     tab: context.tab.page,
     js,
+    allowSelectFallback: Boolean(context.openedTabTracker?.has(context.tab)),
   });
   if (!result.ok) {
     throw new Error(result.stderr || result.stdout || "OpenCLI eval failed");
@@ -1532,12 +1534,18 @@ async function main() {
     session: rawContext.session,
     closeEnabled: !KEEP_OPENED_TABS,
   });
-  const baseContext = { ...rawContext, openedTabTracker };
+  const baseContext = { ...rawContext, openedTabTracker, baseTabPage: TAB_PAGE };
 
   const enriched = [];
   const errors = [];
   let reusableContext = null;
-  const lowDisturbance = { reused_detail_tab: 0, fresh_tab_fallback: 0, reusable_errors: 0 };
+  const lowDisturbance = {
+    reused_detail_tab: 0,
+    fresh_tab_fallback: 0,
+    reusable_errors: 0,
+    base_tab_page: TAB_PAGE,
+    base_tab_used_for_detail_navigation: false,
+  };
   let blockedResult = null;
   let tabCleanup = null;
   try {

@@ -100,7 +100,7 @@ def main() -> int:
     parser.add_argument("--account-type", default="competitor")
     parser.add_argument("--source-skill", default="manual-import")
     parser.add_argument("--sync", action="store_true")
-    parser.add_argument("--sync-audit", action="store_true", help="Write auditable candidates with missing-field markers.")
+    parser.add_argument("--sync-audit", "--ledger-sync", dest="sync_audit", action="store_true", help="Write auditable candidates with missing-field markers.")
     parser.add_argument("--sync-partial", action="store_true")
     parser.add_argument("--strict-ready-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-sync", action="store_true")
@@ -201,8 +201,8 @@ def main() -> int:
     }
 
     should_sync = args.sync and not args.no_sync
-    should_sync_audit = (args.sync or args.sync_audit) and not args.no_sync and not args.strict_ready_only
-    should_sync_strict = should_sync and args.strict_ready_only
+    should_sync_audit = args.sync_audit and not args.no_sync
+    should_sync_strict = should_sync
     should_sync_partial = args.sync_partial and not args.no_sync
     if should_sync_partial:
         sync_candidates = result.get("sync_candidates") or result["inserted"]

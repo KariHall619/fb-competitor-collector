@@ -70,6 +70,7 @@ def run_detail_batch(
     posts: list[dict[str, Any]],
     stages: set[str],
     target_date: str,
+    tab_page: str = "",
 ) -> dict[str, Any]:
     if not posts:
         return {"ok": True, "posts": []}
@@ -91,6 +92,8 @@ def run_detail_batch(
         ]
         if target_date:
             command.extend(["--target-date", target_date])
+        if tab_page:
+            command.extend(["--tab-page", tab_page])
         result = subprocess.run(
             command,
             cwd=ROOT,
@@ -306,6 +309,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--detail-concurrency", type=int, default=0)
     parser.add_argument("--article-concurrency", type=int, default=0)
+    parser.add_argument("--tab-page", default="", help="Automation-opened OpenCLI page id kept for caller context; detail enrichment opens its own tracked tabs.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -366,7 +370,7 @@ def main() -> int:
             batch_succeeded = False
             batch_retry_later = False
             try:
-                result = run_detail_batch(args.config, config, batch, stage_set, args.target_date)
+                result = run_detail_batch(args.config, config, batch, stage_set, args.target_date, tab_page=args.tab_page)
                 if not result.get("ok"):
                     if result.get("human_intervention_required"):
                         human_intervention_required = True

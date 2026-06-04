@@ -21,6 +21,7 @@ const { browserExpression } = require("./fb_dom_extractors.js");
 
 const { value } = extractArgs();
 const ACCOUNT_URL = value("--account-url", "");
+const TAB_PAGE = value("--tab-page", "");
 const MAX_TEXT = Number(value("--max-text", "1500"));
 const MAX_SNAPSHOTS = Number(value("--max-snapshots", "32"));
 const STABLE_SNAPSHOTS = Number(value("--stable-snapshots", "3"));
@@ -232,7 +233,12 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
 
 async function main() {
   const { opencliCommand, session } = loadOpencliContext();
-  const tabResult = await ensureFacebookTab({ opencliCommand, session, accountUrl: ACCOUNT_URL });
+  const tabResult = await ensureFacebookTab({
+    opencliCommand,
+    session,
+    accountUrl: ACCOUNT_URL,
+    tabPage: TAB_PAGE,
+  });
   if (!tabResult.ok) {
     outputJson(tabResult);
     return tabResult.exit_code || 1;

@@ -247,8 +247,13 @@ def account_job_command(args: argparse.Namespace, account: dict[str, Any]) -> li
         command.extend(["--expected-post-count", str(args.expected_post_count)])
     if getattr(args, "expected_labels", ""):
         command.extend(["--expected-labels", str(args.expected_labels)])
+    tab_page = str(account.get("tab_page") or "").strip()
+    if tab_page:
+        command.extend(["--tab-page", tab_page])
     if args.sync:
         command.append("--sync")
+    if getattr(args, "sync_audit", False):
+        command.append("--sync-audit")
     if args.dry_run:
         command.append("--dry-run")
     if not args.allow_incomplete_success:
@@ -352,6 +357,25 @@ def _append_flag(command: list[str], flag: str) -> None:
 def _remove_flag(command: list[str], flag: str) -> None:
     while flag in command:
         command.pop(command.index(flag))
+
+
+def _remove_arg_value(command: list[str], flag: str) -> None:
+    while flag in command:
+        index = command.index(flag)
+        command.pop(index)
+        if index < len(command):
+            command.pop(index)
+
+
+def command_without_tab_page(command_text_value: str) -> str:
+    if not command_text_value:
+        return ""
+    try:
+        command = shlex.split(command_text_value)
+    except ValueError:
+        return command_text_value
+    _remove_arg_value(command, "--tab-page")
+    return command_text(command)
 
 
 def _counted_stage(summary: dict[str, Any], stages: set[str]) -> bool:
@@ -458,6 +482,9 @@ def next_auto_follow_command(summary: dict[str, Any], account: dict[str, Any], a
         return []
     if command and command[0] in {"python", "python3"}:
         command[0] = os.environ.get("PYTHON") or sys.executable
+    tab_page = str(account.get("tab_page") or "").strip()
+    if tab_page:
+        _set_arg_value(command, "--tab-page", tab_page)
     return command
 
 
@@ -590,6 +617,8 @@ def batch_retry_command(args: argparse.Namespace, *, fix_opencli: bool = False) 
         command.append("--force-recover-running")
     if args.sync:
         command.append("--sync")
+    if getattr(args, "sync_audit", False):
+        command.append("--sync-audit")
     if args.dry_run:
         command.append("--dry-run")
     if args.allow_incomplete_success:
@@ -807,7 +836,7 @@ def _batch_next_command_entry(account: dict[str, Any], item: dict[str, Any]) -> 
         "run_status": account.get("run_status") or "",
         "reason": item.get("reason") or "",
         "description": item.get("description") or "",
-        "command": item.get("command"),
+        "command": command_without_tab_page(str(item.get("command") or "")),
     }
 
 
@@ -1140,6 +1169,7 @@ def main() -> int:
     parser.add_argument("--force-recover-running", action="store_true")
     parser.add_argument("--status-only", action="store_true")
     parser.add_argument("--sync", action="store_true")
+    parser.add_argument("--sync-audit", "--ledger-sync", dest="sync_audit", action="store_true", help="Compatibility ledger mode: write auditable incomplete candidates with missing-field markers.")
     parser.add_argument("--dry-run", action="store_true")
     parser.set_defaults(open_account_tabs=True)
     parser.add_argument("--open-account-tabs", dest="open_account_tabs", action="store_true")
@@ -1250,23 +1280,28 @@ def main() -> int:
 
     account_results: list[dict[str, Any]] = []
     opened_account_tabs: list[tuple[int, dict[str, Any]]] = []
+    account_tab_cleanup: list[dict[str, Any]] = []
     for account in accounts:
         open_result = prepare_account_tab_with_recovery(config, account, enabled=bool(args.open_account_tabs) and not args.resume_only and not args.status_only)
         if not open_result.get("ok"):
             account_results.append(account_open_blocker(account, open_result, args))
             continue
+        opened_tab = open_result["tab"] if isinstance(open_result.get("tab"), dict) and open_result["tab"].get("page") else None
         if isinstance(open_result.get("tab"), dict) and open_result["tab"].get("page"):
             opened_account_tabs.append((len(account_results), open_result["tab"]))
-        account_summary = run_account_until_settled(args, account)
+        account_for_job = dict(account)
+        if opened_tab:
+            account_for_job["tab_page"] = opened_tab.get("page") or ""
+        try:
+            account_summary = run_account_until_settled(args, account_for_job)
+        finally:
+            close_result = close_account_tab(config, opened_tab) if opened_tab else {"ok": True, "skipped": True, "reason": "no_tab"}
+            if opened_tab:
+                account_tab_cleanup.append(close_result)
         account_summary["open_account_tab"] = open_result
+        if opened_tab:
+            account_summary["close_account_tab"] = close_result
         account_results.append(account_summary)
-
-    account_tab_cleanup: list[dict[str, Any]] = []
-    for account_index, tab in reversed(opened_account_tabs):
-        close_result = close_account_tab(config, tab)
-        account_tab_cleanup.append(close_result)
-        if 0 <= account_index < len(account_results):
-            account_results[account_index]["close_account_tab"] = close_result
 
     aggregate = aggregate_status(account_results)
     next_commands = next_commands_for_batch(account_results, args)
