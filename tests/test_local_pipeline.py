@@ -5027,6 +5027,9 @@ def assert_run_account_job_passes_posted_at_window_to_prepare() -> None:
     script_text = (ROOT / "scripts" / "run_account_job.py").read_text(encoding="utf-8")
     assert 'parser.add_argument("--posted-after"' in script_text
     assert 'parser.add_argument("--posted-before"' in script_text
+    assert 'parser.add_argument("--sync-sheet"' in script_text
+    assert 'args.sync_sheet' in script_text
+    assert 'env.setdefault("OPENCLI_BROWSER_COMMAND_TIMEOUT", "180")' in script_text
     assert 'prepare_command.extend(["--posted-after", args.posted_after])' in script_text
     assert 'prepare_command.extend(["--posted-before", args.posted_before])' in script_text
     assert 'command.extend(["--posted-after", posted_after])' in script_text
@@ -5039,6 +5042,113 @@ def assert_run_account_job_passes_posted_at_window_to_prepare() -> None:
     assert 'parser.add_argument("--scroll-pixels", type=int, default=520)' in pipeline_text
     assert 'parser.add_argument("--posted-after", default="")' in pipeline_text
     assert 'prepare_command.extend(["--posted-after", args.posted_after])' in pipeline_text
+
+
+def assert_opencli_discovery_time_window_handles_relative_labels() -> None:
+    script_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
+    assert "function parseRelativePostTime" in script_text
+    assert "parsePostTime(timeText) || parseRelativePostTime(timeText)" in script_text
+    assert "time_window_enabled: timeWindow.enabled" in script_text
+
+
+def assert_run_account_job_scoped_posts_applies_posted_window(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from run_account_job import scoped_posts
+    from store import connect, upsert_post
+
+    conn = connect(tmp_path / "account-scoped-posted-window.sqlite")
+    config = {"quality_audit": {"required_engagement_fields": ["likes", "comments", "shares"]}}
+    account_url = "https://www.facebook.com/windowpage"
+    for suffix, posted_at in [("old", "2026年6月4日 11:59"), ("new", "2026年6月4日 12:01")]:
+        upsert_post(
+            conn,
+            normalize_post(
+                {
+                    "account_url": account_url,
+                    "account_type": "competitor",
+                    "post_url": f"https://www.facebook.com/windowpage/posts/{suffix}",
+                    "posted_at": posted_at,
+                    "time_confirmed": True,
+                    "time_source": "dom_aria_label",
+                }
+            ),
+            config,
+        )
+
+    posts = scoped_posts(
+        conn,
+        account_name="",
+        account_url=account_url,
+        account_type="competitor",
+        dates=["260604"],
+        posted_after="2026-06-04 12:00",
+    )
+
+    assert [post["post_url"] for post in posts] == ["https://facebook.com/windowpage/posts/new"]
+
+
+def assert_enrichment_worker_scopes_posts_by_posted_window(tmp_path: Path) -> None:
+    config = tmp_path / "settings_enrichment_posted_window.yaml"
+    db = tmp_path / "enrichment-posted-window.sqlite"
+    account_url = "https://www.facebook.com/windowpage"
+    sample = tmp_path / "enrichment_posted_window.json"
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "account_url": account_url,
+                        "account_type": "competitor",
+                        "post_url": "https://www.facebook.com/windowpage/posts/old",
+                        "posted_at": "2026年6月4日 11:59",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                    },
+                    {
+                        "account_url": account_url,
+                        "account_type": "competitor",
+                        "post_url": "https://www.facebook.com/windowpage/posts/new",
+                        "posted_at": "2026年6月4日 12:01",
+                        "time_confirmed": True,
+                        "time_source": "dom_aria_label",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {db}"),
+        encoding="utf-8",
+    )
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
+    assert imported.returncode == 0, imported.stdout
+    result = run(
+        [
+            PYTHON,
+            "scripts/enrichment_worker.py",
+            "--config",
+            str(config),
+            "--date",
+            "260604",
+            "--account-url",
+            account_url,
+            "--account-type",
+            "competitor",
+            "--posted-after",
+            "2026-06-04 12:00",
+            "--stages",
+            "summary",
+            "--limit",
+            "1",
+        ]
+    )
+    data = json.loads(result.stdout)
+    assert data["scope"]["post_count"] == 1
+    assert data["input_tasks"] == 1
 
 
 def assert_detail_time_helpers_parse_exact_facebook_time() -> None:
@@ -13606,6 +13716,9 @@ def main() -> int:
         assert_prepare_capture_has_no_base_time_argument()
         assert_prepare_capture_can_filter_posted_at_window(tmp_path)
         assert_run_account_job_passes_posted_at_window_to_prepare()
+        assert_opencli_discovery_time_window_handles_relative_labels()
+        assert_run_account_job_scoped_posts_applies_posted_window(tmp_path)
+        assert_enrichment_worker_scopes_posts_by_posted_window(tmp_path)
         assert_detail_time_helpers_parse_exact_facebook_time()
         assert_opencli_detail_enrichment_supports_target_date_filter()
         assert_opencli_detail_enrichment_rejects_string_false_time()

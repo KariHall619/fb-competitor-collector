@@ -61,6 +61,30 @@ function parsePostTime(value) {
   return null;
 }
 
+function parseRelativePostTime(value, reference = new Date()) {
+  const text = clean(value).toLowerCase();
+  if (!text) return null;
+  if (/^just now$|^刚刚$/.test(text)) return new Date(reference.getTime());
+  if (/^yesterday$|^昨天$/.test(text)) return new Date(reference.getTime() - 24 * 60 * 60 * 1000);
+  let match = text.match(/^(\d+)\s*(m|min|mins|minute|minutes)(?:\s+ago)?$/i);
+  if (match) return new Date(reference.getTime() - Number(match[1]) * 60 * 1000);
+  match = text.match(/^(\d+)\s*(h|hr|hrs|hour|hours)(?:\s+ago)?$/i);
+  if (match) return new Date(reference.getTime() - Number(match[1]) * 60 * 60 * 1000);
+  match = text.match(/^(\d+)\s*(d|day|days)(?:\s+ago)?$/i);
+  if (match) return new Date(reference.getTime() - Number(match[1]) * 24 * 60 * 60 * 1000);
+  match = text.match(/^(\d+)\s*(w|wk|wks|week|weeks)(?:\s+ago)?$/i);
+  if (match) return new Date(reference.getTime() - Number(match[1]) * 7 * 24 * 60 * 60 * 1000);
+  match = text.match(/^(\d+)\s*分钟$/);
+  if (match) return new Date(reference.getTime() - Number(match[1]) * 60 * 1000);
+  match = text.match(/^(\d+)\s*小时$/);
+  if (match) return new Date(reference.getTime() - Number(match[1]) * 60 * 60 * 1000);
+  match = text.match(/^(\d+)\s*天$/);
+  if (match) return new Date(reference.getTime() - Number(match[1]) * 24 * 60 * 60 * 1000);
+  match = text.match(/^(\d+)\s*周$/);
+  if (match) return new Date(reference.getTime() - Number(match[1]) * 7 * 24 * 60 * 60 * 1000);
+  return null;
+}
+
 function discoveryTimeWindow(kwargs) {
   const targetDate = dateKeyToDate(kwargs['target-date']);
   const postedAfter = parsePostTime(kwargs['posted-after']);
@@ -77,7 +101,8 @@ function discoveryTimeWindow(kwargs) {
 
 function postTimeState(post, window) {
   if (!window?.enabled) return 'unknown';
-  const parsed = parsePostTime(post?.posted_at);
+  const timeText = post?.posted_at || post?.posted_at_raw || post?.post_time_text;
+  const parsed = parsePostTime(timeText) || parseRelativePostTime(timeText);
   if (!parsed) return 'unknown';
   if (window.lower && parsed < window.lower) return 'before';
   if (window.upper && parsed >= window.upper) return 'after';
@@ -375,6 +400,7 @@ async function discover(page, kwargs) {
       seen_posts: seen.size,
       old_window_posts: oldWindowPosts,
       inside_window_posts: insideWindowPosts,
+      time_window_enabled: timeWindow.enabled,
       visible_time_texts: (extraction.candidates || [])
         .flatMap((candidate) => candidate.time_texts || [candidate.post_time_text || ''])
         .filter(Boolean)

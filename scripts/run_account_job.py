@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import os
 import subprocess
 import tempfile
 import time
@@ -60,7 +61,9 @@ STAGE_ORDER = {
 
 
 def run_command(command: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False, timeout=timeout)
+    env = os.environ.copy()
+    env.setdefault("OPENCLI_BROWSER_COMMAND_TIMEOUT", "180")
+    return subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False, timeout=timeout, env=env)
 
 
 def opencli_command(config: dict[str, Any]) -> list[str]:
@@ -138,6 +141,41 @@ def dates_for_last_hours(hours: int, *, timezone_name: str) -> list[str]:
     return dates
 
 
+def parse_posted_at_filter(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y年%m月%d日 %H:%M"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def filter_posts_by_posted_window(
+    posts: list[dict[str, Any]],
+    *,
+    posted_after: str = "",
+    posted_before: str = "",
+) -> list[dict[str, Any]]:
+    after = parse_posted_at_filter(posted_after)
+    before = parse_posted_at_filter(posted_before)
+    if after is None and before is None:
+        return posts
+    filtered: list[dict[str, Any]] = []
+    for post in posts:
+        posted_at = parse_posted_at_filter(str(post.get("posted_at") or ""))
+        if posted_at is None:
+            continue
+        if after is not None and posted_at < after:
+            continue
+        if before is not None and posted_at > before:
+            continue
+        filtered.append(post)
+    return filtered
+
+
 def scoped_posts(
     conn: Any,
     *,
@@ -145,6 +183,8 @@ def scoped_posts(
     account_url: str,
     account_type: str,
     dates: list[str],
+    posted_after: str = "",
+    posted_before: str = "",
 ) -> list[dict[str, Any]]:
     by_key: dict[str, dict[str, Any]] = {}
     for date in dates:
@@ -166,7 +206,8 @@ def scoped_posts(
             key = post.get("canonical_post_url") or post.get("post_url")
             if key:
                 by_key[str(key)] = post
-    return sorted(by_key.values(), key=lambda item: (item.get("posted_date") or "", item.get("id") or 0))
+    posts = sorted(by_key.values(), key=lambda item: (item.get("posted_date") or "", item.get("id") or 0))
+    return filter_posts_by_posted_window(posts, posted_after=posted_after, posted_before=posted_before)
 
 
 def import_prepared(
@@ -529,6 +570,10 @@ def run_worker_pass(
             command.extend(["--account-name", args.account_name])
         if target_date:
             command.extend(["--target-date", target_date])
+        if getattr(args, "posted_after", ""):
+            command.extend(["--posted-after", args.posted_after])
+        if getattr(args, "posted_before", ""):
+            command.extend(["--posted-before", args.posted_before])
         worker = run_command(command)
         payload = parse_json_output(worker)
         payload["returncode"] = worker.returncode
@@ -639,7 +684,7 @@ def run_sync(
     return sync_posts(
         config,
         posts,
-        "all_posts",
+        args.sync_sheet,
         "append",
         args.dry_run,
         audit=bool(getattr(args, "sync_audit", False)),
@@ -673,6 +718,8 @@ def run_worker_passes_for_job(
             account_url=args.account_url,
             account_type=args.account_type,
             dates=target_dates,
+            posted_after=getattr(args, "posted_after", ""),
+            posted_before=getattr(args, "posted_before", ""),
         )
         enqueue_enrichment_tasks_for_posts(conn, posts, config)
         completion_after = enrichment_completion_summary(conn, posts, config)
@@ -912,6 +959,8 @@ def next_commands_for_status(
         base.extend(["--account-name", args.account_name])
     if args.sync:
         base.append("--sync")
+    if getattr(args, "sync_sheet", "all_posts") != "all_posts":
+        base.extend(["--sync-sheet", args.sync_sheet])
     if getattr(args, "sync_audit", False):
         base.append("--sync-audit")
     if args.dry_run:
@@ -1883,6 +1932,7 @@ def main() -> int:
     parser.add_argument("--last-hours", type=int, default=24)
     parser.add_argument("--resume-only", action="store_true", help="Skip homepage discovery and resume SQLite enrichment/sync only.")
     parser.add_argument("--sync", action="store_true")
+    parser.add_argument("--sync-sheet", default="all_posts", help="Configured feishu.sheets key or sheet id/title for account-job sync output.")
     parser.add_argument("--sync-audit", "--ledger-sync", dest="sync_audit", action="store_true", help="Compatibility ledger mode: write auditable incomplete candidates with missing-field markers.")
     parser.add_argument("--strict-ready-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true")
@@ -1991,6 +2041,8 @@ def main() -> int:
             account_url=args.account_url,
             account_type=args.account_type,
             dates=target_dates,
+            posted_after=getattr(args, "posted_after", ""),
+            posted_before=getattr(args, "posted_before", ""),
         )
         try:
             auth_payload = ensure_user_identity(config)
@@ -2058,6 +2110,8 @@ def main() -> int:
                 account_url=args.account_url,
                 account_type=args.account_type,
                 dates=target_dates,
+                posted_after=getattr(args, "posted_after", ""),
+                posted_before=getattr(args, "posted_before", ""),
             )
             completion = enrichment_completion_summary(conn, current_posts, config)
             run_status = "blocked_opencli"
@@ -2095,6 +2149,8 @@ def main() -> int:
                 account_url=args.account_url,
                 account_type=args.account_type,
                 dates=target_dates,
+                posted_after=getattr(args, "posted_after", ""),
+                posted_before=getattr(args, "posted_before", ""),
             )
             completion = enrichment_completion_summary(conn, current_posts, config)
             run_status = (
@@ -2141,6 +2197,8 @@ def main() -> int:
         account_url=args.account_url,
         account_type=args.account_type,
         dates=target_dates,
+        posted_after=getattr(args, "posted_after", ""),
+        posted_before=getattr(args, "posted_before", ""),
     )
     stale_running_seconds = 0 if args.force_recover_running else max(0, int(args.resume_stale_running_seconds or 0))
     recovered_running_tasks = recover_stale_running_tasks_for_posts(
@@ -2173,6 +2231,8 @@ def main() -> int:
                     account_url=args.account_url,
                     account_type=args.account_type,
                     dates=target_dates,
+                    posted_after=getattr(args, "posted_after", ""),
+                    posted_before=getattr(args, "posted_before", ""),
                 )
                 enqueue_enrichment_tasks_for_posts(conn, posts, config)
                 completion_before_worker = enrichment_completion_summary(conn, posts, config)
@@ -2184,6 +2244,8 @@ def main() -> int:
                     account_url=args.account_url,
                     account_type=args.account_type,
                     dates=target_dates,
+                    posted_after=getattr(args, "posted_after", ""),
+                    posted_before=getattr(args, "posted_before", ""),
                 )
                 enqueue_enrichment_tasks_for_posts(conn, posts, config)
                 completion_before_worker = enrichment_completion_summary(conn, posts, config)
@@ -2194,6 +2256,8 @@ def main() -> int:
                     account_url=args.account_url,
                     account_type=args.account_type,
                     dates=target_dates,
+                    posted_after=getattr(args, "posted_after", ""),
+                    posted_before=getattr(args, "posted_before", ""),
                 )
                 completion_before_worker = enrichment_completion_summary(conn, posts, config)
             else:
@@ -2242,6 +2306,8 @@ def main() -> int:
         account_url=args.account_url,
         account_type=args.account_type,
         dates=target_dates,
+        posted_after=getattr(args, "posted_after", ""),
+        posted_before=getattr(args, "posted_before", ""),
     )
     completion_after_worker = enrichment_completion_summary(conn, posts, config)
     summary_auto_apply = auto_generate_and_apply_summaries(args, target_dates, completion_after_worker)
@@ -2252,6 +2318,8 @@ def main() -> int:
             account_url=args.account_url,
             account_type=args.account_type,
             dates=target_dates,
+            posted_after=getattr(args, "posted_after", ""),
+            posted_before=getattr(args, "posted_before", ""),
         )
         enqueue_enrichment_tasks_for_posts(conn, posts, config)
     sync_result = run_sync(config, args, posts, conn)
@@ -2261,6 +2329,8 @@ def main() -> int:
         account_url=args.account_url,
         account_type=args.account_type,
         dates=target_dates,
+        posted_after=getattr(args, "posted_after", ""),
+        posted_before=getattr(args, "posted_before", ""),
     )
     completion = enrichment_completion_summary(conn, posts, config)
     retry_summary = worker_retry_summary(worker_passes)

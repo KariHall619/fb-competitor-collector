@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 import json
 import subprocess
 import tempfile
@@ -49,6 +50,41 @@ RETRY_LATER_STATUSES = {"opencli_session_busy"}
 
 def split_stages(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def parse_posted_at_filter(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y年%m月%d日 %H:%M"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def filter_posts_by_posted_window(
+    posts: list[dict[str, Any]],
+    *,
+    posted_after: str = "",
+    posted_before: str = "",
+) -> list[dict[str, Any]]:
+    after = parse_posted_at_filter(posted_after)
+    before = parse_posted_at_filter(posted_before)
+    if after is None and before is None:
+        return posts
+    filtered: list[dict[str, Any]] = []
+    for post in posts:
+        posted_at = parse_posted_at_filter(str(post.get("posted_at") or ""))
+        if posted_at is None:
+            continue
+        if after is not None and posted_at < after:
+            continue
+        if before is not None and posted_at > before:
+            continue
+        filtered.append(post)
+    return filtered
 
 
 def detail_args_for_stages(stages: set[str]) -> list[str]:
@@ -334,6 +370,8 @@ def main() -> int:
     parser.add_argument("--account-name", default="")
     parser.add_argument("--account-url", default="")
     parser.add_argument("--account-type", default="")
+    parser.add_argument("--posted-after", default="")
+    parser.add_argument("--posted-before", default="")
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--detail-concurrency", type=int, default=0)
     parser.add_argument("--article-concurrency", type=int, default=0)
@@ -366,6 +404,11 @@ def main() -> int:
         )
         if scope_enabled
         else []
+    )
+    scoped_posts = filter_posts_by_posted_window(
+        scoped_posts,
+        posted_after=args.posted_after,
+        posted_before=args.posted_before,
     )
     tasks = (
         pending_enrichment_tasks_for_posts(conn, scoped_posts, stages=stages, limit=args.limit)
