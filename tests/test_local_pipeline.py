@@ -7012,6 +7012,26 @@ def assert_run_account_job_does_not_stop_after_no_progress_worker_passes() -> No
     assert [item["made_progress"] for item in worker_passes] == [False, False, True]
 
 
+def assert_run_account_job_skips_worker_for_summary_only_with_coverage_gap() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    completion = {
+        "open_task_count": 1,
+        "summary_open_task_count": 1,
+        "auto_open_task_count": 0,
+        "requires_codex_summary_count": 1,
+        "has_summary_only_work": True,
+        "has_auto_enrichment_work": True,
+        "coverage_incomplete_count": 1,
+        "open_task_stage_counts": {"summary": 1},
+        "missing_stage_counts": {"coverage": 1, "summary": 1},
+    }
+
+    assert run_account_job.has_pre_summary_auto_enrichment_work(completion) is False
+    assert run_account_job.should_run_worker_for_completion(completion) is False
+
+
 def assert_run_account_job_auto_exports_summary_requests(tmp_path: Path) -> None:
     config = tmp_path / "settings_account_summary_export.yaml"
     db_path = tmp_path / "account-summary-export.sqlite"
@@ -13294,6 +13314,7 @@ def main() -> int:
         assert_run_account_job_worker_pass_surfaces_summary_required()
         assert_run_account_job_continues_worker_passes_until_complete()
         assert_run_account_job_does_not_stop_after_no_progress_worker_passes()
+        assert_run_account_job_skips_worker_for_summary_only_with_coverage_gap()
         assert_run_account_job_auto_exports_summary_requests(tmp_path)
         assert_run_account_job_syncs_refreshed_summary_and_type_after_auto_apply(tmp_path)
         assert_run_account_job_keeps_missing_post_type_incomplete_after_summary_apply(tmp_path)

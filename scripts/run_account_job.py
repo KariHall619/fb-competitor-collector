@@ -468,7 +468,7 @@ def completion_requires_opencli(completion: dict[str, Any]) -> bool:
 def should_run_worker_for_completion(completion: dict[str, Any]) -> bool:
     if not completion.get("open_task_count"):
         return False
-    if completion.get("has_summary_only_work") and not has_auto_enrichment_work(completion):
+    if completion.get("has_summary_only_work") and not has_pre_summary_auto_enrichment_work(completion):
         return False
     return True
 
