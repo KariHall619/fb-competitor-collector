@@ -138,7 +138,7 @@ Before syncing live FB capture results, the quality gate requires:
 - a lead link posted by the account in the comment area or a comment reply. The link must resolve to an external non-Facebook site and be stored as `landing_url` with `lead_link_status=qualified`.
 - The homepage/comment lead link is authoritative. If the post detail page also exposes unrelated right-column/feed ads, those ad links must not overwrite a previously captured comment/reply lead link.
 - story summary generated from the landing page/article, with `summary_source=article`
-- short posts and other valid FB candidates are kept in SQLite if they have a valid FB content URL, but remain `needs_enrichment` until lead link, landing URL, summary, and at least exact-or-estimated time are available
+- short posts and other valid FB candidates are kept in SQLite if they have a valid FB content URL, but remain `needs_enrichment` until exact detail-page time, lead link, landing URL, article-based summary, and other required output fields are available
 
 Capture should preserve all real FB content candidates. If the capture sees `photo.php`, `/photo/`, `/reel/`, `/watch/`, or `/videos/`, keep the original content link and mark `fb_link_kind`.
 
@@ -146,7 +146,7 @@ Media handling rule:
 
 - If a parent post link such as `/posts/`, `story.php`, or `permalink.php` is available, store it in `parent_post_url` and use it as the preferred dedupe key.
 - If no parent post link is available, keep the original `reel/photo/watch/video` link as the FB content link. Do not drop the candidate.
-- Parent-link absence does not block capture or local storage. Final Feishu output is blocked only when required output fields are missing: exact-or-estimated time, qualified comment/reply lead link, landing URL, and article-based summary.
+- Parent-link absence does not block capture or local storage. Final Feishu output is blocked when required output fields are missing: exact detail-page time, qualified comment/reply or post-CTA lead link, landing URL, article-based summary, post type, engagement, or coverage completion.
 
 If a candidate has no share count, add a coverage warning. It may still be a valid post, and the detail enrichment step should continue to check comments/replies for lead links.
 
@@ -202,7 +202,7 @@ python3 scripts/audit_story_summaries.py --config config/settings.yaml
 python3 scripts/audit_story_summaries.py --config config/settings.yaml --fix
 ```
 
-If all time signals are missing, do not sync. If only a relative time label exists, sync is allowed after estimating the time and marking it with `约` in Feishu.
+If all exact time signals are missing, do not sync formal output. A relative time label is only a homepage windowing clue; do not estimate it into `posted_at` for the formal Feishu table.
 
 Validate exact Facebook time capture before removing any legacy relative-time fallback. This check runs through OpenCLI Browser Bridge:
 
