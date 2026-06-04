@@ -39,6 +39,7 @@ const evalAccessStats = {
   select_fallback: 0,
   modes: new Set(),
 };
+const EVAL_TIMEOUT_MS = Number(process.env.OPENCLI_FB_DISCOVERY_EVAL_TIMEOUT_MS || "45000");
 
 function clean(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
@@ -109,7 +110,7 @@ function discoveryTimeWindow() {
 function postTimeState(post, window) {
   if (!window?.enabled) return "unknown";
   const timeText = post?.posted_at || post?.posted_at_raw || post?.post_time_text;
-  const parsed = parsePostTime(timeText) || parseRelativePostTime(timeText);
+  const parsed = parsePostTime(timeText);
   if (!parsed) return "unknown";
   if (window.lower && parsed < window.lower) return "before";
   if (window.upper && parsed >= window.upper) return "after";
@@ -193,7 +194,7 @@ async function waitSeconds(opencliCommand, session, tab, seconds) {
 }
 
 async function evalPage(opencliCommand, session, tab, js) {
-  const result = await evaluateInSession({ opencliCommand, session, tab, js });
+  const result = await evaluateInSession({ opencliCommand, session, tab, js, timeoutMs: EVAL_TIMEOUT_MS });
   if (!result.ok) {
     throw new Error(result.stderr || result.stdout || "OpenCLI eval failed");
   }
@@ -328,14 +329,22 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
       return false;
     }
 
-    const extraction = await evalPage(opencliCommand, session, tab, browserExpression(maxText));
+    const extraction = await evalPage(opencliCommand, session, tab, browserExpression(maxText)).catch((error) => ({
+      capture_blocked: true,
+      eval_failed: true,
+      error: String(error?.message || error),
+      body_length: 0,
+      real_post_count: 0,
+    }));
     if (extraction.capture_blocked) {
       blockedExtraction = extraction;
-      stopReason = extraction.logged_out ? "login_required" : "visitor_preview";
+      stopReason = extraction.eval_failed ? "opencli_eval_failed" : extraction.logged_out ? "login_required" : "visitor_preview";
       snapshots.push({
         index,
         label,
         blocked: true,
+        eval_failed: Boolean(extraction.eval_failed),
+        error: extraction.error || "",
         body_length: extraction.body_length || 0,
         raw_candidate_count: extraction.real_post_count || 0,
         new_posts: 0,

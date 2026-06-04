@@ -18,13 +18,57 @@ function pageStateExpression() {
   })()`;
 }
 
-function headerTimeTargetExpression() {
+function headerTimeTargetExpression(postUrl = "") {
   return `(() => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const helpers = ${browserExactTimeHelpersExpression()};
     const viewportHeight = window.innerHeight || 800;
+    const postUrl = ${JSON.stringify(postUrl || "")};
+    const canonicalPostKey = (value) => {
+      if (!value) return "";
+      try {
+        const parsed = new URL(value, location.href);
+        const parts = parsed.pathname.split("/").filter(Boolean);
+        const storyFbid = parsed.searchParams.get("story_fbid");
+        const photoFbid = parsed.searchParams.get("fbid");
+        const id = parsed.searchParams.get("id");
+        if (storyFbid && id) return "story:" + id + ":" + storyFbid;
+        if (parts.includes("posts")) {
+          const index = parts.indexOf("posts");
+          if (index > 0 && parts[index + 1]) return "post:" + parts[index - 1] + ":" + parts[index + 1];
+        }
+        if (parts.includes("reel")) {
+          const index = parts.indexOf("reel");
+          if (parts[index + 1]) return "reel:" + parts[index + 1];
+        }
+        if (parts.includes("videos")) {
+          const index = parts.indexOf("videos");
+          if (parts[index + 1]) return "video:" + parts[index + 1];
+        }
+        if (parts.includes("watch") && parsed.searchParams.get("v")) return "video:" + parsed.searchParams.get("v");
+        if ((parsed.pathname.includes("photo.php") || parts.join("/") === "photo") && photoFbid) return "photo:" + photoFbid;
+        if (parts.includes("photos")) {
+          const index = parts.indexOf("photos");
+          const tail = parts.slice(index + 1).filter((part) => !["a", "p", "photo"].includes(part));
+          const numericTail = tail.filter((part) => /^\\d{6,}$/.test(part));
+          const photoId = numericTail.at(-1) || tail.at(-1);
+          if (photoId) return "photo:" + photoId;
+        }
+        return parsed.origin + parsed.pathname.replace(/\\/$/, "");
+      } catch {
+        return String(value || "");
+      }
+    };
+    const targetKey = canonicalPostKey(postUrl || location.href);
+    const forbiddenChrome = (node) => Boolean(node?.closest?.('[role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"], nav, aside, footer, header'));
+    const looksLikeAdOrShell = (text) => /Sponsored|Suggested for you|Create a post|What's on your mind|Privacy\\s*·\\s*Terms|Ads Manager|Harness the Power of AI|Feed posts/i.test(text);
+    const hasCommentParam = (href) => /[?&]comment_id=|[?&]reply_comment_id=|comment_id%3D|reply_comment_id%3D/i.test(href || "");
     const candidates = [...document.querySelectorAll("a, abbr, span")].map((el, index) => {
       const rect = el.getBoundingClientRect();
+      const href = el.href || "";
+      const article = el.closest?.('[role="article"], article') || null;
+      const articleText = clean(article?.innerText || article?.textContent || "");
+      const linkKey = canonicalPostKey(href);
       return {
         index,
         tag: el.tagName,
@@ -34,15 +78,38 @@ function headerTimeTargetExpression() {
         datetime: clean(el.getAttribute("datetime") || ""),
         tooltipContent: clean(el.getAttribute("data-tooltip-content") || ""),
         tooltipText: clean(el.getAttribute("data-tooltip-text") || ""),
-        href: el.href || "",
+        href,
         x: rect.x,
         y: rect.y,
         w: rect.width,
         h: rect.height,
+        target_match: Boolean(targetKey && linkKey && targetKey === linkKey),
+        comment_link: hasCommentParam(href),
+        article_preview: articleText.slice(0, 240),
+        in_article: Boolean(article),
+        forbidden_chrome: forbiddenChrome(el),
+        shell_or_ad: looksLikeAdOrShell(articleText),
       };
     }).filter((item) => helpers.isLikelyHeaderTimeElement(item, viewportHeight));
-    candidates.sort((a, b) => a.y - b.y || a.x - b.x);
-    return candidates[0] || null;
+    const score = (item) => {
+      let value = 0;
+      if (item.target_match) value += 120;
+      if (item.href && !item.comment_link) value += 30;
+      if (item.in_article) value += 20;
+      if (helpers.isRelativeTimeText(item.text)) value += 15;
+      if (helpers.parseExactFacebookTime(item.aria) || helpers.parseExactFacebookTime(item.title)) value += 25;
+      if (item.y > 40 && item.y < Math.max(120, viewportHeight - 24)) value += 10;
+      if (item.comment_link) value -= 160;
+      if (item.forbidden_chrome || item.shell_or_ad) value -= 120;
+      if (/^Author\\b/i.test(item.article_preview) && item.comment_link) value -= 80;
+      if (!item.target_match && targetKey) value -= 40;
+      return value;
+    };
+    const filtered = candidates
+      .map((item) => ({ ...item, score: score(item) }))
+      .filter((item) => item.score > -80);
+    filtered.sort((a, b) => b.score - a.score || a.y - b.y || a.x - b.x);
+    return filtered[0] || null;
   })()`;
 }
 
@@ -63,6 +130,22 @@ function syntheticHoverTimeExpression(target, timeoutMs = 1200) {
     const elements = [...document.querySelectorAll("a, abbr, span")];
     const el = elements[target.index];
     if (!el) return { posted_at_raw: "", posted_at: "", time_source: "" };
+    const parsedText = (node) => {
+      const text = helpers.clean(node.innerText || node.textContent || "");
+      return text && text.length <= 180 && helpers.parseExactFacebookTime(text) ? text : "";
+    };
+    const tooltipNodes = () => [...document.querySelectorAll('[role="tooltip"], [data-tooltip-content], [data-tooltip-text]')];
+    const existingTooltipTexts = new Set(tooltipNodes().map(parsedText).filter(Boolean));
+    const visibleFloatingNode = (node) => {
+      const rect = node.getBoundingClientRect?.();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+      const style = getComputedStyle(node);
+      return /fixed|absolute/i.test(style.position || "")
+        && rect.bottom > 0
+        && rect.top < (window.innerHeight || 800)
+        && rect.right > 0
+        && rect.left < (window.innerWidth || 1200);
+    };
     const rect = el.getBoundingClientRect();
     const eventInit = {
       bubbles: true,
@@ -87,10 +170,14 @@ function syntheticHoverTimeExpression(target, timeoutMs = 1200) {
     }
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
-      const texts = [...document.querySelectorAll('[role="tooltip"], div, span')]
-        .map((node) => helpers.clean(node.innerText || node.textContent || ""))
+      const texts = [
+        ...tooltipNodes(),
+        ...[...document.querySelectorAll('div, span')].filter(visibleFloatingNode),
+      ]
+        .map(parsedText)
         .filter(Boolean);
       for (const text of texts) {
+        if (existingTooltipTexts.has(text)) continue;
         const parsed = helpers.parseExactFacebookTime(text);
         if (parsed) return { posted_at_raw: text, posted_at: parsed, time_source: "synthetic_hover_tooltip" };
       }

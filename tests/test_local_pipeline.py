@@ -5612,7 +5612,8 @@ def assert_run_account_job_passes_posted_at_window_to_prepare() -> None:
 def assert_opencli_discovery_time_window_handles_relative_labels() -> None:
     script_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
     assert "function parseRelativePostTime" in script_text
-    assert "parsePostTime(timeText) || parseRelativePostTime(timeText)" in script_text
+    assert "const parsed = parsePostTime(timeText);" in script_text
+    assert "parsePostTime(timeText) || parseRelativePostTime(timeText)" not in script_text
     assert "time_window_enabled: timeWindow.enabled" in script_text
 
 
@@ -5764,12 +5765,161 @@ if (!isLikelyHeaderTimeElement({ text: '2h', aria: '', title: '', href: 'https:/
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_detail_time_target_anchors_to_current_post() -> None:
+    script = """
+const { headerTimeTargetExpression } = require('./scripts/fb_detail_extractors.js');
+
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '', rect = {}) {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.rect = { x: 0, y: 100, width: 20, height: 14, ...rect };
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() {
+    return this.innerText;
+  }
+  get href() {
+    return this.attrs.href ? new URL(this.attrs.href, global.location.href).href : '';
+  }
+  getAttribute(name) {
+    return this.attrs[name] || '';
+  }
+  getBoundingClientRect() {
+    return this.rect;
+  }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (selector.includes('[role="article"]') && node.attrs.role === 'article') return node;
+      if (selector.includes('[role="complementary"]') && node.attrs.role === 'complementary') return node;
+      if (selector.includes('[role="navigation"]') && node.attrs.role === 'navigation') return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a') return node.tagName === 'A';
+      if (current === 'abbr') return node.tagName === 'ABBR';
+      if (current === 'span') return node.tagName === 'SPAN';
+      if (current === '[role="article"]') return node.attrs.role === 'article';
+      if (current === 'article') return node.tagName === 'ARTICLE';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+
+const targetUrl = 'https://www.facebook.com/healingjourneys.mani/posts/pfbid-main';
+const suggested = new Node('div', { role: 'article' }, [
+  new Node('span', {}, [], 'Suggested for you · 1h', { y: 70, width: 110 }),
+  new Node('a', { href: '/otherpage/posts/pfbid-suggested' }, [], '1h', { y: 72, width: 16 }),
+]);
+const main = new Node('div', { role: 'article' }, [
+  new Node('a', { href: '/healingjourneys.mani/posts/pfbid-main' }, [], '15h', { y: 180, width: 22 }),
+  new Node('p', {}, [], 'Main post text with reactions and comments'),
+  new Node('a', { href: '/healingjourneys.mani/posts/pfbid-main?comment_id=123' }, [], '2h', { y: 150, width: 18 }),
+]);
+const body = new Node('body', {}, [suggested, main]);
+global.location = new URL(targetUrl);
+global.window = { innerHeight: 800 };
+global.document = {
+  body,
+  querySelectorAll: (selector) => body.querySelectorAll(selector),
+};
+
+const target = eval(headerTimeTargetExpression(targetUrl));
+if (!target || target.text !== '15h' || target.comment_link || !target.target_match) {
+  console.error(JSON.stringify(target, null, 2));
+  process.exit(1);
+}
+"""
+    result = run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def assert_synthetic_hover_ignores_existing_page_times() -> None:
+    script = """
+const { syntheticHoverTimeExpression } = require('./scripts/fb_detail_extractors.js');
+
+class Node {
+  constructor(tagName, attrs = {}, text = '', rect = {}) {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.ownText = text;
+    this.rect = { x: 0, y: 120, width: 24, height: 14, ...rect };
+    this.events = [];
+  }
+  get innerText() { return this.ownText; }
+  get textContent() { return this.ownText; }
+  get href() { return this.attrs.href || ''; }
+  getAttribute(name) { return this.attrs[name] || ''; }
+  getBoundingClientRect() { return this.rect; }
+  dispatchEvent(event) { this.events.push(event.type); }
+  focus() { this.focused = true; }
+}
+
+const target = new Node('a', { href: '/example/posts/pfbid-main' }, '2h');
+const staleTooltip = new Node('div', { role: 'tooltip' }, 'Thursday, June 4, 2026 at 5:10 AM', { width: 180, height: 20 });
+const nodes = [target, staleTooltip];
+global.window = { innerHeight: 800, innerWidth: 1200 };
+global.MouseEvent = class { constructor(type) { this.type = type; } };
+global.getComputedStyle = () => ({ position: 'absolute' });
+global.document = {
+  querySelectorAll(selector) {
+    if (selector === 'a, abbr, span') return [target];
+    if (selector.includes('[role="tooltip"]')) return [staleTooltip];
+    if (selector === 'div, span') return nodes.filter((node) => node.tagName === 'DIV' || node.tagName === 'SPAN');
+    return [];
+  }
+};
+
+(async () => {
+  const result = await eval(syntheticHoverTimeExpression({ index: 0 }, 350));
+  if (result.posted_at) {
+    console.error(JSON.stringify(result, null, 2));
+    process.exit(1);
+  }
+})().catch((error) => {
+  console.error(error);
+  process.exit(2);
+});
+"""
+    result = run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_opencli_detail_enrichment_supports_target_date_filter() -> None:
     script_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
     worker_text = (ROOT / "scripts" / "enrichment_worker.py").read_text(encoding="utf-8")
     assert "{ name: 'target-date'" in script_text
     assert "if (target_date)" not in script_text
     assert '"--target-date", target_date' in worker_text
+
+
+def assert_opencli_discovery_eval_has_timeout_guard() -> None:
+    runtime_text = (ROOT / "scripts" / "opencli_runtime.mjs").read_text(encoding="utf-8")
+    extract_text = (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
+    assert "timeoutMs = 0" in runtime_text
+    assert "child.kill(\"SIGTERM\")" in runtime_text
+    assert "OpenCLI command timed out" in runtime_text
+    assert "OPENCLI_FB_DISCOVERY_EVAL_TIMEOUT_MS" in extract_text
+    assert "timeoutMs: EVAL_TIMEOUT_MS" in extract_text
+    assert "opencli_eval_failed" in extract_text
 
 
 def assert_opencli_detail_enrichment_rejects_string_false_time() -> None:
@@ -14390,7 +14540,10 @@ def main() -> int:
         assert_run_account_job_scoped_posts_applies_posted_window(tmp_path)
         assert_enrichment_worker_scopes_posts_by_posted_window(tmp_path)
         assert_detail_time_helpers_parse_exact_facebook_time()
+        assert_detail_time_target_anchors_to_current_post()
+        assert_synthetic_hover_ignores_existing_page_times()
         assert_opencli_detail_enrichment_supports_target_date_filter()
+        assert_opencli_discovery_eval_has_timeout_guard()
         assert_opencli_detail_enrichment_rejects_string_false_time()
         assert_opencli_detail_enrichment_rejects_copied_article_summary()
         assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path)

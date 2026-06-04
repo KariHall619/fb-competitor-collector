@@ -163,13 +163,37 @@ function defaultAccountSession(config, accountUrl) {
 function runOpencli(args, options = {}) {
   const command = options.command || ["npx", "-y", "@jackwener/opencli"];
   const env = { ...process.env, ...(options.env || {}) };
+  const timeoutMs = Math.max(0, Number(options.timeoutMs || env.OPENCLI_BROWSER_COMMAND_TIMEOUT_MS || 0));
   return new Promise((resolve) => {
+    let settled = false;
     const child = spawn(command[0], [...command.slice(1), ...args], {
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
     let stderr = "";
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(payload);
+    };
+    const timer = timeoutMs
+      ? setTimeout(() => {
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            // Ignore kill failures; the process may already have exited.
+          }
+          finish({
+            ok: false,
+            code: 124,
+            stdout,
+            stderr: `${stderr}${stderr ? "\n" : ""}OpenCLI command timed out after ${timeoutMs}ms`,
+            timed_out: true,
+          });
+        }, timeoutMs)
+      : null;
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
     });
@@ -177,10 +201,10 @@ function runOpencli(args, options = {}) {
       stderr += chunk;
     });
     child.on("error", (error) => {
-      resolve({ ok: false, code: 1, stdout, stderr: `${stderr}${String(error.message || error)}` });
+      finish({ ok: false, code: 1, stdout, stderr: `${stderr}${String(error.message || error)}` });
     });
     child.on("close", (code) => {
-      resolve({ ok: code === 0, code: code ?? 1, stdout, stderr });
+      finish({ ok: code === 0, code: code ?? 1, stdout, stderr });
     });
   });
 }
@@ -334,10 +358,10 @@ async function selectTab({ opencliCommand, session, tab }) {
   return await runOpencli(["browser", session, "tab", "select", tab], { command: opencliCommand });
 }
 
-async function evaluateInSession({ opencliCommand, session, js, tab, allowSelectFallback = true }) {
+async function evaluateInSession({ opencliCommand, session, js, tab, allowSelectFallback = true, timeoutMs = 0 }) {
   const args = ["browser", session, "eval", js];
   if (tab) args.push("--tab", tab);
-  const direct = await runOpencli(args, { command: opencliCommand });
+  const direct = await runOpencli(args, { command: opencliCommand, timeoutMs });
   if (direct.ok || !tab || !allowSelectFallback) {
     return {
       ...direct,
@@ -361,7 +385,7 @@ async function evaluateInSession({ opencliCommand, session, js, tab, allowSelect
     };
   }
 
-  const retry = await runOpencli(args, { command: opencliCommand });
+  const retry = await runOpencli(args, { command: opencliCommand, timeoutMs });
   return {
     ...retry,
     payload: parseJsonOutput(retry),

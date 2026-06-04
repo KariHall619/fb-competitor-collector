@@ -102,7 +102,7 @@ function discoveryTimeWindow(kwargs) {
 function postTimeState(post, window) {
   if (!window?.enabled) return 'unknown';
   const timeText = post?.posted_at || post?.posted_at_raw || post?.post_time_text;
-  const parsed = parsePostTime(timeText) || parseRelativePostTime(timeText);
+  const parsed = parsePostTime(timeText);
   if (!parsed) return 'unknown';
   if (window.lower && parsed < window.lower) return 'before';
   if (window.upper && parsed >= window.upper) return 'after';
@@ -497,7 +497,7 @@ async function extractExactTime(page, post, options) {
       preserved_existing: true,
     };
   }
-  const target = await readPage(page, headerTimeTargetExpression());
+  const target = await readPage(page, headerTimeTargetExpression(detailNavigationUrl(post)));
   let exact = await readPage(page, exactTimeFromTargetExpression(target));
   if (!exact?.posted_at) {
     exact = await readPage(page, syntheticHoverTimeExpression(target, options.syntheticTooltipWaitMs));
