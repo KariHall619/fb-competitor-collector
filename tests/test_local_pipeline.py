@@ -6701,6 +6701,30 @@ def assert_run_account_job_skips_worker_for_summary_only_completion() -> None:
     assert run_account_job.should_run_worker_for_completion(no_work) is False
 
 
+def assert_run_account_job_opencli_requirement_merges_stage_sources() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    assert run_account_job.completion_requires_opencli(
+        {
+            "open_task_stage_counts": {"article_material": 1},
+            "missing_stage_counts": {"post_type": 1},
+        }
+    ) is True
+    assert run_account_job.completion_requires_opencli(
+        {
+            "open_task_stage_counts": {"summary": 1},
+            "missing_stage_counts": {"detail_time": 1},
+        }
+    ) is True
+    assert run_account_job.completion_requires_opencli(
+        {
+            "open_task_stage_counts": {"article_material": 1},
+            "missing_stage_counts": {"summary": 1},
+        }
+    ) is False
+
+
 def assert_run_account_job_worker_pass_surfaces_summary_required() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import run_account_job
@@ -13123,6 +13147,7 @@ def main() -> int:
         assert_run_account_job_reports_worker_retry_later()
         assert_run_account_job_summary_only_next_command_exports_requests()
         assert_run_account_job_skips_worker_for_summary_only_completion()
+        assert_run_account_job_opencli_requirement_merges_stage_sources()
         assert_run_account_job_worker_pass_surfaces_summary_required()
         assert_run_account_job_continues_worker_passes_until_complete()
         assert_run_account_job_does_not_stop_after_no_progress_worker_passes()

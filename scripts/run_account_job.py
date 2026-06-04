@@ -457,9 +457,11 @@ def discover_and_import(
 
 
 def completion_requires_opencli(completion: dict[str, Any]) -> bool:
-    stage_counts = completion.get("open_task_stage_counts") or completion.get("missing_stage_counts") or {}
-    if not isinstance(stage_counts, dict):
-        return False
+    stage_counts: dict[str, Any] = {}
+    for key in ("open_task_stage_counts", "missing_stage_counts"):
+        value = completion.get(key)
+        if isinstance(value, dict):
+            stage_counts.update(value)
     return any(stage in OPENCLI_REQUIRED_STAGES and int(count or 0) > 0 for stage, count in stage_counts.items())
 
 
