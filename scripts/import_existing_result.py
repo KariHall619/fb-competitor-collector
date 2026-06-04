@@ -17,7 +17,13 @@ from field_audit import audit_reason_counts, audit_reason_notes, audit_reason_su
 from models import normalize_post
 from output_quality import audit_output_candidates, output_quality_errors, partial_for_review, ready_for_output
 from store import connect, enqueue_enrichment_tasks_for_posts, mark_output_synced, upsert_posts
-from sync_status import annotate_sync_result, blocked_auth_result, enrichment_completion_summary
+from sync_status import (
+    attach_sync_top_level,
+    annotate_sync_result,
+    blocked_auth_result,
+    enrichment_completion_summary,
+    sync_cli_exit_code,
+)
 from lark_io import ensure_user_identity, write_rows
 
 
@@ -213,14 +219,8 @@ def main() -> int:
                 enrichment_completion_summary(conn, sync_candidates, config),
                 ledger_mode=True,
             )
-            print(
-                json.dumps(
-                    {**import_summary, "feishu_sync": sync_result},
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-            return 1
+            print(json.dumps(attach_sync_top_level(import_summary, sync_result), ensure_ascii=False, indent=2))
+            return sync_cli_exit_code(sync_result)
         headers = configured_output_headers(config)
         rows = [output_row_for_headers(post, headers, config) for post in partial_posts]
         sync_result = write_rows(
@@ -239,8 +239,8 @@ def main() -> int:
             enrichment_completion_summary(conn, sync_candidates, config),
             ledger_mode=True,
         )
-        print(json.dumps({**import_summary, "feishu_sync": sync_result}, ensure_ascii=False, indent=2))
-        return 0 if sync_result.get("ok") else 1
+        print(json.dumps(attach_sync_top_level(import_summary, sync_result), ensure_ascii=False, indent=2))
+        return sync_cli_exit_code(sync_result)
 
     if should_sync_audit:
         sync_candidates = result.get("sync_candidates") or result["inserted"]
@@ -258,14 +258,8 @@ def main() -> int:
                 enrichment_completion_summary(conn, sync_candidates, config),
                 ledger_mode=True,
             )
-            print(
-                json.dumps(
-                    {**import_summary, "feishu_sync": sync_result},
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-            return 1
+            print(json.dumps(attach_sync_top_level(import_summary, sync_result), ensure_ascii=False, indent=2))
+            return sync_cli_exit_code(sync_result)
         rows = [output_row_for_headers(post, headers, config) for post in output_posts]
         sync_result = write_rows(
             config,
@@ -286,8 +280,8 @@ def main() -> int:
             enrichment_completion_summary(conn, sync_candidates, config),
             ledger_mode=True,
         )
-        print(json.dumps({**import_summary, "feishu_sync": sync_result}, ensure_ascii=False, indent=2))
-        return 0 if sync_result.get("ok") else 1
+        print(json.dumps(attach_sync_top_level(import_summary, sync_result), ensure_ascii=False, indent=2))
+        return sync_cli_exit_code(sync_result)
 
     if should_sync_strict:
         sync_candidates = result.get("sync_candidates") or result["inserted"]
@@ -304,14 +298,8 @@ def main() -> int:
                 enrichment_completion_summary(conn, sync_candidates, config),
                 ledger_mode=False,
             )
-            print(
-                json.dumps(
-                    {**import_summary, "feishu_sync": sync_result},
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-            return 1
+            print(json.dumps(attach_sync_top_level(import_summary, sync_result), ensure_ascii=False, indent=2))
+            return sync_cli_exit_code(sync_result)
         skipped = len(skipped_posts)
         if not ready_posts:
             sync_result = annotate_sync_result(
@@ -325,14 +313,8 @@ def main() -> int:
                 enrichment_completion_summary(conn, sync_candidates, config),
                 ledger_mode=False,
             )
-            print(
-                json.dumps(
-                    {**import_summary, "feishu_sync": sync_result},
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-            return 1
+            print(json.dumps(attach_sync_top_level(import_summary, sync_result), ensure_ascii=False, indent=2))
+            return sync_cli_exit_code(sync_result)
         headers = configured_output_headers(config)
         rows = [output_row_for_headers(post, headers, config) for post in ready_posts]
         sync_result = write_rows(
@@ -352,8 +334,8 @@ def main() -> int:
             enrichment_completion_summary(conn, sync_candidates, config),
             ledger_mode=False,
         )
-        print(json.dumps({**import_summary, "feishu_sync": sync_result}, ensure_ascii=False, indent=2))
-        return 0 if sync_result.get("ok") else 1
+        print(json.dumps(attach_sync_top_level(import_summary, sync_result), ensure_ascii=False, indent=2))
+        return sync_cli_exit_code(sync_result)
     print(json.dumps(import_summary, ensure_ascii=False, indent=2))
     return 0
 

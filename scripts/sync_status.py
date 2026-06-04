@@ -274,7 +274,8 @@ def sync_completion_blockers(
             metrics={"stage": stage, "missing_post_count": int(count or 0)},
         )
 
-    if completion.get("requires_codex_summary_count") or (completion.get("missing_stage_counts") or {}).get("summary"):
+    missing_summary_count = int((completion.get("missing_stage_counts") or {}).get("summary") or 0)
+    if completion.get("requires_codex_summary_count") or missing_summary_count:
         add(
             "codex_summary_required",
             label="需要 Codex 中文概要",
@@ -282,7 +283,10 @@ def sync_completion_blockers(
             priority=40,
             message="仍缺基于文章材料的中文概要。",
             next_action="导出 scoped summary requests，写入中文概要后运行 apply_article_summaries。",
-            metrics={"requires_codex_summary_count": completion.get("requires_codex_summary_count", 0)},
+            metrics={
+                "requires_codex_summary_count": completion.get("requires_codex_summary_count", 0),
+                "missing_summary_count": missing_summary_count,
+            },
         )
 
     top_field_gaps = completion.get("top_field_gaps") if isinstance(completion.get("top_field_gaps"), list) else []
@@ -493,6 +497,24 @@ def annotate_sync_failure(sync_result: dict[str, Any]) -> dict[str, Any]:
     next_result.setdefault("next_actions", _failed_sync_next_actions(next_result))
     next_result["completion_blockers"] = sync_completion_blockers(next_result, {}, ledger_mode=False)
     return next_result
+
+
+def attach_sync_top_level(payload: dict[str, Any], sync_result: dict[str, Any]) -> dict[str, Any]:
+    """Mirror nested sync completion fields so CLI callers cannot miss them."""
+
+    next_payload = dict(payload)
+    next_payload["feishu_sync"] = sync_result
+    next_payload["run_status"] = sync_result.get("run_status") or sync_result.get("stage") or "sync_failed"
+    next_payload["complete"] = bool(sync_result.get("complete"))
+    next_payload["next_actions"] = sync_result.get("next_actions", [])
+    next_payload["completion_blockers"] = sync_result.get("completion_blockers", [])
+    return next_payload
+
+
+def sync_cli_exit_code(sync_result: dict[str, Any]) -> int:
+    """Return a strict completion exit code for direct sync/import/filter CLIs."""
+
+    return 0 if bool(sync_result.get("complete")) else 1
 
 
 def _failed_sync_next_actions(sync_result: dict[str, Any]) -> list[str]:

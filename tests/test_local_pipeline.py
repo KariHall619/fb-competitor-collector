@@ -2970,9 +2970,12 @@ def assert_strict_sync_completion_uses_full_candidate_scope(tmp_path: Path) -> N
             "--dry-run",
         ]
     )
-    assert sync.returncode == 0, sync.stdout
+    assert sync.returncode == 1, sync.stdout
     data = json.loads(sync.stdout)
     completion = data["feishu_sync"]["enrichment_completion"]
+    assert data["run_status"] == "incomplete_pending_tasks"
+    assert data["complete"] is False
+    assert data["feishu_sync"]["ok"] is True
     assert data["feishu_sync"]["ready_for_output"] == 1
     assert data["feishu_sync"]["complete"] is False
     assert data["feishu_sync"]["run_status"] == "incomplete_pending_tasks"
@@ -3012,9 +3015,13 @@ def assert_minimal_ledger_candidate_syncs_to_formal_sheet(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     sync = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--sync", "--dry-run"])
-    assert sync.returncode == 0, sync.stdout
+    assert sync.returncode == 1, sync.stdout
     sync_data = json.loads(sync.stdout)
+    assert sync_data["complete"] is False
+    assert sync_data["run_status"] == "synced_ledger_incomplete"
     assert sync_data["feishu_sync"]["audit_output"] is True
+    assert sync_data["feishu_sync"]["ok"] is True
+    assert sync_data["feishu_sync"]["complete"] is False
     assert sync_data["feishu_sync"]["output_candidates"] == 1
     assert sync_data["feishu_sync"]["audit_missing_field_counts"]["exact_time"] == 1
     assert sync_data["feishu_sync"]["audit_missing_field_counts"]["lead_link"] == 1
@@ -3561,10 +3568,15 @@ def assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path: Path) -> 
             "--dry-run",
         ]
     )
-    assert sync.returncode == 0, sync.stdout
-    assert '"audit_output": true' in sync.stdout, sync.stdout
-    assert '"output_candidates": 2' in sync.stdout, sync.stdout
-    assert '"rows": 2' in sync.stdout, sync.stdout
+    assert sync.returncode == 1, sync.stdout
+    sync_data = json.loads(sync.stdout)
+    assert sync_data["complete"] is False
+    assert sync_data["run_status"] == "synced_ledger_incomplete"
+    assert sync_data["feishu_sync"]["ok"] is True
+    assert sync_data["feishu_sync"]["complete"] is False
+    assert sync_data["feishu_sync"]["audit_output"] is True
+    assert sync_data["feishu_sync"]["output_candidates"] == 2
+    assert sync_data["feishu_sync"]["rows"] == 2
 
     audit = run(
         [
@@ -3578,10 +3590,15 @@ def assert_prepare_capture_keeps_short_posts_and_blocks_sync(tmp_path: Path) -> 
             "--dry-run",
         ]
     )
-    assert audit.returncode == 0, audit.stdout
-    assert '"audit_output": true' in audit.stdout
-    assert '"output_candidates": 2' in audit.stdout
-    assert '"rows": 2' in audit.stdout
+    assert audit.returncode == 1, audit.stdout
+    audit_data = json.loads(audit.stdout)
+    assert audit_data["complete"] is False
+    assert audit_data["run_status"] == "synced_ledger_incomplete"
+    assert audit_data["feishu_sync"]["ok"] is True
+    assert audit_data["feishu_sync"]["complete"] is False
+    assert audit_data["feishu_sync"]["audit_output"] is True
+    assert audit_data["feishu_sync"]["output_candidates"] == 2
+    assert audit_data["feishu_sync"]["rows"] == 2
 
 
 def assert_prepare_capture_preserves_type_and_article_summary(tmp_path: Path) -> None:
@@ -3861,9 +3878,12 @@ def assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_p
             "--dry-run",
         ]
     )
-    assert sync.returncode == 0, sync.stdout
-    assert '"audit_output": true' in sync.stdout
-    assert '"output_candidates": 1' in sync.stdout
+    assert sync.returncode == 1, sync.stdout
+    sync_data = json.loads(sync.stdout)
+    assert sync_data["complete"] is False
+    assert sync_data["run_status"] == "synced_ledger_incomplete"
+    assert sync_data["feishu_sync"]["audit_output"] is True
+    assert sync_data["feishu_sync"]["output_candidates"] == 1
 
     strict = run(
         [
@@ -3894,9 +3914,12 @@ def assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_p
             "--dry-run",
         ]
     )
-    assert audit.returncode == 0, audit.stdout
-    assert '"audit_output": true' in audit.stdout
-    assert '"output_candidates": 1' in audit.stdout
+    assert audit.returncode == 1, audit.stdout
+    audit_data = json.loads(audit.stdout)
+    assert audit_data["complete"] is False
+    assert audit_data["run_status"] == "synced_ledger_incomplete"
+    assert audit_data["feishu_sync"]["audit_output"] is True
+    assert audit_data["feishu_sync"]["output_candidates"] == 1
 
     partial = run(
         [
@@ -3910,9 +3933,12 @@ def assert_sync_rejects_estimated_relative_time_but_allows_partial_preview(tmp_p
             "--dry-run",
         ]
     )
-    assert partial.returncode == 0, partial.stdout
-    assert '"partial_review": 1' in partial.stdout
-    assert '"formal_output_unchanged": true' in partial.stdout
+    assert partial.returncode == 1, partial.stdout
+    partial_data = json.loads(partial.stdout)
+    assert partial_data["complete"] is False
+    assert partial_data["run_status"] == "synced_ledger_incomplete"
+    assert partial_data["feishu_sync"]["partial_review"] == 1
+    assert partial_data["feishu_sync"]["formal_output_unchanged"] is True
 
 
 def assert_sync_retry_includes_previously_inserted_ready_rows(tmp_path: Path) -> None:
@@ -4120,9 +4146,13 @@ def assert_filter_sync_reports_audit_missing_field_counts(tmp_path: Path) -> Non
             "--dry-run",
         ]
     )
-    assert filtered.returncode == 0, filtered.stdout
+    assert filtered.returncode == 1, filtered.stdout
     filtered_data = json.loads(filtered.stdout)
+    assert filtered_data["complete"] is False
+    assert filtered_data["run_status"] == "synced_ledger_incomplete"
     sync = filtered_data["feishu_sync"]
+    assert sync["ok"] is True
+    assert sync["complete"] is False
     assert sync["audit_output"] is True
     assert sync["output_candidates"] == 1
     assert sync["audit_missing_field_counts"]["exact_time"] == 1
@@ -5019,9 +5049,14 @@ def assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path: Path)
             "--dry-run",
         ]
     )
-    assert sync.returncode == 0, sync.stdout
-    assert '"partial_review": 2' in sync.stdout
-    assert '"formal_output_unchanged": true' in sync.stdout
+    assert sync.returncode == 1, sync.stdout
+    sync_data = json.loads(sync.stdout)
+    assert sync_data["complete"] is False
+    assert sync_data["run_status"] == "synced_ledger_incomplete"
+    assert sync_data["feishu_sync"]["ok"] is True
+    assert sync_data["feishu_sync"]["complete"] is False
+    assert sync_data["feishu_sync"]["partial_review"] == 2
+    assert sync_data["feishu_sync"]["formal_output_unchanged"] is True
 
 
 def assert_thirteen_incomplete_candidates_are_imported_for_enrichment(tmp_path: Path) -> None:
@@ -5061,14 +5096,20 @@ def assert_thirteen_incomplete_candidates_are_imported_for_enrichment(tmp_path: 
     assert data["inserted"] == 13, imported.stdout
 
     sync = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--sync", "--dry-run"])
-    assert sync.returncode == 0, sync.stdout
-    assert '"audit_output": true' in sync.stdout
-    assert '"output_candidates": 13' in sync.stdout
+    assert sync.returncode == 1, sync.stdout
+    sync_data = json.loads(sync.stdout)
+    assert sync_data["complete"] is False
+    assert sync_data["run_status"] == "synced_ledger_incomplete"
+    assert sync_data["feishu_sync"]["audit_output"] is True
+    assert sync_data["feishu_sync"]["output_candidates"] == 13
 
     audit = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--sync-audit", "--dry-run"])
-    assert audit.returncode == 0, audit.stdout
-    assert '"audit_output": true' in audit.stdout
-    assert '"output_candidates": 13' in audit.stdout
+    assert audit.returncode == 1, audit.stdout
+    audit_data = json.loads(audit.stdout)
+    assert audit_data["complete"] is False
+    assert audit_data["run_status"] == "synced_ledger_incomplete"
+    assert audit_data["feishu_sync"]["audit_output"] is True
+    assert audit_data["feishu_sync"]["output_candidates"] == 13
 
 
 def assert_prepare_capture_does_not_alert_media_when_parent_post_is_captured(tmp_path: Path) -> None:
@@ -13216,13 +13257,18 @@ def assert_partial_sync_dry_run_does_not_replace_formal_gate(tmp_path: Path) -> 
     assert '"ready_for_output": 0' in formal.stdout
 
     audit = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--sync-audit", "--dry-run"])
-    assert audit.returncode == 0, audit.stdout
-    assert '"audit_output": true' in audit.stdout
-    assert '"output_candidates": 1' in audit.stdout
+    assert audit.returncode == 1, audit.stdout
+    audit_data = json.loads(audit.stdout)
+    assert audit_data["complete"] is False
+    assert audit_data["run_status"] == "synced_ledger_incomplete"
+    assert audit_data["feishu_sync"]["audit_output"] is True
+    assert audit_data["feishu_sync"]["output_candidates"] == 1
 
     partial = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(raw), "--sync-partial", "--dry-run"])
-    assert partial.returncode == 0, partial.stdout
+    assert partial.returncode == 1, partial.stdout
     data = json.loads(partial.stdout)
+    assert data["complete"] is False
+    assert data["run_status"] == "synced_ledger_incomplete"
     assert data["feishu_sync"]["dry_run"] is True
     assert data["feishu_sync"]["partial_review"] == 1
     assert data["feishu_sync"]["formal_output_unchanged"] is True
