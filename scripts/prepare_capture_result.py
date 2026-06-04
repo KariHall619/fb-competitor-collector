@@ -200,7 +200,33 @@ def is_profile_or_noise(raw: dict[str, Any]) -> bool:
     return False
 
 
-def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: str) -> tuple[dict[str, Any] | None, str]:
+def parse_posted_at_cutoff(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y年%m月%d日 %H:%M"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def posted_at_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(str(value or ""), "%Y年%m月%d日 %H:%M")
+    except ValueError:
+        return None
+
+
+def prepare_record(
+    raw: dict[str, Any],
+    defaults: dict[str, str],
+    target_date: str,
+    *,
+    posted_after: datetime | None = None,
+    posted_before: datetime | None = None,
+) -> tuple[dict[str, Any] | None, str]:
     if is_profile_or_noise(raw):
         return None, "profile_or_noise"
     raw_fb_url = clean_post_url(raw.get("raw_fb_url") or raw.get("post_url"))
@@ -235,6 +261,11 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
         candidate_date = datetime.strptime(posted_at, "%Y年%m月%d日 %H:%M").strftime("%y%m%d")
     if target_date and candidate_date and candidate_date != target_date:
         return None, f"outside_target_date:{candidate_date or 'unknown'}"
+    posted_dt = posted_at_datetime(posted_at)
+    if posted_after is not None and posted_dt is not None and posted_dt < posted_after:
+        return None, f"before_posted_after:{posted_at}"
+    if posted_before is not None and posted_dt is not None and posted_dt > posted_before:
+        return None, f"after_posted_before:{posted_at}"
 
     views, likes, engagement = parse_engagement(raw)
     note_parts = []
@@ -301,6 +332,8 @@ def main() -> int:
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--target-date", required=True, help="YYMMDD")
+    parser.add_argument("--posted-after", default="", help="Only prepare rows whose known or estimated posted_at is at or after this time.")
+    parser.add_argument("--posted-before", default="", help="Only prepare rows whose known or estimated posted_at is at or before this time.")
     parser.add_argument("--account-name", default="The meaning of life")
     parser.add_argument("--account-url", default="https://www.facebook.com/themeaningoflife88")
     parser.add_argument("--account-type", default="competitor")
@@ -331,13 +364,21 @@ def main() -> int:
         "source_skill": "fb-competitor-collector",
         "coverage_note": coverage_note,
     }
+    posted_after = parse_posted_at_cutoff(args.posted_after)
+    posted_before = parse_posted_at_cutoff(args.posted_before)
     prepared: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     media_candidates: list[dict[str, Any]] = []
     coverage_warnings: list[dict[str, Any]] = []
     for raw in raw_posts:
         try:
-            record, reason = prepare_record(raw, defaults, args.target_date)
+            record, reason = prepare_record(
+                raw,
+                defaults,
+                args.target_date,
+                posted_after=posted_after,
+                posted_before=posted_before,
+            )
         except Exception as exc:
             rejected.append(
                 {

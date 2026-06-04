@@ -15,6 +15,7 @@ const {
   detailPostTypeBrowserExpression,
   exactTimeFromTargetExpression,
   expandCommentsExpression,
+  focusDetailConversationExpression,
   headerTimeTargetExpression,
   leadLinkScanBrowserExpression,
   pageStateExpression,
@@ -199,21 +200,63 @@ async function resolveLandingUrl(href, allowedDomains = [], timeoutMs = 20000) {
 }
 
 async function scrollToTop(page) {
-  await page.evaluate('(() => { window.scrollTo(0, 0); return { y: window.scrollY || 0 }; })()');
+  await page.evaluate(`(() => {
+    const candidates = [
+      ...document.querySelectorAll('[role="main"], [data-pagelet*="ProfileTimeline"], [aria-label*="Timeline"], [aria-label*="Posts"]')
+    ];
+    for (const el of candidates) {
+      if (!el || el.scrollHeight <= el.clientHeight + 80) continue;
+      el.scrollTop = 0;
+    }
+    window.scrollTo(0, 0);
+    return { y: window.scrollY || 0 };
+  })()`);
   await wait(page, 1.2);
 }
 
 async function scrollDown(page, pixels) {
   return readPage(page, `(() => {
-    const before = window.scrollY || document.documentElement.scrollTop || 0;
-    window.scrollBy(0, ${Number(pixels) || 1400});
-    const after = window.scrollY || document.documentElement.scrollTop || 0;
+    const delta = ${Number(pixels) || 1400};
+    const visibleEnough = (el) => {
+      const rect = el.getBoundingClientRect?.();
+      if (!rect) return false;
+      return rect.width > 320 && rect.height > 300 && rect.bottom > 120 && rect.top < window.innerHeight - 80;
+    };
+    const scrollables = [
+      ...document.querySelectorAll('[role="main"], [data-pagelet*="ProfileTimeline"], [aria-label*="Timeline"], [aria-label*="Posts"], div')
+    ].filter((el) => {
+      const style = getComputedStyle(el);
+      const overflow = [style.overflowY, style.overflow].join(' ');
+      return visibleEnough(el)
+        && el.scrollHeight > el.clientHeight + 120
+        && /(auto|scroll)/i.test(overflow);
+    }).sort((a, b) => {
+      const aMain = a.matches?.('[role="main"], [data-pagelet*="ProfileTimeline"], [aria-label*="Timeline"], [aria-label*="Posts"]') ? 1 : 0;
+      const bMain = b.matches?.('[role="main"], [data-pagelet*="ProfileTimeline"], [aria-label*="Timeline"], [aria-label*="Posts"]') ? 1 : 0;
+      if (aMain !== bMain) return bMain - aMain;
+      return (b.clientHeight || 0) - (a.clientHeight || 0);
+    });
+    const target = scrollables[0] || document.scrollingElement || document.documentElement;
+    const before = target === document.scrollingElement || target === document.documentElement
+      ? (window.scrollY || document.documentElement.scrollTop || 0)
+      : target.scrollTop;
+    if (target === document.scrollingElement || target === document.documentElement) {
+      window.scrollBy(0, delta);
+    } else {
+      target.scrollBy(0, delta);
+    }
+    const after = target === document.scrollingElement || target === document.documentElement
+      ? (window.scrollY || document.documentElement.scrollTop || 0)
+      : target.scrollTop;
     return {
       before,
       after,
       moved: Math.abs(after - before),
+      target: target === document.scrollingElement || target === document.documentElement ? 'window' : 'container',
+      target_role: target.getAttribute?.('role') || '',
+      target_label: target.getAttribute?.('aria-label') || '',
       body_length: document.body?.innerText?.length || 0,
-      scroll_height: document.documentElement?.scrollHeight || document.body?.scrollHeight || 0,
+      scroll_height: target.scrollHeight || document.documentElement?.scrollHeight || document.body?.scrollHeight || 0,
     };
   })()`);
 }
@@ -371,6 +414,7 @@ async function extractLeadLink(page, post, options) {
   const attempts = [];
   let fallbackSelected = null;
   for (const mode of ['default', 'all_comments', 'newest']) {
+    await readPage(page, focusDetailConversationExpression()).catch(() => ({}));
     const modeResult = await readPage(page, commentModeBrowserExpression(mode)).catch((error) => ({ mode, error: String(error) }));
     await readPage(page, expandCommentsExpression(options.commentExpandRounds, options.replyExpandRounds)).catch(() => []);
     const candidates = await readPage(page, leadLinkScanBrowserExpression(post.account_name || '', mode));
@@ -462,6 +506,7 @@ async function enrichCurrentDetailPage(page, post, options) {
     };
   }
   const exactTime = await extractExactTime(page, post, options);
+  const focus = await readPage(page, focusDetailConversationExpression()).catch(() => ({}));
   const target = exactTime.target || null;
   const engagement = options.skipEngagement
     ? { skipped: true, raw: '', confidence: 'skipped' }
@@ -515,7 +560,7 @@ async function enrichCurrentDetailPage(page, post, options) {
       nextPost.note = appendSemicolonNote(nextPost.note, '评论区、评论回复或主帖CTA引流链接待确认');
     }
   }
-  return { ok: true, post: nextPost, exact_time: exactTime, engagement, lead_link: leadLink, post_type: postType };
+  return { ok: true, post: nextPost, exact_time: exactTime, engagement, lead_link: leadLink, post_type: postType, focus };
 }
 
 async function detail(page, kwargs) {
@@ -571,6 +616,7 @@ async function detail(page, kwargs) {
       post_url: url,
       duration_ms: Date.now() - started,
       exact_time: payload.exact_time,
+      focus: payload.focus,
       engagement: payload.engagement,
       lead_link: payload.lead_link,
       post_type: payload.post_type,

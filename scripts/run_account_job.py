@@ -336,24 +336,27 @@ def discover_and_import(
         prepared_counts: dict[str, int] = {}
         for target_date in target_dates:
             prepared_path = temp / f"prepared_{target_date}.json"
-            prepare = run_command(
-                [
-                    "python3",
-                    "scripts/prepare_capture_result.py",
-                    "--input",
-                    str(raw_path),
-                    "--output",
-                    str(prepared_path),
-                    "--target-date",
-                    target_date,
-                    "--account-url",
-                    args.account_url,
-                    "--account-name",
-                    args.account_name,
-                    "--account-type",
-                    args.account_type,
-                ]
-            )
+            prepare_command = [
+                "python3",
+                "scripts/prepare_capture_result.py",
+                "--input",
+                str(raw_path),
+                "--output",
+                str(prepared_path),
+                "--target-date",
+                target_date,
+                "--account-url",
+                args.account_url,
+                "--account-name",
+                args.account_name,
+                "--account-type",
+                args.account_type,
+            ]
+            if args.posted_after:
+                prepare_command.extend(["--posted-after", args.posted_after])
+            if args.posted_before:
+                prepare_command.extend(["--posted-before", args.posted_before])
+            prepare = run_command(prepare_command)
             if prepare.returncode != 0:
                 prepare_payload = parse_json_output(prepare)
                 prepare_payload["returncode"] = prepare.returncode
@@ -1865,6 +1868,8 @@ def main() -> int:
     parser.add_argument("--account-name", default="")
     parser.add_argument("--account-type", default="competitor")
     parser.add_argument("--target-date", default="")
+    parser.add_argument("--posted-after", default="", help="Only import discovered candidates whose known or estimated posted_at is at or after this time.")
+    parser.add_argument("--posted-before", default="", help="Only import discovered candidates whose known or estimated posted_at is at or before this time.")
     parser.add_argument("--last-hours", type=int, default=24)
     parser.add_argument("--resume-only", action="store_true", help="Skip homepage discovery and resume SQLite enrichment/sync only.")
     parser.add_argument("--sync", action="store_true")
@@ -1891,8 +1896,8 @@ def main() -> int:
         help="Immediately recover scoped running enrichment tasks from a known interrupted previous run.",
     )
     parser.add_argument("--max-text", type=int, default=1500)
-    parser.add_argument("--max-snapshots", type=int, default=32)
-    parser.add_argument("--min-snapshots", type=int, default=6)
+    parser.add_argument("--max-snapshots", type=int, default=48)
+    parser.add_argument("--min-snapshots", type=int, default=10)
     parser.add_argument("--expected-post-count", type=int, default=0)
     parser.add_argument("--expected-labels", default="", help="Comma-separated visible relative-time labels from the operator checklist.")
     parser.add_argument(

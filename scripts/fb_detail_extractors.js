@@ -312,14 +312,54 @@ function expandCommentsExpression(commentRounds = 3, replyRounds = 3) {
     ];
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      const rect = el?.getBoundingClientRect?.();
+      return Boolean(rect && rect.width > 240 && rect.height > 80 && rect.bottom > 80 && rect.top < window.innerHeight - 40);
+    };
+    const textLength = (el) => el?.innerText?.length || el?.textContent?.length || 0;
+    const findConversationRoot = () => {
+      const articles = [...document.querySelectorAll('[role="article"], article')]
+        .filter(visible)
+        .filter((el) => /Like|Comment|Share|赞|评论|分享|Reply|回复|All reactions|comments?|shares?/i.test(el.innerText || el.textContent || ""));
+      const article = articles.sort((a, b) => textLength(b) - textLength(a))[0] || null;
+      if (!article) return document.scrollingElement || document.documentElement;
+      let current = article;
+      let best = article;
+      for (let depth = 0; current && depth < 8; depth += 1) {
+        const style = getComputedStyle(current);
+        const overflow = [style.overflowY, style.overflow].join(" ");
+        if (current.scrollHeight > current.clientHeight + 120 && /(auto|scroll)/i.test(overflow)) {
+          best = current;
+          break;
+        }
+        current = current.parentElement;
+      }
+      return best || article;
+    };
+    const scrollInside = (root, amount = 420) => {
+      const target = root || document.scrollingElement || document.documentElement;
+      if (target === document.scrollingElement || target === document.documentElement || target === document.body) {
+        window.scrollBy(0, amount);
+      } else if (target.scrollHeight > target.clientHeight + 20) {
+        target.scrollBy(0, amount);
+      } else {
+        target.scrollIntoView?.({ block: "center", inline: "nearest" });
+      }
+    };
     const summary = [];
+    const root = findConversationRoot();
+    root?.scrollIntoView?.({ block: "center", inline: "nearest" });
+    await sleep(250);
     for (let round = 0; round < maxRounds; round += 1) {
-      const bodyLengthBefore = document.body?.innerText?.length || 0;
+      const bodyLengthBefore = root?.innerText?.length || document.body?.innerText?.length || 0;
       let clicked = 0;
-      for (const el of document.querySelectorAll('div[role="button"], span, a')) {
+      const clickScope = root && root.querySelectorAll ? root : document;
+      for (const el of clickScope.querySelectorAll('div[role="button"], span, a')) {
         const text = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || "");
         if (!text || !labels.some((re) => re.test(text))) continue;
         try {
+          el.scrollIntoView?.({ block: "center", inline: "nearest" });
+          await sleep(80);
           el.click();
           clicked += 1;
         } catch {
@@ -327,19 +367,76 @@ function expandCommentsExpression(commentRounds = 3, replyRounds = 3) {
         }
       }
       if (!clicked) break;
+      scrollInside(root, 360);
       const started = Date.now();
       let changed = false;
       while (Date.now() - started < 900) {
         await sleep(100);
-        const bodyLengthAfter = document.body?.innerText?.length || 0;
+        const bodyLengthAfter = root?.innerText?.length || document.body?.innerText?.length || 0;
         if (bodyLengthAfter > bodyLengthBefore + 20) {
           changed = true;
           break;
         }
       }
-      summary.push({ round, clicked, body_length_changed: changed });
+      summary.push({
+        round,
+        clicked,
+        body_length_changed: changed,
+        root_tag: root?.tagName || "",
+        root_role: root?.getAttribute?.("role") || "",
+      });
     }
     return summary;
+  })()`;
+}
+
+function focusDetailConversationExpression() {
+  return `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      const rect = el?.getBoundingClientRect?.();
+      return Boolean(rect && rect.width > 260 && rect.height > 80 && rect.bottom > 80 && rect.top < window.innerHeight - 40);
+    };
+    const textLength = (el) => el?.innerText?.length || el?.textContent?.length || 0;
+    const scoreArticle = (el) => {
+      const text = clean(el.innerText || el.textContent || "");
+      let score = Math.min(text.length, 6000) / 100;
+      if (/Like|Comment|Share|赞|评论|分享|All reactions|comments?|shares?/i.test(text)) score += 80;
+      if (/Write a comment|View more comments|All comments|Most relevant|回复|查看更多评论|所有评论/i.test(text)) score += 60;
+      if (/Sponsored|Suggested for you|Create a post|What's on your mind/i.test(text)) score -= 120;
+      return score;
+    };
+    const articles = [...document.querySelectorAll('[role="article"], article')]
+      .filter(visible)
+      .sort((a, b) => scoreArticle(b) - scoreArticle(a));
+    const article = articles[0] || null;
+    let root = article;
+    let current = article;
+    for (let depth = 0; current && depth < 8; depth += 1) {
+      const style = getComputedStyle(current);
+      const overflow = [style.overflowY, style.overflow].join(" ");
+      if (current.scrollHeight > current.clientHeight + 120 && /(auto|scroll)/i.test(overflow)) {
+        root = current;
+        break;
+      }
+      current = current.parentElement;
+    }
+    const target = root || article || document.scrollingElement || document.documentElement;
+    target?.scrollIntoView?.({ block: "center", inline: "nearest" });
+    if (target && target !== document.scrollingElement && target !== document.documentElement && target.scrollHeight > target.clientHeight + 20) {
+      target.scrollBy(0, 220);
+    } else {
+      window.scrollBy(0, 220);
+    }
+    return {
+      ok: Boolean(article),
+      target: target === document.scrollingElement || target === document.documentElement ? "window" : "container",
+      article_text_length: textLength(article),
+      root_text_length: textLength(root),
+      root_tag: root?.tagName || "",
+      root_role: root?.getAttribute?.("role") || "",
+      root_label: root?.getAttribute?.("aria-label") || "",
+    };
   })()`;
 }
 
@@ -640,6 +737,7 @@ module.exports = {
   detailPostTypeBrowserExpression,
   exactTimeFromTargetExpression,
   expandCommentsExpression,
+  focusDetailConversationExpression,
   headerTimeTargetExpression,
   leadLinkScanBrowserExpression,
   pageStateExpression,

@@ -4777,6 +4777,19 @@ if (!result.clicked || !sort.clicked || !all.clicked) {
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_detail_enrichment_focuses_comment_container_before_expansion() -> None:
+    adapter_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
+    detail_text = (ROOT / "scripts" / "fb_detail_extractors.js").read_text(encoding="utf-8")
+    assert "focusDetailConversationExpression" in adapter_text
+    assert "await readPage(page, focusDetailConversationExpression()).catch" in adapter_text
+    assert "focus: payload.focus" in adapter_text
+    assert "function focusDetailConversationExpression" in detail_text
+    assert "root?.scrollIntoView" in detail_text
+    assert "target.scrollBy(0, 220)" in detail_text
+    assert "const clickScope = root && root.querySelectorAll ? root : document" in detail_text
+    assert "scrollInside(root, 360)" in detail_text
+
+
 def assert_opencli_extract_helpers_dedupe_homepage_candidates() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import facebook_content_key
@@ -4812,6 +4825,8 @@ def assert_opencli_extract_has_under_capture_guards() -> None:
     assert "coverage_incomplete" in script_text
     assert "capture_complete" in script_text
     assert "已达到最大滚动快照数但最后一屏仍有新增候选" in script_text
+    assert "target.scrollBy(0, delta)" in script_text
+    assert "target: target === document.scrollingElement" in script_text
 
 
 def assert_opencli_extract_stable_end_is_complete_coverage() -> None:
@@ -4844,6 +4859,61 @@ def assert_prepare_capture_has_no_base_time_argument() -> None:
     )
     assert rejected.returncode != 0
     assert "unrecognized arguments: --base-time" in rejected.stderr
+
+
+def assert_prepare_capture_can_filter_posted_at_window(tmp_path: Path) -> None:
+    raw = tmp_path / "raw_window.json"
+    prepared = tmp_path / "prepared_window.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "post_url": "https://www.facebook.com/window/posts/old",
+                        "posted_at": "2026年6月4日 11:59",
+                        "time_source": "dom_aria_label",
+                    },
+                    {
+                        "post_url": "https://www.facebook.com/window/posts/new",
+                        "posted_at": "2026年6月4日 12:01",
+                        "time_source": "dom_aria_label",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    result = run(
+        [
+            PYTHON,
+            "scripts/prepare_capture_result.py",
+            "--input",
+            str(raw),
+            "--output",
+            str(prepared),
+            "--target-date",
+            "260604",
+            "--posted-after",
+            "2026-06-04 12:00",
+        ]
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    data = json.loads(prepared.read_text(encoding="utf-8"))
+    assert data["prepared"] == 1
+    assert data["posts"][0]["post_url"] == "https://facebook.com/window/posts/new"
+    rejected_reasons = [item["reason"] for item in data["rejected"]]
+    assert "before_posted_after:2026年6月4日 11:59" in rejected_reasons
+
+
+def assert_run_account_job_passes_posted_at_window_to_prepare() -> None:
+    script_text = (ROOT / "scripts" / "run_account_job.py").read_text(encoding="utf-8")
+    assert 'parser.add_argument("--posted-after"' in script_text
+    assert 'parser.add_argument("--posted-before"' in script_text
+    assert 'prepare_command.extend(["--posted-after", args.posted_after])' in script_text
+    assert 'prepare_command.extend(["--posted-before", args.posted_before])' in script_text
+    assert 'parser.add_argument("--max-snapshots", type=int, default=48)' in script_text
+    assert 'parser.add_argument("--min-snapshots", type=int, default=10)' in script_text
 
 
 def assert_detail_time_helpers_parse_exact_facebook_time() -> None:
@@ -13297,6 +13367,7 @@ def main() -> int:
     assert_detail_enrichment_detects_post_cta_watch_more_links()
     assert_detail_post_type_expression_classifies_business_types()
     assert_comment_mode_expression_can_select_all_comments()
+    assert_detail_enrichment_focuses_comment_container_before_expansion()
     assert_opencli_extract_helpers_dedupe_homepage_candidates()
     assert_opencli_extract_has_under_capture_guards()
     assert_opencli_extract_stable_end_is_complete_coverage()
@@ -13399,6 +13470,8 @@ def main() -> int:
         assert_comment_lead_link_overrides_ad_links(tmp_path)
         assert_prepare_capture_skips_bad_candidate_without_failing_batch(tmp_path)
         assert_prepare_capture_has_no_base_time_argument()
+        assert_prepare_capture_can_filter_posted_at_window(tmp_path)
+        assert_run_account_job_passes_posted_at_window_to_prepare()
         assert_detail_time_helpers_parse_exact_facebook_time()
         assert_opencli_detail_enrichment_supports_target_date_filter()
         assert_opencli_detail_enrichment_rejects_string_false_time()
