@@ -272,19 +272,22 @@ def prepare_record(
     candidate_date = raw.get("posted_date") or ""
     if not candidate_date and posted_at:
         candidate_date = datetime.strptime(posted_at, "%Y年%m月%d日 %H:%M").strftime("%y%m%d")
-    if target_date and candidate_date and candidate_date != target_date:
+    estimated_time = is_estimated_time_source(time_source)
+    if target_date and estimated_time and not raw.get("posted_date"):
+        candidate_date = target_date
+    if target_date and candidate_date and candidate_date != target_date and not estimated_time:
         return None, f"outside_target_date:{candidate_date or 'unknown'}"
     posted_dt = posted_at_datetime(posted_at)
-    if posted_after is not None and posted_dt is not None and posted_dt < posted_after:
+    if posted_after is not None and posted_dt is not None and posted_dt < posted_after and not estimated_time:
         return None, f"before_posted_after:{posted_at}"
-    if posted_before is not None and posted_dt is not None and posted_dt > posted_before:
+    if posted_before is not None and posted_dt is not None and posted_dt > posted_before and not estimated_time:
         return None, f"after_posted_before:{posted_at}"
 
     views, likes, engagement = parse_engagement(raw)
     note_parts = []
     if not posted_at:
         note_parts.append("发帖时间待确认，需通过FB时间悬停提示获取精确时间")
-    elif is_estimated_time_source(time_source):
+    elif estimated_time:
         note_parts.append(f"发帖时间为相对时间估算（{relative_time}），非Facebook精确时间")
     if target_date and not candidate_date:
         note_parts.append("目标日期待确认")

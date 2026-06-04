@@ -20,8 +20,7 @@ from config_loader import load_config
 from coverage_expectations import apply_expected_coverage, split_expected_labels
 from discovery_retry import attach_auto_retry_report, needs_snapshot_budget_retry, retry_snapshot_budget
 from lark_io import ensure_user_identity
-from models import normalize_date
-from models import is_estimated_time_source
+from models import is_estimated_time_source, normalize_date, parse_reference_time
 from store import (
     connect,
     enqueue_enrichment_tasks_for_posts,
@@ -69,7 +68,7 @@ STAGE_ORDER = {
 
 def run_command(command: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
-    env.setdefault("OPENCLI_BROWSER_COMMAND_TIMEOUT", "180")
+    env.setdefault("OPENCLI_BROWSER_COMMAND_TIMEOUT", "360")
     return subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False, timeout=timeout, env=env)
 
 
@@ -160,6 +159,27 @@ def parse_posted_at_filter(value: str) -> datetime | None:
     return None
 
 
+def target_date_to_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(str(value or ""), "%y%m%d")
+    except ValueError:
+        return None
+
+
+def crawled_near_target_date(post: dict[str, Any], dates: list[str]) -> bool:
+    crawled_at = parse_reference_time(str(post.get("crawled_at") or ""))
+    if crawled_at is None:
+        return False
+    crawled_day = crawled_at.date()
+    for date in dates:
+        target = target_date_to_datetime(date)
+        if target is None:
+            continue
+        if target.date() <= crawled_day <= (target + timedelta(days=1)).date():
+            return True
+    return False
+
+
 def filter_posts_by_posted_window(
     posts: list[dict[str, Any]],
     *,
@@ -210,12 +230,20 @@ def scoped_posts(
             key = post.get("canonical_post_url") or post.get("post_url")
             if key:
                 by_key[str(key)] = post
-    if not by_key and account_url:
+    if account_url:
         for post in query_posts(conn, account_url=account_url, account_type=account_type):
-            if dates and post.get("posted_date") and post.get("posted_date") not in set(dates):
+            if (
+                dates
+                and post.get("posted_date")
+                and post.get("posted_date") not in set(dates)
+                and not (
+                    is_estimated_time_source(post.get("time_source"))
+                    and crawled_near_target_date(post, dates)
+                )
+            ):
                 continue
             key = post.get("canonical_post_url") or post.get("post_url")
-            if key:
+            if key and str(key) not in by_key:
                 by_key[str(key)] = post
     posts = sorted(by_key.values(), key=lambda item: (item.get("posted_date") or "", item.get("id") or 0))
     return filter_posts_by_posted_window(posts, posted_after=posted_after, posted_before=posted_before)
@@ -279,6 +307,8 @@ def discover_homepage_once(
         str(getattr(args, "scroll_pixels", 520)),
         "--window",
         "background",
+        "--site-session",
+        "persistent",
         "-f",
         "json",
     ]

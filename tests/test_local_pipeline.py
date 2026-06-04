@@ -565,6 +565,7 @@ class Node {
       if (current === 'a[href]') return node.tagName === 'A' && !!node.attrs.href;
       if (current === 'a') return node.tagName === 'A';
       if (current === 'span') return node.tagName === 'SPAN';
+      if (current === 'span[aria-label]') return node.tagName === 'SPAN' && !!node.attrs['aria-label'];
       if (current === 'div') return node.tagName === 'DIV';
       if (current === '[aria-label]') return !!node.attrs['aria-label'];
       if (current === '[title]') return !!node.attrs.title;
@@ -1153,6 +1154,7 @@ def assert_opencli_adapter_scaffold_contract() -> None:
     assert "older_than_time_window" in script_text
     assert "everSawInsideWindow" in script_text
     assert "timeWindow.enabled && everSawInsideWindow" in script_text
+    assert "siteSession: 'persistent'" in script_text
     assert "{ name: 'posted-after'" in script_text
     assert "{ name: 'posted-before'" in script_text
 
@@ -1179,6 +1181,8 @@ def assert_account_and_worker_call_opencli_adapter() -> None:
     assert '"discover"' in discover_slice
     assert '"--window"' in discover_slice
     assert '"background"' in discover_slice
+    assert '"--site-session"' in discover_slice
+    assert '"persistent"' in discover_slice
     assert "opencli_command(config)" in discover_slice
     assert (ROOT / "scripts" / "opencli_runtime.mjs").exists()
     assert (ROOT / "scripts" / "opencli_extract_current_tab.mjs").exists()
@@ -5338,6 +5342,7 @@ class Node {
     const matches = (node, current) => {
       if (current === 'a') return node.tagName === 'A';
       if (current === 'span') return node.tagName === 'SPAN';
+      if (current === 'span[aria-label]') return node.tagName === 'SPAN' && !!node.attrs['aria-label'];
       if (current === 'div') return node.tagName === 'DIV';
       if (current === '[role="article"]') return node.attrs.role === 'article';
       if (current === 'article') return node.tagName === 'ARTICLE';
@@ -5363,6 +5368,74 @@ const mainPost = new Node('div', { role: 'article' }, [
 global.document = { querySelectorAll: (selector) => mainPost.querySelectorAll(selector) };
 const result = eval(detailEngagementBrowserExpression(null));
 if (result.likes !== null || result.reactions !== null || result.raw.includes('26000000')) {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(1);
+}
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def assert_detail_engagement_zero_fills_absent_comment_share_counts() -> None:
+    script = """
+import detailExtractors from './scripts/fb_detail_extractors.js';
+const { detailEngagementBrowserExpression } = detailExtractors;
+
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() { return this.innerText; }
+  getAttribute(name) { return this.attrs[name] || ''; }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (selector.includes('[role="article"]') && node.attrs.role === 'article') return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a') return node.tagName === 'A';
+      if (current === 'span') return node.tagName === 'SPAN';
+      if (current === 'div') return node.tagName === 'DIV';
+      if (current === '[role="article"]') return node.attrs.role === 'article';
+      if (current === 'article') return node.tagName === 'ARTICLE';
+      if (current === '[aria-label]') return !!node.attrs['aria-label'];
+      if (current === '[title]') return !!node.attrs.title;
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+
+const mainPost = new Node('div', { role: 'article' }, [
+  new Node('span', {}, [], 'Lessons Taught By Life'),
+  new Node('a', { href: '/LessonsTaughtByLifepage/posts/pfbid1' }, [], '10h'),
+  new Node('span', {}, [], '15 likes'),
+  new Node('span', {}, [], 'Like'),
+  new Node('span', { 'aria-label': 'Comment on this post' }, [], ''),
+  new Node('span', { 'aria-label': 'Share this post' }, [], ''),
+]);
+global.document = { querySelectorAll: (selector) => mainPost.querySelectorAll(selector) };
+const result = eval(detailEngagementBrowserExpression(null));
+if (result.confidence !== 'anchored_zero_missing_counts' || result.likes !== 15 || result.comments !== 0 || result.shares !== 0) {
   console.error(JSON.stringify(result, null, 2));
   process.exit(1);
 }
@@ -5732,6 +5805,48 @@ def assert_prepare_capture_can_filter_posted_at_window(tmp_path: Path) -> None:
     assert "before_posted_after:2026年6月4日 11:59" in rejected_reasons
 
 
+def assert_prepare_capture_keeps_relative_estimates_for_detail_confirmation(tmp_path: Path) -> None:
+    raw = tmp_path / "raw_relative_window.json"
+    prepared = tmp_path / "prepared_relative_window.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "post_url": "https://www.facebook.com/window/posts/estimated-old",
+                        "post_time_text": "17h",
+                        "crawled_at": "2026-06-05T05:30:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    result = run(
+        [
+            PYTHON,
+            "scripts/prepare_capture_result.py",
+            "--input",
+            str(raw),
+            "--output",
+            str(prepared),
+            "--target-date",
+            "260604",
+            "--posted-after",
+            "2026-06-04 12:00",
+        ]
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    data = json.loads(prepared.read_text(encoding="utf-8"))
+    assert data["prepared"] == 1
+    post = data["posts"][0]
+    assert post["posted_date"] == "260604"
+    assert post["time_source"] == "relative_estimated"
+    assert "相对时间估算" in post["note"]
+    assert data["rejected"] == []
+
+
 def assert_prepare_capture_keeps_comment_relative_time_for_detail_confirmation(tmp_path: Path) -> None:
     raw = tmp_path / "raw_comment_time.json"
     prepared = tmp_path / "prepared_comment_time.json"
@@ -5786,7 +5901,7 @@ def assert_run_account_job_passes_posted_at_window_to_prepare() -> None:
     assert 'parser.add_argument("--posted-before"' in script_text
     assert 'parser.add_argument("--sync-sheet"' in script_text
     assert 'args.sync_sheet' in script_text
-    assert 'env.setdefault("OPENCLI_BROWSER_COMMAND_TIMEOUT", "180")' in script_text
+    assert 'env.setdefault("OPENCLI_BROWSER_COMMAND_TIMEOUT", "360")' in script_text
     assert 'prepare_command.extend(["--posted-after", args.posted_after])' in script_text
     assert 'prepare_command.extend(["--posted-before", args.posted_before])' in script_text
     assert 'command.extend(["--posted-after", posted_after])' in script_text
@@ -5818,11 +5933,13 @@ def assert_run_account_job_scoped_posts_applies_posted_window(tmp_path: Path) ->
     conn = connect(tmp_path / "account-scoped-posted-window.sqlite")
     config = {"quality_audit": {"required_engagement_fields": ["likes", "comments", "shares"]}}
     account_url = "https://www.facebook.com/windowpage"
-    for suffix, posted_at, time_source in [
-        ("old", "2026年6月4日 11:59", "dom_aria_label"),
-        ("new", "2026年6月4日 12:01", "dom_aria_label"),
-        ("pending", "", ""),
-        ("estimated", "2026年6月4日 10:26", "relative_estimated"),
+    for suffix, posted_at, time_source, crawled_at in [
+        ("old", "2026年6月4日 11:59", "dom_aria_label", ""),
+        ("new", "2026年6月4日 12:01", "dom_aria_label", ""),
+        ("pending", "", "", ""),
+        ("estimated", "2026年6月4日 10:26", "relative_estimated", "2026-06-04T20:00:00"),
+        ("estimated-cross-date", "2026年6月3日 20:30", "relative_estimated", "2026-06-05T05:30:00"),
+        ("estimated-stale", "2026年5月28日 20:30", "relative_estimated", "2026-05-29T01:30:00"),
     ]:
         upsert_post(
             conn,
@@ -5834,6 +5951,7 @@ def assert_run_account_job_scoped_posts_applies_posted_window(tmp_path: Path) ->
                     "posted_at": posted_at,
                     "time_confirmed": time_source == "dom_aria_label",
                     "time_source": time_source,
+                    "crawled_at": crawled_at,
                 }
             ),
             config,
@@ -5851,6 +5969,7 @@ def assert_run_account_job_scoped_posts_applies_posted_window(tmp_path: Path) ->
     assert {post["post_url"] for post in posts} == {
         "https://facebook.com/windowpage/posts/pending",
         "https://facebook.com/windowpage/posts/estimated",
+        "https://facebook.com/windowpage/posts/estimated-cross-date",
         "https://facebook.com/windowpage/posts/new",
     }
 
@@ -5896,6 +6015,26 @@ def assert_enrichment_worker_scopes_posts_by_posted_window(tmp_path: Path) -> No
                         "time_confirmed": False,
                         "time_source": "relative_estimated",
                     },
+                    {
+                        "account_url": account_url,
+                        "account_type": "competitor",
+                        "post_url": "https://www.facebook.com/windowpage/posts/estimated-cross-date",
+                        "posted_at": "2026年6月3日 20:30",
+                        "posted_date": "260603",
+                        "time_confirmed": False,
+                        "time_source": "relative_estimated",
+                        "crawled_at": "2026-06-05T05:30:00",
+                    },
+                    {
+                        "account_url": account_url,
+                        "account_type": "competitor",
+                        "post_url": "https://www.facebook.com/windowpage/posts/estimated-stale",
+                        "posted_at": "2026年5月28日 20:30",
+                        "posted_date": "260528",
+                        "time_confirmed": False,
+                        "time_source": "relative_estimated",
+                        "crawled_at": "2026-05-29T01:30:00",
+                    },
                 ]
             },
             ensure_ascii=False,
@@ -5930,7 +6069,7 @@ def assert_enrichment_worker_scopes_posts_by_posted_window(tmp_path: Path) -> No
         ]
     )
     data = json.loads(result.stdout)
-    assert data["scope"]["post_count"] == 3
+    assert data["scope"]["post_count"] == 4
     assert data["input_tasks"] == 1
 
 
@@ -6773,6 +6912,42 @@ raise SystemExit(73)
     assert task["attempts"] == 0
     assert task["next_run_at"]
     assert task["locked_at"] is None
+
+
+def assert_pending_tasks_accept_iso_t_next_run_at(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks, pending_enrichment_tasks_for_posts, row_for_post, upsert_post
+
+    conn = connect(tmp_path / "iso-next-run.sqlite")
+    config = {"quality_audit": {"required_engagement_fields": ["likes", "comments", "shares"]}}
+    post = normalize_post(
+        {
+            "account_url": "https://www.facebook.com/isopage",
+            "account_type": "competitor",
+            "post_url": "https://www.facebook.com/isopage/posts/one",
+            "posted_date": "260604",
+            "posted_at": "2026年6月4日 13:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+        }
+    )
+    upsert_post(conn, post, config)
+    stored = row_for_post(conn, post)
+    assert stored is not None
+    enqueue_enrichment_tasks(conn, stored, stages=["engagement"], config=config)
+    conn.execute(
+        """
+        UPDATE enrichment_tasks
+        SET status = 'pending', next_run_at = '2026-06-04T21:15:00'
+        WHERE stage = 'engagement'
+        """
+    )
+    conn.commit()
+
+    tasks = pending_enrichment_tasks_for_posts(conn, [stored], stages=["engagement"], limit=10)
+
+    assert [task["stage"] for task in tasks] == ["engagement"]
 
 
 def assert_enrichment_worker_keeps_unsatisfied_detail_stage_pending(tmp_path: Path) -> None:
@@ -14735,6 +14910,7 @@ def main() -> int:
     assert_dom_extractor_keeps_path_photo_without_parent_post()
     assert_detail_engagement_is_anchored_to_main_post()
     assert_detail_engagement_ignores_relative_time_labels()
+    assert_detail_engagement_zero_fills_absent_comment_share_counts()
     assert_detail_engagement_reads_visible_reel_action_buttons()
     assert_detail_embedded_publish_time_extracts_target_reel()
     assert_detail_enrichment_ignores_page_shell_ad_links()
@@ -14852,6 +15028,7 @@ def main() -> int:
         assert_prepare_capture_skips_bad_candidate_without_failing_batch(tmp_path)
         assert_prepare_capture_has_no_base_time_argument()
         assert_prepare_capture_can_filter_posted_at_window(tmp_path)
+        assert_prepare_capture_keeps_relative_estimates_for_detail_confirmation(tmp_path)
         assert_prepare_capture_keeps_comment_relative_time_for_detail_confirmation(tmp_path)
         assert_run_account_job_passes_posted_at_window_to_prepare()
         assert_opencli_discovery_time_window_handles_relative_labels()
@@ -14877,6 +15054,7 @@ def main() -> int:
         assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path)
         assert_detail_results_match_facebook_url_variants(tmp_path)
         assert_enrichment_worker_requeues_opencli_session_busy(tmp_path)
+        assert_pending_tasks_accept_iso_t_next_run_at(tmp_path)
         assert_enrichment_worker_keeps_unsatisfied_detail_stage_pending(tmp_path)
         assert_enrichment_worker_lead_stage_requires_external_landing_url()
         assert_post_cta_lead_source_qualifies_for_quality_gate()

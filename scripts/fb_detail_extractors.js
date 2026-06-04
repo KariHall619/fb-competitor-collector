@@ -424,6 +424,17 @@ function detailEngagementBrowserExpression(target) {
         setMetric("shares", triple[2], triple.join("；"));
       }
     }
+    const zeroFilled = [];
+    if (root && (result.likes !== null && result.likes !== undefined || result.reactions !== null && result.reactions !== undefined)) {
+      if (result.comments === null || result.comments === undefined) {
+        result.comments = 0;
+        zeroFilled.push("comments");
+      }
+      if (result.shares === null || result.shares === undefined) {
+        result.shares = 0;
+        zeroFilled.push("shares");
+      }
+    }
 
     const parts = [];
     if (result.views !== null && result.views !== undefined) parts.push("浏览量：" + result.views);
@@ -478,6 +489,9 @@ function detailEngagementBrowserExpression(target) {
         result.confidence = "anchored_missing_metrics";
         result.warnings.push(root ? "main_post_metrics_not_found" : "main_post_root_not_found");
       }
+    } else if (zeroFilled.length) {
+      result.confidence = "anchored_zero_missing_counts";
+      result.warnings.push("zero_filled_" + zeroFilled.join("_"));
     } else if (missing.length) {
       result.confidence = "anchored_incomplete_metrics";
       result.warnings.push("missing_" + missing.join("_"));

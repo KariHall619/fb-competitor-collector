@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import subprocess
 import tempfile
@@ -17,7 +17,13 @@ from typing import Any
 from config_loader import deep_get, load_config
 from field_audit import audit_post_fields
 from fetch_article_material import extract_material
-from models import canonicalize_post_url, facebook_content_key, has_qualified_comment_lead_link, is_estimated_time_source
+from models import (
+    canonicalize_post_url,
+    facebook_content_key,
+    has_qualified_comment_lead_link,
+    is_estimated_time_source,
+    parse_reference_time,
+)
 from pipeline_status import crawl_status_for, has_confirmed_time, output_status_for
 from story_summary_policy import has_valid_story_summary, story_summary_errors
 from store import (
@@ -89,6 +95,67 @@ def filter_posts_by_posted_window(
             continue
         filtered.append(post)
     return filtered
+
+
+def target_date_to_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(str(value or ""), "%y%m%d")
+    except ValueError:
+        return None
+
+
+def crawled_near_scope_date(post: dict[str, Any], args: argparse.Namespace) -> bool:
+    crawled_at = parse_reference_time(str(post.get("crawled_at") or ""))
+    if crawled_at is None:
+        return False
+    crawled_day = crawled_at.date()
+    target_dates = [item for item in (args.date, args.start_date, args.end_date) if item]
+    for date in target_dates:
+        target = target_date_to_datetime(date)
+        if target is None:
+            continue
+        if target.date() <= crawled_day <= (target + timedelta(days=1)).date():
+            return True
+    return False
+
+
+def scoped_posts_for_enrichment(conn: Any, args: argparse.Namespace) -> list[dict[str, Any]]:
+    posts = query_posts(
+        conn,
+        date=args.date,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        include_unknown_date=bool(args.date or args.start_date or args.end_date),
+        account_name=args.account_name,
+        account_url=args.account_url,
+        account_type=args.account_type,
+    )
+    if args.account_url and (args.date or args.start_date or args.end_date):
+        by_key = {
+            str(post.get("canonical_post_url") or post.get("post_url")): post
+            for post in posts
+            if post.get("canonical_post_url") or post.get("post_url")
+        }
+        for post in query_posts(conn, account_url=args.account_url, account_type=args.account_type):
+            key = post.get("canonical_post_url") or post.get("post_url")
+            if not key or str(key) in by_key:
+                continue
+            posted_date = str(post.get("posted_date") or "")
+            estimated_time = is_estimated_time_source(post.get("time_source"))
+            near_scope = estimated_time and crawled_near_scope_date(post, args)
+            if args.date and posted_date and posted_date != args.date and not near_scope:
+                continue
+            if args.start_date and posted_date and posted_date < args.start_date and not near_scope:
+                continue
+            if args.end_date and posted_date and posted_date > args.end_date and not near_scope:
+                continue
+            by_key[str(key)] = post
+        posts = list(by_key.values())
+    return filter_posts_by_posted_window(
+        posts,
+        posted_after=args.posted_after,
+        posted_before=args.posted_before,
+    )
 
 
 def detail_args_for_stages(stages: set[str]) -> list[str]:
@@ -399,25 +466,7 @@ def main() -> int:
             args.account_type,
         ]
     )
-    scoped_posts = (
-        query_posts(
-            conn,
-            date=args.date,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            include_unknown_date=bool(args.date or args.start_date or args.end_date),
-            account_name=args.account_name,
-            account_url=args.account_url,
-            account_type=args.account_type,
-        )
-        if scope_enabled
-        else []
-    )
-    scoped_posts = filter_posts_by_posted_window(
-        scoped_posts,
-        posted_after=args.posted_after,
-        posted_before=args.posted_before,
-    )
+    scoped_posts = scoped_posts_for_enrichment(conn, args) if scope_enabled else []
     tasks = (
         pending_enrichment_tasks_for_posts(conn, scoped_posts, stages=stages, limit=args.limit)
         if scope_enabled

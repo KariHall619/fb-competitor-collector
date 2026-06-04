@@ -600,7 +600,7 @@ def pending_enrichment_tasks(
     stale_running_seconds: int = 1800,
 ) -> list[dict[str, Any]]:
     recover_stale_running_tasks(conn, stale_running_seconds=stale_running_seconds)
-    clauses = ["status IN ('pending', 'failed')", "(next_run_at IS NULL OR next_run_at <= CURRENT_TIMESTAMP)"]
+    clauses = ["status IN ('pending', 'failed')", "(next_run_at IS NULL OR datetime(next_run_at) <= datetime('now'))"]
     params: list[Any] = []
     rows = fetch_pending_task_rows(conn, clauses=clauses, params=params, stages=stages, limit=limit)
     return limit_pending_tasks(rows, limit)
@@ -700,7 +700,7 @@ def pending_enrichment_tasks_for_posts(
 ) -> list[dict[str, Any]]:
     scope_clause, params = task_scope_clause(posts)
     recover_stale_running_tasks_for_posts(conn, posts, stale_running_seconds=stale_running_seconds)
-    clauses = ["status IN ('pending', 'failed')", "(next_run_at IS NULL OR next_run_at <= CURRENT_TIMESTAMP)"]
+    clauses = ["status IN ('pending', 'failed')", "(next_run_at IS NULL OR datetime(next_run_at) <= datetime('now'))"]
     clauses.append(scope_clause)
     rows = fetch_pending_task_rows(conn, clauses=clauses, params=params, stages=stages, limit=limit)
     return limit_pending_tasks(rows, limit)

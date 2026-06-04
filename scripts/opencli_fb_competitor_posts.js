@@ -718,7 +718,7 @@ async function enrichCurrentDetailPage(page, post, options) {
   } else if (!options.skipPostType) {
     nextPost.note = appendSemicolonNote(nextPost.note, '帖子类型待补采：详情页未能判断图文/视频/仅图片/仅文字');
   }
-  if (engagement.raw && ['anchored', 'anchored_incomplete_metrics', 'reel_action_buttons'].includes(engagement.confidence)) {
+  if (engagement.raw && ['anchored', 'anchored_incomplete_metrics', 'anchored_zero_missing_counts', 'reel_action_buttons'].includes(engagement.confidence)) {
     nextPost.engagement_data = engagement.detail_engagement_data || engagement.raw;
     nextPost.detail_engagement_data = engagement.detail_engagement_data || engagement.raw;
     nextPost.engagement_raw = nextPost.engagement_data;
@@ -828,6 +828,7 @@ cli({
   domain: 'www.facebook.com',
   strategy: Strategy.COOKIE,
   browser: true,
+  siteSession: 'persistent',
   navigateBefore: false,
   defaultFormat: 'json',
   args: [
