@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  currentPageMatchesAccount,
   ensureFacebookTab,
   evaluateInSession,
   extractArgs,
@@ -217,6 +218,19 @@ async function scrollToTop(opencliCommand, session, tab) {
   await waitSeconds(opencliCommand, session, tab, 1.2);
 }
 
+async function readCurrentPageIdentity(opencliCommand, session, tab) {
+  const payload = await evalPage(opencliCommand, session, tab, `(() => ({
+    url: location.href,
+    title: document.title,
+    body_length: document.body?.innerText?.length || 0,
+  }))()`);
+  return {
+    url: payload?.url || "",
+    title: payload?.title || "",
+    body_length: Number(payload?.body_length || 0),
+  };
+}
+
 async function scrollDown(opencliCommand, session, tab, pixels) {
   return await evalPage(opencliCommand, session, tab, `(() => {
     const requested = ${Number(pixels) || 1400};
@@ -289,6 +303,31 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
   let oldPostWindowCount = 0;
 
   const readSnapshot = async (index, label) => {
+    const pageIdentity = await readCurrentPageIdentity(opencliCommand, session, tab);
+    if (!currentPageMatchesAccount(pageIdentity.url, pageIdentity.title, ACCOUNT_URL)) {
+      blockedExtraction = {
+        status: "facebook_tab_wrong_account",
+        wrong_account: true,
+        url: pageIdentity.url,
+        title: pageIdentity.title,
+        body_length: pageIdentity.body_length,
+      };
+      stopReason = "wrong_account";
+      snapshots.push({
+        index,
+        label,
+        blocked: true,
+        wrong_account: true,
+        url: pageIdentity.url,
+        title: pageIdentity.title,
+        body_length: pageIdentity.body_length,
+        raw_candidate_count: 0,
+        new_posts: 0,
+        seen_posts: seen.size,
+      });
+      return false;
+    }
+
     const extraction = await evalPage(opencliCommand, session, tab, browserExpression(maxText));
     if (extraction.capture_blocked) {
       blockedExtraction = extraction;
@@ -418,6 +457,23 @@ async function main() {
 
   if (capture.blockedExtraction) {
     const extraction = capture.blockedExtraction;
+    if (extraction.wrong_account) {
+      outputJson({
+        ok: false,
+        status: "facebook_tab_wrong_account",
+        action_required: "human_intervention_required",
+        human_intervention_required: true,
+        blocked_reason: "facebook_tab_wrong_account",
+        route: "opencli_browser_bridge",
+        message: "当前 OpenCLI 绑定标签页不属于目标 Facebook 账号，已停止采集以避免串账号数据。",
+        expected_account_url: ACCOUNT_URL,
+        actual_url: extraction.url || "",
+        actual_title: extraction.title || "",
+        tab: tabResult.tab,
+        snapshots: capture.snapshots,
+      });
+      return 5;
+    }
     outputJson({
       ok: false,
       status: extraction.logged_out ? "login_required" : "visitor_preview",

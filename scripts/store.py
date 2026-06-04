@@ -568,7 +568,7 @@ def fetch_pending_task_rows(
             f"""
             SELECT * FROM enrichment_tasks
             WHERE {' AND '.join(stage_clauses)}
-            ORDER BY attempts ASC, id ASC
+            ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, attempts ASC, id ASC
             LIMIT ?
             """,
             [*stage_params, per_stage_limit],

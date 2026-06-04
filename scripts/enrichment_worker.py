@@ -17,7 +17,7 @@ from typing import Any
 from config_loader import deep_get, load_config
 from field_audit import audit_post_fields
 from fetch_article_material import extract_material
-from models import canonicalize_post_url, facebook_content_key, has_qualified_comment_lead_link
+from models import canonicalize_post_url, facebook_content_key, has_qualified_comment_lead_link, is_estimated_time_source
 from pipeline_status import crawl_status_for, has_confirmed_time, output_status_for
 from story_summary_policy import has_valid_story_summary, story_summary_errors
 from store import (
@@ -78,6 +78,10 @@ def filter_posts_by_posted_window(
     for post in posts:
         posted_at = parse_posted_at_filter(str(post.get("posted_at") or ""))
         if posted_at is None:
+            filtered.append(post)
+            continue
+        if is_estimated_time_source(post.get("time_source")):
+            filtered.append(post)
             continue
         if after is not None and posted_at < after:
             continue

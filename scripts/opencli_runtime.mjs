@@ -130,6 +130,36 @@ function defaultSession(config) {
   return session && session.toLowerCase() !== "auto" ? session : "fb-competitor";
 }
 
+function accountSessionSlug(accountUrl) {
+  if (!accountUrl) return "";
+  try {
+    const parsed = new URL(accountUrl);
+    const id = parsed.searchParams.get("id");
+    const parts = parsed.pathname
+      .split("/")
+      .filter(Boolean)
+      .filter((part) => !["people", "profile.php", "posts", "reels", "videos", "photos"].includes(part));
+    const raw = id || parts[0] || parsed.hostname || "";
+    return String(raw)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48);
+  } catch {
+    return String(accountUrl)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48);
+  }
+}
+
+function defaultAccountSession(config, accountUrl) {
+  const base = defaultSession(config);
+  const slug = accountSessionSlug(accountUrl);
+  return slug ? `${base}-${slug}` : base;
+}
+
 function runOpencli(args, options = {}) {
   const command = options.command || ["npx", "-y", "@jackwener/opencli"];
   const env = { ...process.env, ...(options.env || {}) };
@@ -184,6 +214,33 @@ function matchesAccount(tab, accountUrl) {
   } catch {
     return true;
   }
+}
+
+function accountIdentity(accountUrl) {
+  if (!accountUrl) return { tokens: [], id: "" };
+  try {
+    const parsed = new URL(accountUrl);
+    const id = parsed.searchParams.get("id") || "";
+    const ignored = new Set(["people", "profile.php", "posts", "reels", "videos", "photos", "watch"]);
+    const parts = parsed.pathname
+      .split("/")
+      .filter(Boolean)
+      .filter((part) => !ignored.has(part.toLowerCase()));
+    const tokens = [id, ...parts]
+      .map((part) => String(part || "").toLowerCase())
+      .filter(Boolean);
+    return { tokens: [...new Set(tokens)], id };
+  } catch {
+    return { tokens: [], id: "" };
+  }
+}
+
+function currentPageMatchesAccount(pageUrl, pageTitle, accountUrl) {
+  if (!accountUrl) return true;
+  const identity = accountIdentity(accountUrl);
+  if (!identity.tokens.length) return true;
+  const haystack = `${pageUrl || ""} ${pageTitle || ""}`.toLowerCase();
+  return identity.tokens.some((token) => haystack.includes(token));
 }
 
 async function refreshTab({ opencliCommand, session, tab }) {
@@ -331,11 +388,12 @@ function loadOpencliContext(argv = process.argv.slice(2)) {
   const { value } = extractArgs(argv);
   const configPath = value("--config", "config/settings.yaml");
   const config = readConfig(configPath);
+  const accountUrl = value("--account-url", "");
   return {
     configPath,
     config,
     opencliCommand: commandFromConfig(config),
-    session: value("--session", defaultSession(config)),
+    session: value("--session", defaultAccountSession(config, accountUrl)),
   };
 }
 
@@ -344,7 +402,11 @@ function currentScriptName() {
 }
 
 export {
+  accountIdentity,
+  accountSessionSlug,
   currentScriptName,
+  currentPageMatchesAccount,
+  defaultAccountSession,
   ensureFacebookTab,
   evaluateInSession,
   extractArgs,

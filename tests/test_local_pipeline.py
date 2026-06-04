@@ -97,7 +97,7 @@ def run_project_adapter_body():
     buffer = io.StringIO()
     exit_code = 0
     original_argv = list(_codex_sys.argv)
-    if _codex_sys.argv[1:4] == ["browser", "fb-competitor", "eval"]:
+    if len(_codex_sys.argv) >= 4 and _codex_sys.argv[1] == "browser" and _codex_sys.argv[2].startswith("fb-competitor") and _codex_sys.argv[3] == "eval":
         _codex_sys.argv = [
             _codex_sys.argv[0],
             "facebook",
@@ -121,19 +121,33 @@ def run_project_adapter_body():
 if sys.argv[1:2] == ["--version"]:
     print("1.8.1")
     sys.exit(0)
-if sys.argv[1:4] == ["browser", "fb-competitor", "bind"]:
+def session_account_slug():
+    session = sys.argv[2] if len(sys.argv) > 2 else "fb-competitor"
+    prefix = "fb-competitor-"
+    return session[len(prefix):] if session.startswith(prefix) and len(session) > len(prefix) else "expectedpage"
+
+def session_account_url():
+    return "https://www.facebook.com/" + session_account_slug()
+
+def is_browser_command(name):
+    return len(sys.argv) >= 4 and sys.argv[1] == "browser" and sys.argv[2].startswith("fb-competitor") and sys.argv[3] == name
+
+if is_browser_command("bind"):
     sys.exit(0)
-if sys.argv[1:5] == ["browser", "fb-competitor", "tab", "list"]:
-    print(json.dumps([{{"page": "fake-facebook-tab", "url": "https://www.facebook.com/expectedpage", "title": "Facebook", "active": True}}]))
+if len(sys.argv) >= 5 and sys.argv[1] == "browser" and sys.argv[2].startswith("fb-competitor") and sys.argv[3:5] == ["tab", "list"]:
+    print(json.dumps([{{"page": "fake-facebook-tab", "url": session_account_url(), "title": "Facebook", "active": True}}]))
     sys.exit(0)
-if sys.argv[1:4] == ["browser", "fb-competitor", "open"]:
+if is_browser_command("open"):
     print(json.dumps({{"ok": True}}))
     sys.exit(0)
-if sys.argv[1:4] == ["browser", "fb-competitor", "wait"]:
+if is_browser_command("wait"):
     print(json.dumps({{"ok": True}}))
     sys.exit(0)
-if sys.argv[1:4] == ["browser", "fb-competitor", "eval"]:
+if is_browser_command("eval"):
     js = sys.argv[4] if len(sys.argv) > 4 else ""
+    if "url: location.href" in js and "title: document.title" in js and "document.body?.innerText?.length" in js:
+        print(json.dumps({{"url": session_account_url(), "title": "Facebook", "body_length": 1000}}))
+        sys.exit(0)
     if "scrollBy" in js or "scrollTo" in js:
         print(json.dumps({{"before": 0, "after": 0, "moved": 0, "target": "window", "body_length": 1000, "scroll_height": 1000}}))
         sys.exit(0)
@@ -1153,6 +1167,8 @@ def assert_opencli_adapter_install_is_real_opencli_home() -> None:
 def assert_account_and_worker_call_opencli_adapter() -> None:
     account_text = (ROOT / "scripts" / "run_account_job.py").read_text(encoding="utf-8")
     worker_text = (ROOT / "scripts" / "enrichment_worker.py").read_text(encoding="utf-8")
+    runtime_text = (ROOT / "scripts" / "opencli_runtime.mjs").read_text(encoding="utf-8")
+    extract_text = (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
     assert "scripts/run_project_opencli.py" not in account_text
     discover_slice = account_text[account_text.index("def discover_homepage_once") : account_text.index("def expected_coverage_incomplete")]
     assert '"scripts/opencli_extract_current_tab.mjs"' in discover_slice
@@ -1161,11 +1177,87 @@ def assert_account_and_worker_call_opencli_adapter() -> None:
     assert "opencli_command(config)" not in discover_slice
     assert (ROOT / "scripts" / "opencli_runtime.mjs").exists()
     assert (ROOT / "scripts" / "opencli_extract_current_tab.mjs").exists()
+    assert "defaultAccountSession(config, accountUrl)" in runtime_text
+    assert "currentPageMatchesAccount" in extract_text
+    assert "facebook_tab_wrong_account" in account_text
     assert "scripts/run_project_opencli.py" not in worker_text
     assert '"facebook"' in worker_text
     assert '"fb-competitor-posts"' in worker_text
     assert '"detail"' in worker_text
     assert "opencli_command(config)" in worker_text
+
+
+def assert_opencli_runtime_scopes_session_to_account() -> None:
+    script = """
+import { accountSessionSlug, currentPageMatchesAccount, defaultAccountSession } from './scripts/opencli_runtime.mjs';
+if (accountSessionSlug('https://www.facebook.com/healingjourneys.mani') !== 'healingjourneys-mani') process.exit(1);
+if (defaultAccountSession({ opencli_session: 'fb-competitor' }, 'https://www.facebook.com/healingjourneys.mani') !== 'fb-competitor-healingjourneys-mani') process.exit(2);
+if (!currentPageMatchesAccount('https://www.facebook.com/healingjourneys.mani', 'Healing Journeys', 'https://www.facebook.com/healingjourneys.mani')) process.exit(3);
+if (currentPageMatchesAccount('https://www.facebook.com/LessonsTaughtByLifepage', 'Lessons', 'https://www.facebook.com/healingjourneys.mani')) process.exit(4);
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def assert_opencli_extract_blocks_wrong_account_tab(tmp_path: Path) -> None:
+    config = tmp_path / "settings_wrong_account.yaml"
+    fake_opencli = tmp_path / "fake-opencli-wrong-account"
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    config.write_text(text, encoding="utf-8")
+    fake_opencli.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+
+def is_browser(name):
+    return len(sys.argv) >= 4 and sys.argv[1] == "browser" and sys.argv[3] == name
+
+if is_browser("bind"):
+    sys.exit(0)
+if len(sys.argv) >= 5 and sys.argv[1] == "browser" and sys.argv[3:5] == ["tab", "list"]:
+    print(json.dumps([{"page": "tab-lessons", "url": "https://www.facebook.com/LessonsTaughtByLifepage", "title": "Lessons", "active": True}]))
+    sys.exit(0)
+if is_browser("eval"):
+    js = sys.argv[4] if len(sys.argv) > 4 else ""
+    if "url: location.href" in js and "title: document.title" in js and "document.body?.innerText?.length" in js:
+        print(json.dumps({"url": "https://www.facebook.com/LessonsTaughtByLifepage", "title": "Lessons", "body_length": 1000}))
+        sys.exit(0)
+    print(json.dumps({"capture_blocked": False, "candidates": []}))
+    sys.exit(0)
+if is_browser("wait"):
+    print("{}")
+    sys.exit(0)
+if is_browser("open"):
+    print("{}")
+    sys.exit(0)
+print("unexpected fake opencli args: " + json.dumps(sys.argv), file=sys.stderr)
+sys.exit(64)
+""",
+        encoding="utf-8",
+    )
+    fake_opencli.chmod(0o755)
+    result = run(
+        [
+            "node",
+            "scripts/opencli_extract_current_tab.mjs",
+            "--config",
+            str(config),
+            "--account-url",
+            "https://www.facebook.com/healingjourneys.mani",
+            "--max-snapshots",
+            "2",
+            "--min-snapshots",
+            "1",
+        ]
+    )
+    assert result.returncode == 5, result.stdout or result.stderr
+    data = json.loads(result.stdout)
+    assert data["status"] == "facebook_tab_wrong_account"
+    assert data["human_intervention_required"] is True
+    assert data["expected_account_url"] == "https://www.facebook.com/healingjourneys.mani"
+    assert data["actual_url"] == "https://www.facebook.com/LessonsTaughtByLifepage"
 
 
 def assert_detail_adapter_uses_canonical_navigation_url() -> None:
@@ -5448,6 +5540,54 @@ def assert_prepare_capture_can_filter_posted_at_window(tmp_path: Path) -> None:
     assert "before_posted_after:2026年6月4日 11:59" in rejected_reasons
 
 
+def assert_prepare_capture_keeps_comment_relative_time_for_detail_confirmation(tmp_path: Path) -> None:
+    raw = tmp_path / "raw_comment_time.json"
+    prepared = tmp_path / "prepared_comment_time.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {
+                        "post_url": "https://www.facebook.com/healingjourneys.mani/posts/comment-relative",
+                        "post_time_text": "15h",
+                        "crawled_at": "2026-06-05T01:18:42",
+                        "first_line": "Author",
+                        "lead_link_source": "comment_reply",
+                        "lead_link_status": "qualified",
+                        "lead_url_raw": "https://story.example/part3",
+                        "article_url": "https://story.example/part3",
+                        "story_summary": "Author Healing Journeys PART 3 story text from a comment reply block.",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    result = run(
+        [
+            PYTHON,
+            "scripts/prepare_capture_result.py",
+            "--input",
+            str(raw),
+            "--output",
+            str(prepared),
+            "--target-date",
+            "260604",
+            "--posted-after",
+            "2026-06-04 12:00",
+        ]
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    data = json.loads(prepared.read_text(encoding="utf-8"))
+    assert data["prepared"] == 1
+    post = data["posts"][0]
+    assert post["posted_at"] == ""
+    assert post["relative_time_text"] == "15h"
+    assert "发帖时间待确认" in post["note"]
+    assert not any(str(item["reason"]).startswith("before_posted_after") for item in data["rejected"])
+
+
 def assert_run_account_job_passes_posted_at_window_to_prepare() -> None:
     script_text = (ROOT / "scripts" / "run_account_job.py").read_text(encoding="utf-8")
     assert 'parser.add_argument("--posted-after"' in script_text
@@ -5485,7 +5625,12 @@ def assert_run_account_job_scoped_posts_applies_posted_window(tmp_path: Path) ->
     conn = connect(tmp_path / "account-scoped-posted-window.sqlite")
     config = {"quality_audit": {"required_engagement_fields": ["likes", "comments", "shares"]}}
     account_url = "https://www.facebook.com/windowpage"
-    for suffix, posted_at in [("old", "2026年6月4日 11:59"), ("new", "2026年6月4日 12:01")]:
+    for suffix, posted_at, time_source in [
+        ("old", "2026年6月4日 11:59", "dom_aria_label"),
+        ("new", "2026年6月4日 12:01", "dom_aria_label"),
+        ("pending", "", ""),
+        ("estimated", "2026年6月4日 10:26", "relative_estimated"),
+    ]:
         upsert_post(
             conn,
             normalize_post(
@@ -5494,8 +5639,8 @@ def assert_run_account_job_scoped_posts_applies_posted_window(tmp_path: Path) ->
                     "account_type": "competitor",
                     "post_url": f"https://www.facebook.com/windowpage/posts/{suffix}",
                     "posted_at": posted_at,
-                    "time_confirmed": True,
-                    "time_source": "dom_aria_label",
+                    "time_confirmed": time_source == "dom_aria_label",
+                    "time_source": time_source,
                 }
             ),
             config,
@@ -5510,7 +5655,11 @@ def assert_run_account_job_scoped_posts_applies_posted_window(tmp_path: Path) ->
         posted_after="2026-06-04 12:00",
     )
 
-    assert [post["post_url"] for post in posts] == ["https://facebook.com/windowpage/posts/new"]
+    assert {post["post_url"] for post in posts} == {
+        "https://facebook.com/windowpage/posts/pending",
+        "https://facebook.com/windowpage/posts/estimated",
+        "https://facebook.com/windowpage/posts/new",
+    }
 
 
 def assert_enrichment_worker_scopes_posts_by_posted_window(tmp_path: Path) -> None:
@@ -5537,6 +5686,22 @@ def assert_enrichment_worker_scopes_posts_by_posted_window(tmp_path: Path) -> No
                         "posted_at": "2026年6月4日 12:01",
                         "time_confirmed": True,
                         "time_source": "dom_aria_label",
+                    },
+                    {
+                        "account_url": account_url,
+                        "account_type": "competitor",
+                        "post_url": "https://www.facebook.com/windowpage/posts/pending",
+                        "posted_date": "260604",
+                        "relative_time_text": "15h",
+                    },
+                    {
+                        "account_url": account_url,
+                        "account_type": "competitor",
+                        "post_url": "https://www.facebook.com/windowpage/posts/estimated",
+                        "posted_at": "2026年6月4日 10:26",
+                        "posted_date": "260604",
+                        "time_confirmed": False,
+                        "time_source": "relative_estimated",
                     },
                 ]
             },
@@ -5572,7 +5737,7 @@ def assert_enrichment_worker_scopes_posts_by_posted_window(tmp_path: Path) -> No
         ]
     )
     data = json.loads(result.stdout)
-    assert data["scope"]["post_count"] == 1
+    assert data["scope"]["post_count"] == 3
     assert data["input_tasks"] == 1
 
 
@@ -5983,6 +6148,42 @@ def assert_enrichment_queue_limit_keeps_article_material_moving(tmp_path: Path) 
     stages = [task["stage"] for task in tasks]
     assert "post_type" in stages
     assert "article_material" in stages
+
+
+def assert_enrichment_queue_prefers_pending_before_failed(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, mark_task_failed, pending_enrichment_tasks, upsert_post
+
+    conn = connect(tmp_path / "queue-pending-before-failed.sqlite")
+    posts = []
+    for suffix in ["failed-old", "pending-new"]:
+        post = normalize_post(
+            {
+                "account_name": "Queue Fairness",
+                "account_url": "https://www.facebook.com/queuefairness",
+                "account_type": "competitor",
+                "post_url": f"https://www.facebook.com/queuefairness/posts/{suffix}",
+                "post_time_text": "1h",
+                "article_url": f"https://story.example/{suffix}",
+                "crawled_at": "2026-06-03T12:00:00",
+            },
+            {"source_skill": "test"},
+        )
+        upsert_post(conn, post)
+        posts.append(post)
+    enqueue_enrichment_tasks_for_posts(conn, posts)
+    failed_task = next(
+        task
+        for task in pending_enrichment_tasks(conn, stages=["detail_time"], limit=10)
+        if task["post_url"].endswith("/failed-old")
+    )
+    mark_task_failed(conn, failed_task["id"], "old retry blocker", retry_seconds=0)
+
+    tasks = pending_enrichment_tasks(conn, stages=["detail_time"], limit=1)
+    assert len(tasks) == 1
+    assert tasks[0]["status"] == "pending"
+    assert tasks[0]["post_url"].endswith("/pending-new")
 
 
 def assert_query_posts_matches_account_url_variants(tmp_path: Path) -> None:
@@ -14081,6 +14282,9 @@ def main() -> int:
     assert_opencli_adapter_scaffold_contract()
     assert_opencli_adapter_install_is_real_opencli_home()
     assert_account_and_worker_call_opencli_adapter()
+    assert_opencli_runtime_scopes_session_to_account()
+    with tempfile.TemporaryDirectory() as tmp:
+        assert_opencli_extract_blocks_wrong_account_tab(Path(tmp))
     assert_detail_adapter_uses_canonical_navigation_url()
     assert_run_accounts_uses_adapter_not_tab_preopen()
     assert_detail_enrichment_is_adapter_owned()
@@ -14180,6 +14384,7 @@ def main() -> int:
         assert_prepare_capture_skips_bad_candidate_without_failing_batch(tmp_path)
         assert_prepare_capture_has_no_base_time_argument()
         assert_prepare_capture_can_filter_posted_at_window(tmp_path)
+        assert_prepare_capture_keeps_comment_relative_time_for_detail_confirmation(tmp_path)
         assert_run_account_job_passes_posted_at_window_to_prepare()
         assert_opencli_discovery_time_window_handles_relative_labels()
         assert_run_account_job_scoped_posts_applies_posted_window(tmp_path)
@@ -14194,6 +14399,7 @@ def main() -> int:
         assert_article_material_extractor(tmp_path)
         assert_partial_review_status_and_task_queue(tmp_path)
         assert_enrichment_queue_limit_keeps_article_material_moving(tmp_path)
+        assert_enrichment_queue_prefers_pending_before_failed(tmp_path)
         assert_query_posts_matches_account_url_variants(tmp_path)
         assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path)
         assert_detail_results_match_facebook_url_variants(tmp_path)

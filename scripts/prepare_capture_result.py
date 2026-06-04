@@ -148,6 +148,17 @@ def media_suspect_payload(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def relative_time_belongs_to_comment(raw: dict[str, Any]) -> bool:
+    first_line = str(raw.get("first_line") or "").strip().lower()
+    lead_source = str(raw.get("lead_link_source") or "").strip().lower()
+    source_split = str(raw.get("source_split") or "").strip().lower()
+    return bool(
+        first_line in {"author", "作者"}
+        or lead_source in {"comment", "comment_reply"}
+        or (source_split == "article" and str(raw.get("comment_lead_excerpt") or "").strip())
+    )
+
+
 def media_is_covered_by_post(media: dict[str, Any], post: dict[str, Any]) -> bool:
     """Return True when a rejected media link is already represented by a real post.
 
@@ -252,7 +263,7 @@ def prepare_record(
     posted_at = normalize_posted_at(raw.get("posted_at") or raw.get("posted_at_raw") or "")
     time_source = raw.get("time_source") or ("exact" if posted_at else "")
     crawled_at = raw.get("crawled_at") or datetime.now().isoformat(timespec="seconds")
-    if not posted_at and relative_time:
+    if not posted_at and relative_time and not relative_time_belongs_to_comment(raw):
         estimated_at = estimate_posted_at_from_relative(relative_time, crawled_at)
         if estimated_at:
             posted_at = estimated_at

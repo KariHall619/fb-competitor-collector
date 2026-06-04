@@ -21,6 +21,7 @@ from coverage_expectations import apply_expected_coverage, split_expected_labels
 from discovery_retry import attach_auto_retry_report, needs_snapshot_budget_retry, retry_snapshot_budget
 from lark_io import ensure_user_identity
 from models import normalize_date
+from models import is_estimated_time_source
 from store import (
     connect,
     enqueue_enrichment_tasks_for_posts,
@@ -34,7 +35,13 @@ from sync_status import completion_run_status, enrichment_completion_summary, ha
 
 ROOT = Path(__file__).resolve().parents[1]
 ENRICHMENT_STAGES = "detail_time,lead_link,engagement,post_type,article_material"
-HUMAN_INTERVENTION_STATUSES = {"human_intervention_required", "login_required", "visitor_preview", "facebook_tab_missing"}
+HUMAN_INTERVENTION_STATUSES = {
+    "human_intervention_required",
+    "login_required",
+    "visitor_preview",
+    "facebook_tab_missing",
+    "facebook_tab_wrong_account",
+}
 WORKER_OPERATIONAL_STATUSES = {"complete", "failed", "human_intervention_required", "incomplete_pending_tasks", "needs_codex_summary"}
 DEFAULT_RESUME_STALE_RUNNING_SECONDS = 1800
 DEFAULT_MAX_RESUME_PASSES = 8
@@ -167,6 +174,10 @@ def filter_posts_by_posted_window(
     for post in posts:
         posted_at = parse_posted_at_filter(str(post.get("posted_at") or ""))
         if posted_at is None:
+            filtered.append(post)
+            continue
+        if is_estimated_time_source(post.get("time_source")):
+            filtered.append(post)
             continue
         if after is not None and posted_at < after:
             continue
