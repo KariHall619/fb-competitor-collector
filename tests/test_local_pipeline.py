@@ -2154,7 +2154,7 @@ def assert_sync_posts_self_heals_missing_business_field_tasks(tmp_path: Path) ->
 def assert_sync_status_promotes_summary_only_work(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
-    from sync_status import enrichment_completion_summary
+    from sync_status import completion_run_status, enrichment_completion_summary, sync_completion_blockers
     from store import connect, enqueue_enrichment_tasks_for_posts, row_for_post, upsert_post
 
     conn = connect(tmp_path / "summary-only-status.sqlite")
@@ -2201,6 +2201,37 @@ def assert_sync_status_promotes_summary_only_work(tmp_path: Path) -> None:
     assert completion["missing_stage_counts"] == {"summary": 1}
     assert any("导出 summary requests" in action for action in completion["next_actions"])
     assert not any("继续运行 enrichment_worker" in action for action in completion["next_actions"])
+    assert completion_run_status(
+        {
+            **completion,
+            "coverage_health": "incomplete",
+            "coverage_incomplete_count": 1,
+            "missing_stage_counts": {"coverage": 1, "summary": 1},
+        },
+        ledger_mode=False,
+    ) == "needs_codex_summary"
+    assert completion_run_status(
+        {
+            **completion,
+            "coverage_health": "incomplete",
+            "coverage_incomplete_count": 1,
+            "missing_stage_counts": {"coverage": 1, "summary": 1},
+        },
+        ledger_mode=True,
+    ) == "needs_codex_summary"
+    blockers = sync_completion_blockers(
+        {"ok": True, "run_status": "synced_ledger_incomplete"},
+        {
+            **completion,
+            "coverage_health": "incomplete",
+            "coverage_incomplete_count": 1,
+            "missing_stage_counts": {"coverage": 1, "summary": 1},
+        },
+        ledger_mode=True,
+    )
+    blocker_codes = [item["code"] for item in blockers]
+    assert "coverage_incomplete" in blocker_codes
+    assert "codex_summary_required" in blocker_codes
 
 
 def assert_sync_status_prioritizes_auto_work_over_summary(tmp_path: Path) -> None:

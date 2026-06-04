@@ -159,7 +159,6 @@ def has_auto_enrichment_work(completion: dict[str, Any]) -> bool:
                 return True
     return bool(
         completion.get("auto_open_task_count")
-        or completion.get("coverage_incomplete_count")
         or completion.get("has_auto_enrichment_work")
     )
 
