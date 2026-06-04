@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from config_loader import load_config
+from check_env import check_opencli
 from lark_io import ensure_user_identity
 from read_accounts import read_accounts
 
@@ -143,6 +144,23 @@ def prepare_account_tab(config: dict[str, Any], account: dict[str, Any], *, enab
         },
         "error": "" if ok else (result.stderr or result.stdout or "OpenCLI tab open failed"),
     }
+
+
+def prepare_account_tab_with_recovery(config: dict[str, Any], account: dict[str, Any], *, enabled: bool = True) -> dict[str, Any]:
+    result = prepare_account_tab(config, account, enabled=enabled)
+    if result.get("ok") or result.get("skipped"):
+        return result
+    recovery = check_opencli(
+        config.get("opencli_command") or [config.get("opencli_path", "opencli")],
+        daemon_port=int(config.get("opencli_daemon_port", 19825) or 19825),
+        auto_fix=True,
+        session=str(config.get("opencli_session") or "fb-competitor"),
+    )
+    retry = prepare_account_tab(config, account, enabled=enabled) if recovery.get("ok") else dict(result)
+    retry["initial_open_account_tab"] = dict(result)
+    retry["opencli_recovery"] = recovery
+    retry["recovered_after_opencli_fix"] = bool(retry.get("ok") and not result.get("ok"))
+    return retry
 
 
 def close_account_tab(config: dict[str, Any], tab: dict[str, Any] | None) -> dict[str, Any]:
@@ -1233,7 +1251,7 @@ def main() -> int:
     account_results: list[dict[str, Any]] = []
     opened_account_tabs: list[tuple[int, dict[str, Any]]] = []
     for account in accounts:
-        open_result = prepare_account_tab(config, account, enabled=bool(args.open_account_tabs) and not args.resume_only and not args.status_only)
+        open_result = prepare_account_tab_with_recovery(config, account, enabled=bool(args.open_account_tabs) and not args.resume_only and not args.status_only)
         if not open_result.get("ok"):
             account_results.append(account_open_blocker(account, open_result, args))
             continue

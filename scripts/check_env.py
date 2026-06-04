@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -72,6 +74,76 @@ def run_opencli_command(command: list[str], args: list[str], *, timeout: int = 2
     }
 
 
+def open_chrome_for_bridge() -> dict[str, Any]:
+    system = platform.system().lower()
+    if system == "darwin":
+        command = ["open", "-a", "Google Chrome", "about:blank"]
+    elif system == "windows":
+        command = ["cmd", "/c", "start", "", "chrome", "about:blank"]
+    elif system == "linux":
+        command = ["sh", "-lc", "google-chrome about:blank >/dev/null 2>&1 || chromium about:blank >/dev/null 2>&1"]
+    else:
+        return {"ok": False, "skipped": True, "reason": f"unsupported_platform:{system or 'unknown'}"}
+    try:
+        proc = subprocess.run(command, text=True, capture_output=True, check=False, timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "timeout": True,
+            "command": command,
+            "stdout": (exc.stdout or "").strip() if isinstance(exc.stdout, str) else "",
+            "stderr": (exc.stderr or "").strip() if isinstance(exc.stderr, str) else "",
+        }
+    return {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "command": command,
+        "stdout": proc.stdout.strip(),
+        "stderr": proc.stderr.strip(),
+    }
+
+
+def wait_for_opencli_bridge(daemon_port: int, *, timeout_seconds: float = 8.0, interval_seconds: float = 0.5) -> dict[str, Any]:
+    started = time.monotonic()
+    attempts: list[dict[str, Any]] = []
+    last_status: dict[str, Any] = {}
+    while True:
+        status = read_opencli_daemon_status(daemon_port)
+        last_status = status
+        payload = status.get("status") if isinstance(status.get("status"), dict) else {}
+        attempts.append(
+            {
+                "ok": bool(status.get("ok") and payload.get("ok")),
+                "extensionConnected": bool(payload.get("extensionConnected")),
+                "profileDisconnected": bool(payload.get("profileDisconnected")),
+            }
+        )
+        if status.get("ok") and payload.get("ok") and payload.get("extensionConnected"):
+            return {
+                "ok": True,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "attempts": attempts,
+                "daemon_status": status,
+            }
+        if time.monotonic() - started >= timeout_seconds:
+            return {
+                "ok": False,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "attempts": attempts,
+                "daemon_status": last_status,
+            }
+        time.sleep(interval_seconds)
+
+
+def probe_opencli_browser_command(command: list[str], session: str, *, timeout: int = 10) -> dict[str, Any]:
+    result = run_opencli_command(command, ["browser", session, "tab", "list"], timeout=timeout)
+    return {
+        **result,
+        "session": session,
+        "command_args": ["browser", session, "tab", "list"],
+    }
+
+
 def parse_version(text: str) -> tuple[int, int, int] | None:
     cleaned = text.strip().lstrip("v")
     parts = cleaned.split(".")
@@ -108,6 +180,11 @@ def opencli_next_actions(status: str) -> list[str]:
             "在业务 Chrome profile 中安装并启用 OpenCLI Browser Bridge 扩展。",
             "打开 chrome://extensions/，确认扩展已启用且允许访问 Facebook 页面。",
             "保持目标 Facebook 账号主页标签页打开并已登录，然后重新运行 python3 scripts/check_env.py --config config/settings.yaml --fix-opencli。",
+        ]
+    if status == "browser_command_failed":
+        return [
+            "重新运行 python3 scripts/check_env.py --config config/settings.yaml --fix-opencli 以重启 daemon、打开 Chrome 并复测 Browser Bridge。",
+            "如果仍失败，确认配置解析出的 opencli 命令和业务 Chrome 中连接的 Browser Bridge 属于同一套 OpenCLI runtime。",
         ]
     return ["修复 OpenCLI 命令或 daemon 后，重新运行 python3 scripts/check_env.py --config config/settings.yaml --fix-opencli。"]
 
@@ -184,6 +261,9 @@ def check_opencli(
     *,
     daemon_port: int = 19825,
     auto_fix: bool = False,
+    launch_chrome: bool = True,
+    wait_seconds: float = 8.0,
+    session: str = "fb-competitor",
 ) -> dict[str, Any]:
     command_list = opencli_command if isinstance(opencli_command, list) else [opencli_command]
     command = check_invocation(command_list)
@@ -217,7 +297,19 @@ def check_opencli(
         status_payload = daemon_status.get("status") if isinstance(daemon_status.get("status"), dict) else {}
         extension_connected = bool(status_payload.get("extensionConnected"))
         daemon_running = bool(daemon_status.get("ok") and status_payload.get("ok"))
-    ready = bool(command.get("ok") and version_ready and daemon_running and extension_connected)
+    if auto_fix and command.get("ok") and version_ready and daemon_running and not extension_connected:
+        if launch_chrome:
+            recovery_steps.append({"step": "open_chrome_for_bridge", **open_chrome_for_bridge()})
+        wait = wait_for_opencli_bridge(daemon_port, timeout_seconds=max(0.0, float(wait_seconds or 0.0)))
+        recovery_steps.append({"step": "wait_for_browser_bridge", **wait})
+        daemon_status = wait.get("daemon_status") if isinstance(wait.get("daemon_status"), dict) else read_opencli_daemon_status(daemon_port)
+        status_payload = daemon_status.get("status") if isinstance(daemon_status.get("status"), dict) else {}
+        extension_connected = bool(status_payload.get("extensionConnected"))
+        daemon_running = bool(daemon_status.get("ok") and status_payload.get("ok"))
+    browser_probe = {"ok": True, "skipped": True}
+    if command.get("ok") and version_ready and daemon_running and extension_connected:
+        browser_probe = probe_opencli_browser_command(command_list, session)
+    ready = bool(command.get("ok") and version_ready and daemon_running and extension_connected and browser_probe.get("ok"))
     if ready:
         status = "ready"
         message = "OpenCLI Browser Bridge 已连接，优先使用当前用户 Chrome 标签页采集 Facebook。"
@@ -230,6 +322,9 @@ def check_opencli(
     elif command.get("ok") and not extension_connected:
         status = "browser_bridge_not_connected"
         message = "OpenCLI CLI/daemon 可用，但 Browser Bridge 扩展未连接到当前 Chrome profile；请在业务 Chrome 中安装并启用 OpenCLI 扩展。"
+    elif command.get("ok") and extension_connected and not browser_probe.get("ok"):
+        status = "browser_command_failed"
+        message = "OpenCLI daemon 和 Browser Bridge 已连接，但当前 opencli 命令无法执行 browser tab list；请修复 OpenCLI runtime/命令配置后重试。"
     else:
         status = "opencli_not_ready"
         message = "OpenCLI 命令不可用；请先修复 OpenCLI 安装。"
@@ -243,6 +338,7 @@ def check_opencli(
         "command": command,
         "daemon_port": daemon_port,
         "daemon_status": daemon_status,
+        "browser_probe": browser_probe,
         "auto_fix_attempted": bool(auto_fix and recovery_steps),
         "auto_fix_steps": recovery_steps,
     }
@@ -288,6 +384,7 @@ def main() -> int:
             config.get("opencli_command") or [opencli_path],
             daemon_port=int(config.get("opencli_daemon_port", 19825) or 19825),
             auto_fix=args.fix_opencli,
+            session=str(config.get("opencli_session") or "fb-competitor"),
         ),
     }
     if args.fix_auth:

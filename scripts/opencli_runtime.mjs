@@ -136,6 +136,7 @@ function runOpencli(args, options = {}) {
   let commandArgs = [...command.slice(1), ...args];
   const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(String(command[0] || ""));
   const env = { ...process.env, ...(options.env || {}) };
+  const timeoutMs = Number(options.timeoutMs || process.env.OPENCLI_COMMAND_TIMEOUT_MS || 30000);
   return new Promise((resolve) => {
     const child = spawn(command[0], commandArgs, {
       env,
@@ -144,6 +145,24 @@ function runOpencli(args, options = {}) {
     });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(payload);
+    };
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          stderr += `\nOpenCLI command timed out after ${timeoutMs}ms`;
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            // Ignore kill failures; the timeout result is still actionable.
+          }
+          finish({ ok: false, code: 124, stdout, stderr, timeout: true });
+        }, timeoutMs)
+      : null;
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
     });
@@ -151,10 +170,10 @@ function runOpencli(args, options = {}) {
       stderr += chunk;
     });
     child.on("error", (error) => {
-      resolve({ ok: false, code: 1, stdout, stderr: `${stderr}${String(error.message || error)}` });
+      finish({ ok: false, code: 1, stdout, stderr: `${stderr}${String(error.message || error)}` });
     });
     child.on("close", (code) => {
-      resolve({ ok: code === 0, code: code ?? 1, stdout, stderr });
+      finish({ ok: code === 0, code: code ?? 1, stdout, stderr });
     });
   });
 }
