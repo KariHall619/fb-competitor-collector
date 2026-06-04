@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-import json
-import subprocess
 import sys
+import tempfile
+from argparse import Namespace
 from pathlib import Path
 
 
@@ -115,65 +115,69 @@ def test_check_env_requires_configured_opencli_browser_command() -> None:
     assert result["blocking_issue"] == "browser_command_failed"
 
 
-def test_run_accounts_retries_tab_open_after_opencli_recovery() -> None:
+def test_project_opencli_wrapper_syncs_project_adapter() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_project_opencli
+
+    with tempfile.TemporaryDirectory() as tmp:
+        runtime_home = Path(tmp)
+        run_project_opencli.sync_project_adapters(runtime_home)
+        adapter = runtime_home / ".opencli" / "clis" / "facebook" / "fb-competitor-posts.js"
+        assert adapter.exists()
+        text = adapter.read_text(encoding="utf-8")
+        assert "site: 'facebook'" in text
+        assert "name: 'fb-competitor-posts'" in text
+        assert "browser: true" in text
+        assert "Strategy.COOKIE" in text
+
+
+def test_run_accounts_does_not_preopen_account_tabs() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import run_accounts_job
 
-    original_prepare = run_accounts_job.prepare_account_tab
-    original_check = run_accounts_job.check_opencli
-    calls: list[str] = []
-    try:
-        def fake_prepare(_config: dict, account: dict, *, enabled: bool = True) -> dict:
-            calls.append(str(account["account_url"]))
-            if len(calls) == 1:
-                return {"ok": False, "returncode": 1, "error": "Browser Bridge extension not connected"}
-            return {"ok": True, "tab": {"page": "page-1", "url": account["account_url"]}}
+    assert not hasattr(run_accounts_job, "prepare_account_tab")
+    assert not hasattr(run_accounts_job, "prepare_account_tab_with_recovery")
+    assert not hasattr(run_accounts_job, "close_account_tab")
 
-        run_accounts_job.prepare_account_tab = fake_prepare
-        run_accounts_job.check_opencli = lambda *args, **kwargs: {"ok": True, "status": "ready"}
-        result = run_accounts_job.prepare_account_tab_with_recovery(
-            {"opencli_session": "fb-competitor"},
-            {"account_url": "https://www.facebook.com/example"},
-            enabled=True,
-        )
-    finally:
-        run_accounts_job.prepare_account_tab = original_prepare
-        run_accounts_job.check_opencli = original_check
-
-    assert result["ok"] is True
-    assert result["recovered_after_opencli_fix"] is True
-    assert result["initial_open_account_tab"]["ok"] is False
-    assert len(calls) == 2
-
-
-def test_opencli_runtime_times_out_hung_commands() -> None:
-    script = """
-import { runOpencli } from './scripts/opencli_runtime.mjs';
-const result = await runOpencli(['-e', 'setTimeout(() => {}, 10000)'], {
-  command: [process.execPath],
-  timeoutMs: 50,
-});
-console.log(JSON.stringify({ ok: result.ok, code: result.code, timeout: result.timeout, stderr: result.stderr }));
-"""
-    result = subprocess.run(
-        ["node", "--input-type=module"],
-        cwd=ROOT,
-        input=script,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=5,
+    args = Namespace(
+        config="config/settings.yaml",
+        max_snapshots=32,
+        min_snapshots=6,
+        max_resume_passes=8,
+        enrichment_limit=50,
+        resume_stale_running_seconds=1800,
+        target_date="260604",
+        last_hours=24,
+        resume_only=False,
+        force_recover_running=False,
+        status_only=False,
+        expected_post_count=0,
+        expected_labels="",
+        sync=True,
+        sync_audit=False,
+        dry_run=False,
+        allow_incomplete_success=False,
+        require_coverage_complete=False,
+        min_ledger_usable_rate=0,
+        min_final_usable_rate=0,
+        min_completion_rate=0,
+        min_expected_post_coverage_rate=0,
+        min_expected_label_coverage_rate=0,
     )
-    assert result.returncode == 0, result.stderr
-    payload = json.loads(result.stdout)
-    assert payload["ok"] is False
-    assert payload["code"] == 124
-    assert payload["timeout"] is True
-    assert "timed out" in payload["stderr"]
+    command = run_accounts_job.account_job_command(
+        args,
+        {
+            "account_url": "https://www.facebook.com/example",
+            "account_name": "Example",
+            "account_type": "competitor",
+            "tab_page": "legacy-page",
+        },
+    )
+    assert "--tab-page" not in command
 
 
 if __name__ == "__main__":
     test_check_env_launches_chrome_and_waits_for_bridge()
     test_check_env_requires_configured_opencli_browser_command()
-    test_run_accounts_retries_tab_open_after_opencli_recovery()
-    test_opencli_runtime_times_out_hung_commands()
+    test_project_opencli_wrapper_syncs_project_adapter()
+    test_run_accounts_does_not_preopen_account_tabs()

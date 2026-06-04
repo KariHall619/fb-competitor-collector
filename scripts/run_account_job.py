@@ -200,10 +200,15 @@ def discover_homepage_once(
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any], int]:
     started = time.monotonic()
     command = [
-        "node",
-        "scripts/opencli_extract_current_tab.mjs",
+        "python3",
+        "scripts/run_project_opencli.py",
         "--config",
         args.config,
+        "--",
+        "facebook",
+        "fb-competitor-posts",
+        "--mode",
+        "discover",
         "--account-url",
         args.account_url,
         "--max-text",
@@ -212,9 +217,13 @@ def discover_homepage_once(
         str(max_snapshots),
         "--min-snapshots",
         str(min_snapshots),
+        "--window",
+        "background",
+        "--site-session",
+        "ephemeral",
+        "-f",
+        "json",
     ]
-    if getattr(args, "tab_page", ""):
-        command.extend(["--tab-page", args.tab_page])
     discover = run_command(command)
     payload = parse_json_output(discover)
     payload["returncode"] = discover.returncode
@@ -501,8 +510,6 @@ def run_worker_pass(
         ]
         if args.account_name:
             command.extend(["--account-name", args.account_name])
-        if getattr(args, "tab_page", ""):
-            command.extend(["--tab-page", args.tab_page])
         if target_date:
             command.extend(["--target-date", target_date])
         worker = run_command(command)
@@ -1859,7 +1866,6 @@ def main() -> int:
     parser.add_argument("--sync", action="store_true")
     parser.add_argument("--sync-audit", "--ledger-sync", dest="sync_audit", action="store_true", help="Compatibility ledger mode: write auditable incomplete candidates with missing-field markers.")
     parser.add_argument("--strict-ready-only", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--tab-page", default="", help="OpenCLI tab page id opened by automation; avoids binding or selecting the user's current tab.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--max-resume-passes",

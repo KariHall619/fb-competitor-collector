@@ -238,9 +238,12 @@ def resolve_opencli_invocation(
 
     if is_auto(candidate):
         names = ["opencli.cmd", "opencli.exe", "opencli"] if key == "windows" else ["opencli"]
-        opencli = _first_existing_command(names, environ=environ)
-        if Path(opencli).exists():
-            return opencli, [opencli], source, raw
+        path_env = _env(environ).get("PATH")
+        for name in names:
+            found = shutil.which(name, path=path_env)
+            if found:
+                return found, [found], source, raw
+        opencli = names[0]
         npx_names = ["npx.cmd", "npx.exe", "npx"] if key == "windows" else ["npx"]
         npx = _first_existing_command(npx_names, environ=environ)
         if Path(npx).exists():

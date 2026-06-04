@@ -55,10 +55,10 @@ For multi-account jobs, repeat the full single-account loop account by account t
 
 The intended operator experience is a separate automation surface that does not interrupt other Chrome usage:
 
-- Account jobs open account pages via OpenCLI automation unless `--no-open-account-tabs` or explicit `--tab-page` is supplied.
-- Child jobs receive `--tab-page` and `--opencli-session` instead of binding the user's active tab.
-- Detail enrichment may reuse an automation-opened detail tab, with fallback only inside tracked automation tabs.
-- Automation-opened homepage/detail tabs and session leases should be closed after the scoped account finishes.
+- Project scripts do not pre-open, select, bind, or close Chrome tabs directly.
+- Account discovery and detail enrichment both call the project-local OpenCLI adapter at `opencli/clis/facebook/fb-competitor-posts.js` through `scripts/run_project_opencli.py`.
+- The wrapper syncs committed adapter sources into ignored runtime state under `data/opencli-home/.opencli/clis`, because OpenCLI 1.8.x discovers adapters from `$HOME/.opencli/clis`.
+- The adapter opens and navigates its own background browser session through OpenCLI's official `cli({ browser: true, strategy: Strategy.COOKIE })` mechanism.
 - Never close the user's original manual Facebook tab.
 
 ## Human Blockers

@@ -119,65 +119,6 @@ def opencli_command(config: dict[str, Any]) -> list[str]:
     return [str(config.get("opencli_path") or "opencli")]
 
 
-def run_opencli(config: dict[str, Any], args: list[str]) -> subprocess.CompletedProcess[str]:
-    return run_command([*opencli_command(config), *args])
-
-
-def prepare_account_tab(config: dict[str, Any], account: dict[str, Any], *, enabled: bool = True) -> dict[str, Any]:
-    if not enabled:
-        return {"ok": True, "skipped": True, "reason": "disabled"}
-    account_url = str(account.get("account_url") or "").strip()
-    if not account_url:
-        return {"ok": False, "stage": "open_account_tab", "error": "missing account_url"}
-    session = str(config.get("opencli_session") or "fb-competitor")
-    result = run_opencli(config, ["browser", session, "tab", "new", account_url])
-    payload = parse_json_output(result)
-    ok = bool(result.returncode == 0 and payload.get("page"))
-    return {
-        "ok": ok,
-        "stage": "open_account_tab",
-        "returncode": result.returncode,
-        "account_url": account_url,
-        "tab": {
-            "page": payload.get("page") or "",
-            "url": account_url,
-        },
-        "error": "" if ok else (result.stderr or result.stdout or "OpenCLI tab open failed"),
-    }
-
-
-def prepare_account_tab_with_recovery(config: dict[str, Any], account: dict[str, Any], *, enabled: bool = True) -> dict[str, Any]:
-    result = prepare_account_tab(config, account, enabled=enabled)
-    if result.get("ok") or result.get("skipped"):
-        return result
-    recovery = check_opencli(
-        config.get("opencli_command") or [config.get("opencli_path", "opencli")],
-        daemon_port=int(config.get("opencli_daemon_port", 19825) or 19825),
-        auto_fix=True,
-        session=str(config.get("opencli_session") or "fb-competitor"),
-    )
-    retry = prepare_account_tab(config, account, enabled=enabled) if recovery.get("ok") else dict(result)
-    retry["initial_open_account_tab"] = dict(result)
-    retry["opencli_recovery"] = recovery
-    retry["recovered_after_opencli_fix"] = bool(retry.get("ok") and not result.get("ok"))
-    return retry
-
-
-def close_account_tab(config: dict[str, Any], tab: dict[str, Any] | None) -> dict[str, Any]:
-    page = str((tab or {}).get("page") or "").strip()
-    if not page:
-        return {"ok": True, "skipped": True, "reason": "no_tab"}
-    session = str(config.get("opencli_session") or "fb-competitor")
-    result = run_opencli(config, ["browser", session, "tab", "close", page])
-    return {
-        "ok": result.returncode == 0,
-        "stage": "close_account_tab",
-        "returncode": result.returncode,
-        "tab": {"page": page, "url": (tab or {}).get("url") or ""},
-        "error": "" if result.returncode == 0 else (result.stderr or result.stdout or "OpenCLI tab close failed"),
-    }
-
-
 def enabled_accounts(accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for account in accounts:
@@ -247,9 +188,6 @@ def account_job_command(args: argparse.Namespace, account: dict[str, Any]) -> li
         command.extend(["--expected-post-count", str(args.expected_post_count)])
     if getattr(args, "expected_labels", ""):
         command.extend(["--expected-labels", str(args.expected_labels)])
-    tab_page = str(account.get("tab_page") or "").strip()
-    if tab_page:
-        command.extend(["--tab-page", tab_page])
     if args.sync:
         command.append("--sync")
     if getattr(args, "sync_audit", False):
@@ -482,9 +420,6 @@ def next_auto_follow_command(summary: dict[str, Any], account: dict[str, Any], a
         return []
     if command and command[0] in {"python", "python3"}:
         command[0] = os.environ.get("PYTHON") or sys.executable
-    tab_page = str(account.get("tab_page") or "").strip()
-    if tab_page:
-        _set_arg_value(command, "--tab-page", tab_page)
     return command
 
 
@@ -623,10 +558,6 @@ def batch_retry_command(args: argparse.Namespace, *, fix_opencli: bool = False) 
         command.append("--dry-run")
     if args.allow_incomplete_success:
         command.append("--allow-incomplete-success")
-    if not args.open_account_tabs:
-        command.append("--no-open-account-tabs")
-    elif fix_opencli:
-        command.append("--open-account-tabs")
     command.extend(["--auto-follow-attempts", str(args.auto_follow_attempts)])
     command.extend(["--max-snapshots", str(args.max_snapshots)])
     command.extend(["--min-snapshots", str(args.min_snapshots)])
@@ -742,48 +673,6 @@ def run_account_until_settled(args: argparse.Namespace, account: dict[str, Any])
         attempts and attempts[-1].get("auto_follow_stopped_reason") == "max_attempts_reached"
     )
     return final_summary
-
-
-def account_open_blocker(account: dict[str, Any], open_result: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
-    return {
-        "account_name": account.get("account_name") or "",
-        "account_url": account.get("account_url") or "",
-        "account_type": account.get("account_type") or "competitor",
-        "ok": False,
-        "returncode": int(open_result.get("returncode") or 1),
-        "run_status": "blocked_opencli",
-        "complete": False,
-        "post_count": 0,
-        "coverage_health": "",
-        "ledger_candidate_count": 0,
-        "final_usable_count": 0,
-        "final_usable_rate": 0.0,
-        "open_task_count": 0,
-        "top_field_gaps": [],
-        "completion_blockers": [
-            {
-                "code": "blocked_opencli",
-                "label": "OpenCLI账号主页打开失败",
-                "severity": "hard_blocker",
-                "message": "批量作业无法打开目标 Facebook 账号主页标签页。",
-                "next_action": "确认 OpenCLI Browser Bridge 已连接正常 Chrome，且 Facebook 登录态可用后重试批量作业。",
-                "metrics": {"open_account_tab": open_result},
-            }
-        ],
-        "next_commands": [
-            {
-                "reason": "blocked_opencli",
-                "description": "OpenCLI Browser Bridge 恢复后重新运行批量账号作业。",
-                "command": command_text(["python3", "scripts/check_env.py", "--config", args.config, "--fix-opencli"]),
-            },
-            {
-                "reason": "rerun_batch_after_opencli",
-                "description": "OpenCLI Browser Bridge 恢复后，按原批量范围重新运行所有目标账号，避免只修环境但忘记继续采集/补抓/同步。",
-                "command": command_text(batch_retry_command(args, fix_opencli=True)),
-            }
-        ],
-        "open_account_tab": open_result,
-    }
 
 
 def aggregate_status(account_results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1171,9 +1060,9 @@ def main() -> int:
     parser.add_argument("--sync", action="store_true")
     parser.add_argument("--sync-audit", "--ledger-sync", dest="sync_audit", action="store_true", help="Compatibility ledger mode: write auditable incomplete candidates with missing-field markers.")
     parser.add_argument("--dry-run", action="store_true")
-    parser.set_defaults(open_account_tabs=True)
-    parser.add_argument("--open-account-tabs", dest="open_account_tabs", action="store_true")
-    parser.add_argument("--no-open-account-tabs", dest="open_account_tabs", action="store_false")
+    parser.set_defaults(open_account_tabs=False)
+    parser.add_argument("--open-account-tabs", dest="open_account_tabs", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-open-account-tabs", dest="open_account_tabs", action="store_false", help=argparse.SUPPRESS)
     parser.add_argument("--fail-on-incomplete", action="store_true")
     parser.add_argument(
         "--allow-incomplete-success",
@@ -1279,28 +1168,8 @@ def main() -> int:
         return 1
 
     account_results: list[dict[str, Any]] = []
-    opened_account_tabs: list[tuple[int, dict[str, Any]]] = []
-    account_tab_cleanup: list[dict[str, Any]] = []
     for account in accounts:
-        open_result = prepare_account_tab_with_recovery(config, account, enabled=bool(args.open_account_tabs) and not args.resume_only and not args.status_only)
-        if not open_result.get("ok"):
-            account_results.append(account_open_blocker(account, open_result, args))
-            continue
-        opened_tab = open_result["tab"] if isinstance(open_result.get("tab"), dict) and open_result["tab"].get("page") else None
-        if isinstance(open_result.get("tab"), dict) and open_result["tab"].get("page"):
-            opened_account_tabs.append((len(account_results), open_result["tab"]))
-        account_for_job = dict(account)
-        if opened_tab:
-            account_for_job["tab_page"] = opened_tab.get("page") or ""
-        try:
-            account_summary = run_account_until_settled(args, account_for_job)
-        finally:
-            close_result = close_account_tab(config, opened_tab) if opened_tab else {"ok": True, "skipped": True, "reason": "no_tab"}
-            if opened_tab:
-                account_tab_cleanup.append(close_result)
-        account_summary["open_account_tab"] = open_result
-        if opened_tab:
-            account_summary["close_account_tab"] = close_result
+        account_summary = run_account_until_settled(args, dict(account))
         account_results.append(account_summary)
 
     aggregate = aggregate_status(account_results)
@@ -1318,11 +1187,12 @@ def main() -> int:
         **aggregate,
         "accounts": account_results,
         "account_tab_cleanup": {
-            "opened": len(opened_account_tabs),
-            "attempted": len(account_tab_cleanup),
-            "closed": sum(1 for item in account_tab_cleanup if item.get("ok")),
-            "failed": sum(1 for item in account_tab_cleanup if not item.get("ok")),
-            "items": account_tab_cleanup,
+            "opened": 0,
+            "attempted": 0,
+            "closed": 0,
+            "failed": 0,
+            "items": [],
+            "managed_by": "opencli_adapter",
         },
         "next_commands": next_commands,
         "elapsed_ms": int((time.monotonic() - started) * 1000),

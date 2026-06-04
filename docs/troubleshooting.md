@@ -36,7 +36,8 @@ Expected live-capture state:
 - OpenCLI command resolves from PATH or npx.
 - daemon is reachable.
 - Browser Bridge extension is connected to the same normal Chrome profile where Facebook is logged in.
-- target account tab/page is opened by OpenCLI or explicitly passed as `--tab-page`.
+- project-local adapter exists at `opencli/clis/facebook/fb-competitor-posts.js`; `scripts/run_project_opencli.py` syncs it into ignored runtime state before each adapter call.
+- target Facebook account is reachable in the logged-in Chrome profile; the adapter opens/navigates its own background browser session.
 
 Recovery order:
 

@@ -44,7 +44,7 @@ This minimum is for manual/imported candidates only. Formal Feishu output requir
 ## Identity And Dedupe
 
 - `scripts/models.py::facebook_content_key` is the Python source of truth for Facebook content identity.
-- `scripts/opencli_extract_current_tab.mjs::postKey` must stay aligned with `facebook_content_key`.
+- `opencli/clis/facebook/fb-competitor-posts.js::postKey` must stay aligned with `facebook_content_key`.
 - Preserve `photo.php`, `/photo/`, `/photos/`, `/reel/`, `/watch/`, `/video/`, `/videos/`, `/share/`, and group-post candidates.
 - Parent post links are best-effort dedupe helpers. If absent, keep the original media/share URL.
 - Re-imported partial rows must not downgrade stronger stored fields.

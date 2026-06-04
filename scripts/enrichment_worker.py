@@ -64,13 +64,19 @@ def detail_args_for_stages(stages: set[str]) -> list[str]:
     return args
 
 
+def csv_config_value(config: dict[str, Any], path: str) -> str:
+    value = deep_get(config, path, "")
+    if isinstance(value, list):
+        return ",".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "")
+
+
 def run_detail_batch(
     config_path: str,
     config: dict[str, Any],
     posts: list[dict[str, Any]],
     stages: set[str],
     target_date: str,
-    tab_page: str = "",
 ) -> dict[str, Any]:
     if not posts:
         return {"ok": True, "posts": []}
@@ -80,20 +86,39 @@ def run_detail_batch(
         output_path = Path(temp_dir) / "output.json"
         input_path.write_text(json.dumps({"posts": posts}, ensure_ascii=False, indent=2), encoding="utf-8")
         command = [
-            "node",
-            str(ROOT / "scripts" / "opencli_enrich_post_details.mjs"),
+            "python3",
+            "scripts/run_project_opencli.py",
             "--config",
             config_path,
+            "--",
+            "facebook",
+            "fb-competitor-posts",
+            "--mode",
+            "detail",
             "--input",
             str(input_path),
             "--output",
             str(output_path),
+            "--window",
+            "background",
+            "--site-session",
+            "ephemeral",
+            "-f",
+            "json",
+            "--allowed-domains",
+            csv_config_value(config, "lead_link.allowed_domains"),
+            "--comment-expand-rounds",
+            str(deep_get(config, "lead_link.comment_expand_rounds", 3)),
+            "--reply-expand-rounds",
+            str(deep_get(config, "lead_link.reply_expand_rounds", 3)),
+            "--resolve-timeout-ms",
+            str(int(deep_get(config, "lead_link.resolve_timeout_seconds", 20)) * 1000),
+            "--synthetic-tooltip-wait-ms",
+            str(deep_get(config, "performance.synthetic_tooltip_wait_ms", 1200)),
             *detail_args_for_stages(stages),
         ]
         if target_date:
             command.extend(["--target-date", target_date])
-        if tab_page:
-            command.extend(["--tab-page", tab_page])
         result = subprocess.run(
             command,
             cwd=ROOT,
@@ -309,7 +334,6 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--detail-concurrency", type=int, default=0)
     parser.add_argument("--article-concurrency", type=int, default=0)
-    parser.add_argument("--tab-page", default="", help="Automation-opened OpenCLI page id kept for caller context; detail enrichment opens its own tracked tabs.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -370,7 +394,7 @@ def main() -> int:
             batch_succeeded = False
             batch_retry_later = False
             try:
-                result = run_detail_batch(args.config, config, batch, stage_set, args.target_date, tab_page=args.tab_page)
+                result = run_detail_batch(args.config, config, batch, stage_set, args.target_date)
                 if not result.get("ok"):
                     if result.get("human_intervention_required"):
                         human_intervention_required = True

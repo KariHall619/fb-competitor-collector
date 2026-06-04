@@ -74,6 +74,33 @@ def start_opencli_status_server() -> ThreadingHTTPServer:
     return server
 
 
+def write_fake_opencli_adapter(path: Path, body: str) -> None:
+    """Write a fake OpenCLI executable that passes preflight and simulates the project adapter."""
+
+    path.write_text(
+        f"""#!{PYTHON}
+import json
+import os
+import pathlib
+import sys
+
+if sys.argv[1:2] == ["--version"]:
+    print("1.8.1")
+    sys.exit(0)
+if sys.argv[1:5] == ["browser", "fb-competitor", "tab", "list"]:
+    print("[]")
+    sys.exit(0)
+if sys.argv[1:3] != ["facebook", "fb-competitor-posts"]:
+    print("unexpected fake opencli adapter args: " + json.dumps(sys.argv), file=sys.stderr)
+    sys.exit(64)
+
+{body}
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
 def assert_url_canonicalization() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import canonicalize_post_url, facebook_content_key
@@ -673,222 +700,79 @@ if (candidate.selected_post_link_kind !== 'media' || candidate.media_link_count 
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def assert_opencli_extract_script_requires_human_intervention() -> None:
-    script_text = (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
+def assert_opencli_adapter_scaffold_contract() -> None:
+    script_text = (ROOT / "opencli" / "clis" / "facebook" / "fb-competitor-posts.js").read_text(encoding="utf-8")
+    assert "cli({" in script_text
+    assert "site: 'facebook'" in script_text
+    assert "name: 'fb-competitor-posts'" in script_text
+    assert "Strategy.COOKIE" in script_text
+    assert "browser: true" in script_text
+    assert "defaultFormat: 'json'" in script_text
+    assert "choices: ['discover', 'detail']" in script_text
+    assert "browserExpression(maxText)" in script_text
     assert "human_intervention_required" in script_text
     assert "visitor_preview" in script_text
-    assert "已停止采集" in script_text
-    assert "browser.user.openTabs()" not in script_text
-    assert "browser.user.claimTab" not in script_text
+    assert "capture_complete" in script_text
+    assert "coverage_incomplete" in script_text
 
 
-def assert_opencli_runtime_avoids_binding_current_tab() -> None:
-    script_text = (ROOT / "scripts" / "opencli_runtime.mjs").read_text(encoding="utf-8")
-    ensure_start = script_text.index("async function ensureFacebookTab")
-    evaluate_start = script_text.index("async function evaluateInSession")
-    ensure_body = script_text[ensure_start:evaluate_start]
-    assert '"browser", session, "bind"' not in ensure_body
-    assert '"tab", "select", selected.page' not in ensure_body
-    assert 'tab_access_mode: "explicit_tab"' in ensure_body
-    assert "allowSelectFallback = false" in script_text
-    assert '"tab", "select", tab' in script_text
-    assert 'tab_access_mode: "select_fallback"' in script_text
-    assert "select_fallback" in (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
-    assert "function createOpenedTabTracker" in script_text
-    assert '"tab", "close", tab.page' in script_text
-    assert "closeEnabled" in script_text
-    assert "tabs.reverse()" in script_text
+def assert_project_opencli_wrapper_is_project_local() -> None:
+    script_text = (ROOT / "scripts" / "run_project_opencli.py").read_text(encoding="utf-8")
+    assert 'PROJECT_CLIS = ROOT / "opencli" / "clis"' in script_text
+    assert 'PROJECT_OPENCLI_HOME = ROOT / "data" / "opencli-home"' in script_text
+    assert 'env["HOME"] = str(home_dir)' in script_text
+    assert 'env["USERPROFILE"] = str(home_dir)' in script_text
+    assert 'env["FB_COLLECTOR_PROJECT_ROOT"] = str(ROOT)' in script_text
+    assert "/Users/a1/.opencli" not in script_text
 
 
-def assert_opencli_runtime_requires_matching_account_tab() -> None:
-    script = """
-import { ensureFacebookTab } from './scripts/opencli_runtime.mjs';
-
-const calls = [];
-async function runCommand(args) {
-  calls.push(args);
-  if (args.slice(0, 4).join(' ') === 'browser fb-competitor tab list') {
-    return {
-      ok: true,
-      stdout: JSON.stringify([
-        { page: 'wrong-page', url: 'https://www.facebook.com/wrongaccount', title: 'Wrong Account' }
-      ]),
-      stderr: ''
-    };
-  }
-  return { ok: false, stdout: '', stderr: 'unexpected command' };
-}
-
-const result = await ensureFacebookTab({
-  opencliCommand: ['opencli'],
-  session: 'fb-competitor',
-  accountUrl: 'https://www.facebook.com/targetaccount',
-  runCommand,
-});
-
-if (result.ok || result.status !== 'facebook_tab_missing' || !result.account_url.includes('targetaccount')) {
-  console.error(JSON.stringify(result, null, 2));
-  process.exit(2);
-}
-if (!/目标账号/.test(result.message)) {
-  console.error(result.message);
-  process.exit(3);
-}
-if (calls.some((args) => args.includes('bind'))) {
-  console.error(JSON.stringify(calls));
-  process.exit(4);
-}
-"""
-    result = run(["node", "--input-type=module", "-e", script])
-    assert result.returncode == 0, result.stderr or result.stdout
+def assert_account_and_worker_call_opencli_adapter() -> None:
+    account_text = (ROOT / "scripts" / "run_account_job.py").read_text(encoding="utf-8")
+    worker_text = (ROOT / "scripts" / "enrichment_worker.py").read_text(encoding="utf-8")
+    assert "scripts/run_project_opencli.py" in account_text
+    assert '"facebook"' in account_text
+    assert '"fb-competitor-posts"' in account_text
+    assert '"discover"' in account_text
+    assert "scripts/run_project_opencli.py" in worker_text
+    assert '"facebook"' in worker_text
+    assert '"fb-competitor-posts"' in worker_text
+    assert '"detail"' in worker_text
 
 
-def assert_opencli_runtime_uses_explicit_tab_page_only() -> None:
-    script = """
-import { ensureFacebookTab } from './scripts/opencli_runtime.mjs';
-
-const calls = [];
-async function runCommand(args) {
-  calls.push(args);
-  if (args.slice(0, 4).join(' ') === 'browser fb-competitor tab list') {
-    return {
-      ok: true,
-      stdout: JSON.stringify([
-        { page: 'target-page', url: 'https://www.facebook.com/targetaccount', title: 'Target Account' },
-        { page: 'other-page', url: 'https://www.facebook.com/otheraccount', title: 'Other Account' }
-      ]),
-      stderr: ''
-    };
-  }
-  return { ok: false, stdout: '', stderr: 'unexpected command' };
-}
-
-const result = await ensureFacebookTab({
-  opencliCommand: ['opencli'],
-  session: 'fb-competitor',
-  accountUrl: 'https://www.facebook.com/targetaccount',
-  tabPage: 'target-page',
-  runCommand,
-});
-if (!result.ok || result.tab.page !== 'target-page' || result.tab_access_mode !== 'explicit_tab') {
-  console.error(JSON.stringify(result, null, 2));
-  process.exit(2);
-}
-if (calls.some((args) => args.includes('bind') || args.includes('select'))) {
-  console.error(JSON.stringify(calls));
-  process.exit(3);
-}
-"""
-    result = run(["node", "--input-type=module", "-e", script])
-    assert result.returncode == 0, result.stderr or result.stdout
+def assert_run_accounts_uses_adapter_not_tab_preopen() -> None:
+    script_text = (ROOT / "scripts" / "run_accounts_job.py").read_text(encoding="utf-8")
+    assert "def prepare_account_tab" not in script_text
+    assert "def prepare_account_tab_with_recovery" not in script_text
+    assert "def close_account_tab" not in script_text
+    assert '"tab", "new"' not in script_text
+    assert '"tab", "close"' not in script_text
+    assert '"managed_by": "opencli_adapter"' in script_text
 
 
-def assert_opencli_tab_tracker_closes_only_registered_tabs() -> None:
-    script = """
-import { createOpenedTabTracker } from './scripts/opencli_runtime.mjs';
-const calls = [];
-const tracker = createOpenedTabTracker({
-  opencliCommand: ['opencli'],
-  session: 'fb-competitor',
-  runCommand: async (args, options) => {
-    calls.push({ args, options });
-    return { ok: args.at(-1) !== 'keep-open', stdout: '', stderr: args.at(-1) === 'keep-open' ? 'close failed' : '' };
-  },
-});
-tracker.remember({ page: 'detail-a', url: 'https://www.facebook.com/a' }, { role: 'detail_page' });
-tracker.remember({ page: 'keep-open', url: 'https://www.facebook.com/b' }, { role: 'detail_page' });
-const summary = await tracker.closeAll();
-if (summary.opened !== 2 || summary.closed !== 1 || summary.failed !== 1 || summary.kept_open !== 1) {
-  console.error(JSON.stringify(summary, null, 2));
-  process.exit(2);
-}
-if (calls.length !== 2 || !calls.every((call) => call.args.slice(0, 4).join(' ') === 'browser fb-competitor tab close')) {
-  console.error(JSON.stringify(calls, null, 2));
-  process.exit(3);
-}
-const disabled = createOpenedTabTracker({
-  opencliCommand: ['opencli'],
-  session: 'fb-competitor',
-  closeEnabled: false,
-  runCommand: async () => {
-    throw new Error('disabled tracker should not close tabs');
-  },
-});
-disabled.remember({ page: 'debug-tab', url: 'https://www.facebook.com/debug' });
-const disabledSummary = await disabled.closeAll();
-if (disabledSummary.opened !== 1 || disabledSummary.closed !== 0 || disabledSummary.kept_open !== 1) {
-  console.error(JSON.stringify(disabledSummary, null, 2));
-  process.exit(4);
-}
-"""
-    result = run(["node", "--input-type=module", "-e", script])
-    assert result.returncode == 0, result.stderr or result.stdout
-
-
-def assert_opencli_detail_session_lock_recovers_stale_files() -> None:
-    script = """
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { acquireSessionLock } from './scripts/opencli_enrich_post_details.mjs';
-
-const session = `unit-stale-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-const lockPath = path.join(os.tmpdir(), `fb-competitor-opencli-${session}.lock`);
-fs.writeFileSync(lockPath, JSON.stringify({ pid: 99999999, started_at: '2000-01-01T00:00:00.000Z' }));
-const recovered = acquireSessionLock(session);
-if (!recovered.ok || !recovered.recovered || recovered.previous?.reason !== 'dead_pid') {
-  console.error(JSON.stringify(recovered, null, 2));
-  process.exit(2);
-}
-const busy = acquireSessionLock(session);
-if (busy.ok || busy.stale?.stale) {
-  console.error(JSON.stringify(busy, null, 2));
-  process.exit(3);
-}
-recovered.release();
-const fresh = acquireSessionLock(session);
-if (!fresh.ok || fresh.recovered) {
-  console.error(JSON.stringify(fresh, null, 2));
-  process.exit(4);
-}
-fresh.release();
-"""
-    result = run(["node", "--input-type=module", "-e", script])
-    assert result.returncode == 0, result.stderr or result.stdout
-
-
-def assert_opencli_detail_enrichment_reuses_tab_with_fallback() -> None:
-    script_text = (ROOT / "scripts" / "opencli_enrich_post_details.mjs").read_text(encoding="utf-8")
-    assert "async function openReusablePostTab" in script_text
-    assert "async function navigatePostTab" in script_text
-    assert "async function waitForDetailReady" in script_text
-    assert '"open",' in script_text
-    assert '"--tab",' in script_text
-    assert "async function enrichPostWithFreshTab" in script_text
-    assert "shouldFallbackAfterReusable" in script_text
-    assert "restorePost(post, before)" in script_text
-    assert "fresh_tab_fallback" in script_text
-    assert "low_disturbance" in script_text
-    assert "landingUrlCache" in script_text
-    assert 'resolution_source: "existing_landing_url"' in script_text
-    assert "buildPerformanceSummary" in script_text
-    assert "over_two_minute_posts" in script_text
-    assert "createOpenedTabTracker" in script_text
-    assert "openedTabTracker.closeAll()" in script_text
-    assert "finally" in script_text
-    assert "tab_cleanup" in script_text
-    assert "--keep-opened-tabs" in script_text
+def assert_detail_enrichment_is_adapter_owned() -> None:
+    adapter_text = (ROOT / "opencli" / "clis" / "facebook" / "fb-competitor-posts.js").read_text(encoding="utf-8")
+    detail_text = (ROOT / "scripts" / "fb_detail_extractors.js").read_text(encoding="utf-8")
+    assert "async function detail(page, kwargs)" in adapter_text
+    assert "async function enrichCurrentDetailPage(page, post, options)" in adapter_text
+    assert "page.goto(url" in adapter_text
+    assert "leadLinkScanBrowserExpression" in adapter_text
+    assert "detailEngagementBrowserExpression" in adapter_text
+    assert "detailPostTypeBrowserExpression" in adapter_text
+    assert "module.exports" in detail_text
+    assert "Shared Facebook detail-page extraction helpers" in detail_text
+    assert "browser fb-competitor tab" not in adapter_text
 
 
 def assert_opencli_detail_enrichment_blocks_for_human_login() -> None:
-    script_text = (ROOT / "scripts" / "opencli_enrich_post_details.mjs").read_text(encoding="utf-8")
-    assert 'status: "human_intervention_required"' in script_text
-    assert 'action_required: "human_intervention_required"' in script_text
-    assert 'reason: state.loggedOut ? "login_required" : "visitor_preview"' in script_text
-    assert "if (isHumanInterventionResult(result))" in script_text
-    assert "break;" in script_text
-    assert "payload.human_intervention_required = true" in script_text
-    assert "globalThis.process.exitCode = 1" in script_text
+    adapter_text = (ROOT / "opencli" / "clis" / "facebook" / "fb-competitor-posts.js").read_text(encoding="utf-8")
+    detail_text = (ROOT / "scripts" / "fb_detail_extractors.js").read_text(encoding="utf-8")
+    assert "pageStateExpression()" in adapter_text
+    assert "state.loggedOut || state.visitorPreview" in adapter_text
+    assert "human_intervention_required: true" in adapter_text
+    assert "action_required: 'human_intervention_required'" in adapter_text
+    assert "blocked_reason: state.loggedOut ? 'login_required' : 'visitor_preview'" in adapter_text
+    assert "loggedOut" in detail_text
+    assert "visitorPreview" in detail_text
 
 
 def assert_feishu_writes_require_user_identity() -> None:
@@ -4340,7 +4224,8 @@ def assert_quality_gate_requires_raw_comment_lead_url(tmp_path: Path) -> None:
 
 def assert_detail_enrichment_ignores_page_shell_ad_links() -> None:
     script = """
-import { leadLinkScanBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
+import detailExtractors from './scripts/fb_detail_extractors.js';
+const { leadLinkScanBrowserExpression } = detailExtractors;
 
 class Node {
   constructor(tagName, attrs = {}, children = [], ownText = '') {
@@ -4422,7 +4307,8 @@ if (results.length !== 1 || !results[0].href.includes('example.test') || results
 
 def assert_detail_enrichment_detects_plain_text_comment_links() -> None:
     script = """
-import { leadLinkScanBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
+import detailExtractors from './scripts/fb_detail_extractors.js';
+const { leadLinkScanBrowserExpression } = detailExtractors;
 
 class Node {
   constructor(tagName, attrs = {}, children = [], ownText = '') {
@@ -4494,7 +4380,8 @@ if (results.length !== 1 || !results[0].href.includes('kaylestore.net/i-took-car
 
 def assert_detail_enrichment_detects_post_cta_watch_more_links() -> None:
     script = """
-import { postCtaLeadLinkScanBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
+import detailExtractors from './scripts/fb_detail_extractors.js';
+const { postCtaLeadLinkScanBrowserExpression } = detailExtractors;
 
 class Node {
   constructor(tagName, attrs = {}, children = [], ownText = '') {
@@ -4587,7 +4474,8 @@ if (results[0].href.includes('ads.example') || results[0].source !== 'post_cta')
 
 def assert_detail_engagement_is_anchored_to_main_post() -> None:
     script = """
-import { detailEngagementBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
+import detailExtractors from './scripts/fb_detail_extractors.js';
+const { detailEngagementBrowserExpression } = detailExtractors;
 
 class Node {
   constructor(tagName, attrs = {}, children = [], ownText = '') {
@@ -4678,7 +4566,8 @@ if (result.raw.includes('58') || result.raw.includes('29 赞')) {
 
 def assert_detail_post_type_expression_classifies_business_types() -> None:
     script = """
-import { detailPostTypeBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
+import detailExtractors from './scripts/fb_detail_extractors.js';
+const { detailPostTypeBrowserExpression } = detailExtractors;
 
 class Node {
   constructor(tagName, attrs = {}, children = [], ownText = '') {
@@ -4753,7 +4642,8 @@ if (result.post_type !== '图文') {
 
 def assert_comment_mode_expression_can_select_all_comments() -> None:
     script = """
-import { commentModeBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
+import detailExtractors from './scripts/fb_detail_extractors.js';
+const { commentModeBrowserExpression } = detailExtractors;
 
 class Node {
   constructor(tagName, attrs = {}, children = [], ownText = '') {
@@ -4811,53 +4701,36 @@ if (!result.clicked || !sort.clicked || !all.clicked) {
 
 
 def assert_opencli_extract_helpers_dedupe_homepage_candidates() -> None:
-    js = """
-import { postKey, validCandidate, RUN_MAIN } from './scripts/opencli_extract_current_tab.mjs';
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import facebook_content_key
 
-if (RUN_MAIN) process.exit(1);
-const first = {
-  post_url: 'https://www.facebook.com/example/posts/1001?fbclid=abc',
-  story_summary: 'A long enough story summary that should pass filtering.',
-};
-const duplicate = {
-  post_url: 'https://m.facebook.com/example/posts/1001?ref=share',
-  raw_text: 'A long enough story summary that should pass filtering.',
-};
-if (postKey(first) !== postKey(duplicate)) {
-  console.error(JSON.stringify({ first: postKey(first), duplicate: postKey(duplicate) }, null, 2));
-  process.exit(2);
-}
-const photoA = { post_url: 'https://www.facebook.com/photo.php?fbid=9876543212345678&set=p.9876543212345678' };
-const photoB = { post_url: 'https://www.facebook.com/themeaningoflife88/photos/a.123/9876543212345678/?type=3' };
-if (postKey(photoA) !== postKey(photoB)) {
-  console.error(JSON.stringify({ photoA: postKey(photoA), photoB: postKey(photoB) }, null, 2));
-  process.exit(6);
-}
-const videoA = { post_url: 'https://www.facebook.com/watch/?v=1234567890123456' };
-const videoB = { post_url: 'https://www.facebook.com/storyhub/videos/1234567890123456/' };
-if (postKey(videoA) !== postKey(videoB)) {
-  console.error(JSON.stringify({ videoA: postKey(videoA), videoB: postKey(videoB) }, null, 2));
-  process.exit(7);
-}
-if (postKey({ post_url: 'https://www.facebook.com/groups/778899/posts/112233445566?ref=share' }) !== 'group-post:778899:112233445566') {
-  process.exit(8);
-}
-if (postKey({ post_url: 'https://www.facebook.com/share/p/abcDEF123/?mibextid=wwXIfr' }) !== 'share:p:abcDEF123') {
-  process.exit(9);
-}
-if (!validCandidate(first)) process.exit(3);
-if (!validCandidate({ post_url: first.post_url, story_summary: 'short' })) process.exit(4);
-if (validCandidate({ story_summary: 'short text without any post URL' })) process.exit(5);
-"""
-    result = run(["node", "--input-type=module", "-e", js])
-    assert result.returncode == 0, result.stderr or result.stdout
+    assert facebook_content_key("https://www.facebook.com/example/posts/1001?fbclid=abc") == facebook_content_key(
+        "https://m.facebook.com/example/posts/1001?ref=share"
+    )
+    assert facebook_content_key("https://www.facebook.com/photo.php?fbid=9876543212345678&set=p.9876543212345678") == facebook_content_key(
+        "https://www.facebook.com/themeaningoflife88/photos/a.123/9876543212345678/?type=3"
+    )
+    assert facebook_content_key("https://www.facebook.com/watch/?v=1234567890123456") == facebook_content_key(
+        "https://www.facebook.com/storyhub/videos/1234567890123456/"
+    )
+
+    adapter_text = (ROOT / "opencli" / "clis" / "facebook" / "fb-competitor-posts.js").read_text(encoding="utf-8")
+    assert "function postKey(post)" in adapter_text
+    assert "function validCandidate(candidate)" in adapter_text
+    assert "group-post:" in adapter_text
+    assert "share:" in adapter_text
+    assert "photo:" in adapter_text
+    assert "video:" in adapter_text
 
 
 def assert_opencli_extract_has_under_capture_guards() -> None:
-    script_text = (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
-    assert 'value("--max-snapshots", "32")' in script_text
-    assert 'value("--min-snapshots", "6")' in script_text
-    assert "minSnapshotsReached" in script_text
+    script_text = (ROOT / "opencli" / "clis" / "facebook" / "fb-competitor-posts.js").read_text(encoding="utf-8")
+    assert "{ name: 'max-snapshots'" in script_text
+    assert "default: 32" in script_text
+    assert "{ name: 'min-snapshots'" in script_text
+    assert "default: 6" in script_text
+    assert "snapshots.length >= minSnapshots" in script_text
+    assert "stable >= stableSnapshots" in script_text
     assert "noMovementCount" in script_text
     assert "coverage_incomplete" in script_text
     assert "capture_complete" in script_text
@@ -4865,53 +4738,12 @@ def assert_opencli_extract_has_under_capture_guards() -> None:
 
 
 def assert_opencli_extract_stable_end_is_complete_coverage() -> None:
-    js = """
-import { captureCoverageState } from './scripts/opencli_extract_current_tab.mjs';
-
-const stable = captureCoverageState({
-  snapshots: [
-    { index: 0, new_posts: 4 },
-    { index: 1, new_posts: 0 },
-    { index: 2, new_posts: 0 },
-  ],
-  stopReason: 'stable_no_new_posts',
-  maxSnapshots: 3,
-});
-if (stable.coverage_incomplete || !stable.capture_complete || stable.coverage_blocked) {
-  console.error(JSON.stringify(stable, null, 2));
-  process.exit(1);
-}
-
-const cappedWithNewPosts = captureCoverageState({
-  snapshots: [
-    { index: 0, new_posts: 4 },
-    { index: 1, new_posts: 2 },
-    { index: 2, new_posts: 1 },
-  ],
-  stopReason: 'max_snapshots',
-  maxSnapshots: 3,
-});
-if (!cappedWithNewPosts.coverage_incomplete || cappedWithNewPosts.capture_complete) {
-  console.error(JSON.stringify(cappedWithNewPosts, null, 2));
-  process.exit(2);
-}
-
-const cappedWithoutNewPosts = captureCoverageState({
-  snapshots: [
-    { index: 0, new_posts: 4 },
-    { index: 1, new_posts: 0 },
-    { index: 2, new_posts: 0 },
-  ],
-  stopReason: 'max_snapshots',
-  maxSnapshots: 3,
-});
-if (cappedWithoutNewPosts.coverage_incomplete || !cappedWithoutNewPosts.capture_complete) {
-  console.error(JSON.stringify(cappedWithoutNewPosts, null, 2));
-  process.exit(3);
-}
-"""
-    result = run(["node", "--input-type=module", "-e", js])
-    assert result.returncode == 0, result.stderr or result.stdout
+    script_text = (ROOT / "opencli" / "clis" / "facebook" / "fb-competitor-posts.js").read_text(encoding="utf-8")
+    assert "function captureCoverageState" in script_text
+    assert "stopReason === 'max_snapshots'" in script_text
+    assert "stopReason = 'stable_no_new_posts'" in script_text
+    assert "coverageIncomplete" in script_text
+    assert "capture_complete: !coverageIncomplete" in script_text
 
 
 def assert_prepare_capture_has_no_base_time_argument() -> None:
@@ -4937,173 +4769,108 @@ def assert_prepare_capture_has_no_base_time_argument() -> None:
     assert "unrecognized arguments: --base-time" in rejected.stderr
 
 
-def assert_exact_time_verifier_summary_contract() -> None:
-    js = """
-import {
-  facebookTab,
-  matchesAccount,
-  RUN_MAIN,
-  summarizeExactTimeChecks,
-  verifyExactTimeCapture,
-} from './scripts/opencli_verify_exact_time.mjs';
+def assert_detail_time_helpers_parse_exact_facebook_time() -> None:
+    script = """
+const {
+  exactTimeFromItem,
+  isLikelyHeaderTimeElement,
+  parseExactFacebookTime,
+} = require('./scripts/fb_time_extractors.js');
 
-if (RUN_MAIN) process.exit(6);
-if (typeof verifyExactTimeCapture !== 'function') process.exit(7);
-if (!facebookTab({ url: 'https://www.facebook.com/themeaningoflife88' })) process.exit(1);
-if (facebookTab({ url: 'https://example.com/themeaningoflife88' })) process.exit(2);
-if (!matchesAccount(
-  { url: 'https://www.facebook.com/themeaningoflife88/posts', title: 'The meaning of life' },
-  'https://www.facebook.com/themeaningoflife88'
-)) process.exit(3);
-
-const confirmed = summarizeExactTimeChecks({
-  scan: { target_count: 1, exact_dom_count: 1 },
-  checks: [{
-    visible_text: '2h',
-    posted_at_raw: 'Wednesday, May 27, 2026 at 3:11 PM',
-    posted_at: '2026年5月27日 15:11',
-    time_source: 'dom_aria_label',
-    confirmed: true,
-  }],
-  tab: { title: 'The meaning of life | Facebook', url: 'https://www.facebook.com/themeaningoflife88' },
-  claimedFrom: 'https://www.facebook.com/themeaningoflife88',
-});
-if (!confirmed.ok || confirmed.status !== 'exact_time_confirmed' || confirmed.confirmed_count !== 1) {
-  console.error(JSON.stringify(confirmed, null, 2));
+if (parseExactFacebookTime('Wednesday, May 27, 2026 at 3:11 PM') !== '2026年5月27日 15:11') process.exit(1);
+if (parseExactFacebookTime('2026年5月27日 下午 3:11') !== '2026年5月27日 15:11') process.exit(2);
+const exact = exactTimeFromItem({ aria: 'Wednesday, May 27, 2026 at 3:11 PM', title: '', text: '2h' });
+if (exact.posted_at !== '2026年5月27日 15:11' || exact.time_source !== 'dom_aria_label') {
+  console.error(JSON.stringify(exact, null, 2));
+  process.exit(3);
+}
+if (!isLikelyHeaderTimeElement({ text: '2h', aria: '', title: '', href: 'https://www.facebook.com/example/posts/1', w: 20, h: 16, y: 120 }, 800)) {
   process.exit(4);
 }
-
-const missing = summarizeExactTimeChecks({
-  scan: { target_count: 1, exact_dom_count: 0 },
-  checks: [{ visible_text: '2h', posted_at: '', confirmed: false }],
-  tab: { title: 'The meaning of life | Facebook', url: 'https://www.facebook.com/themeaningoflife88' },
-  claimedFrom: 'https://www.facebook.com/themeaningoflife88',
-});
-if (missing.ok || missing.status !== 'exact_time_not_found' || missing.confirmed_count !== 0) {
-  console.error(JSON.stringify(missing, null, 2));
-  process.exit(5);
-}
 """
-    result = run(["node", "--input-type=module", "-e", js])
+    result = run(["node", "-e", script])
     assert result.returncode == 0, result.stderr or result.stdout
-
-    no_run = run(["node", "scripts/opencli_verify_exact_time.mjs", "--self-test"])
-    assert no_run.returncode == 0
-    assert no_run.stdout == ""
 
 
 def assert_opencli_detail_enrichment_supports_target_date_filter() -> None:
-    js = """
-import { buildCoverageSummary, dateKeyFromPostedAt } from './scripts/opencli_enrich_post_details.mjs';
-
-if (dateKeyFromPostedAt('2026年5月29日 12:32') !== '260529') process.exit(1);
-if (dateKeyFromPostedAt('2026年11月3日 01:05') !== '261103') process.exit(2);
-if (dateKeyFromPostedAt('3h') !== '') process.exit(3);
-const payload = {
-  posts: [
-    { post_url: 'https://facebook.com/example/posts/1', output_status: 'ready_for_output', posted_at: '2026年6月1日 12:00', time_confirmed: true, summary_source: 'article', story_summary: '这篇故事讲述家庭冲突升级后，主角发现问题并及时反击的反转剧情。', lead_link_status: 'qualified', lead_link_source: 'comment', lead_url_raw: 'https://site.test/a', landing_url: 'https://site.test/a' },
-    { post_url: 'https://facebook.com/example/posts/2', output_status: 'needs_enrichment', posted_at: '2026年6月1日 13:00', time_confirmed: true, summary_source: 'pending_article_summary', lead_link_status: 'missing', engagement_confidence: 'anchored_missing_metrics' },
-    { post_url: 'https://facebook.com/example/posts/3', output_status: 'needs_enrichment', posted_at: '2026年6月1日 14:00', time_confirmed: true, summary_source: 'article', story_summary: '这篇故事讲述家庭冲突升级后，主角发现问题并及时反击的反转剧情。', lead_link_status: 'qualified', lead_link_source: 'comment', lead_url_raw: 'https://www.facebook.com/example/posts/3', landing_url: 'https://www.facebook.com/example/posts/3' },
-  ],
-  date_filtered_out: [{ post_url: 'https://facebook.com/example/posts/old' }],
-};
-const summary = buildCoverageSummary(payload, 4);
-if (summary.input_posts !== 4 || summary.after_target_date_filter !== 3 || summary.ready_for_output !== 1 || summary.needs_enrichment !== 2) {
-  console.error(JSON.stringify(summary, null, 2));
-  process.exit(4);
-}
-if (summary.reason_counts.missing_qualified_comment_lead_link !== 2 || summary.reason_counts.engagement_unconfirmed !== 1) {
-  console.error(JSON.stringify(summary, null, 2));
-  process.exit(5);
-}
-"""
-    result = run(["node", "--input-type=module", "-e", js])
-    assert result.returncode == 0, result.stderr or result.stdout
+    script_text = (ROOT / "opencli" / "clis" / "facebook" / "fb-competitor-posts.js").read_text(encoding="utf-8")
+    worker_text = (ROOT / "scripts" / "enrichment_worker.py").read_text(encoding="utf-8")
+    assert "{ name: 'target-date'" in script_text
+    assert "if (target_date)" not in script_text
+    assert '"--target-date", target_date' in worker_text
 
 
 def assert_opencli_detail_enrichment_rejects_string_false_time() -> None:
-    js = """
-import { buildCoverageSummary, enrichmentReasonCounts, outputStatusFor, parseBool } from './scripts/opencli_enrich_post_details.mjs';
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from field_audit import audit_reason_counts
+    from pipeline_status import output_status_for
+    from value_utils import parse_bool
 
-if (parseBool('false') !== false) process.exit(1);
-if (parseBool('0') !== false) process.exit(2);
-if (parseBool('confirmed') !== true) process.exit(3);
+    assert parse_bool("false") is False
+    assert parse_bool("0") is False
+    assert parse_bool("confirmed") is True
 
-const dirtyReady = {
-  post_url: 'https://facebook.com/example/posts/string-false-time',
-  output_status: 'ready_for_output',
-  posted_at: '2026年6月1日 12:00',
-  time_confirmed: 'false',
-  time_source: 'dom_aria_label',
-  summary_source: 'article',
-  story_summary: '这篇故事讲述家庭冲突升级后，主角发现问题并及时反击的反转剧情。',
-  lead_link_status: 'qualified',
-  lead_link_source: 'comment',
-  lead_url_raw: 'https://site.test/a',
-  landing_url: 'https://site.test/a',
-};
-
-if (outputStatusFor(dirtyReady) === 'ready_for_output') process.exit(4);
-const counts = enrichmentReasonCounts([dirtyReady]);
-if (counts.missing_confirmed_posted_at !== 1) {
-  console.error(JSON.stringify(counts, null, 2));
-  process.exit(5);
-}
-const summary = buildCoverageSummary({ posts: [dirtyReady], date_filtered_out: [] }, 1);
-if (summary.ready_for_output !== 0 || summary.needs_enrichment !== 1) {
-  console.error(JSON.stringify(summary, null, 2));
-  process.exit(6);
-}
-"""
-    result = run(["node", "--input-type=module", "-e", js])
-    assert result.returncode == 0, result.stderr or result.stdout
+    dirty_ready = {
+        "post_url": "https://facebook.com/example/posts/string-false-time",
+        "output_status": "ready_for_output",
+        "posted_at": "2026年6月1日 12:00",
+        "time_confirmed": "false",
+        "time_source": "dom_aria_label",
+        "summary_source": "article",
+        "story_summary": VALID_CN_SUMMARY,
+        "lead_link_status": "qualified",
+        "lead_link_source": "comment",
+        "lead_url_raw": "https://site.test/a",
+        "landing_url": "https://site.test/a",
+        "likes": 12,
+        "comments": 3,
+        "shares": 1,
+        "post_type": "图文",
+    }
+    assert output_status_for(dirty_ready, {}) != "ready_for_output"
+    counts = audit_reason_counts([dirty_ready], {})
+    assert counts["exact_time"] == 1
 
 
 def assert_opencli_detail_enrichment_rejects_copied_article_summary() -> None:
-    js = """
-import { buildCoverageSummary, enrichmentReasonCounts, hasValidStorySummary, outputStatusFor } from './scripts/opencli_enrich_post_details.mjs';
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from field_audit import audit_reason_counts
+    from pipeline_status import output_status_for
+    from story_summary_policy import has_valid_story_summary
 
-const copiedSummary = {
-  post_url: 'https://facebook.com/example/posts/copied-summary',
-  output_status: 'ready_for_output',
-  posted_at: '2026年6月1日 12:00',
-  time_confirmed: true,
-  time_source: 'dom_aria_label',
-  summary_source: 'article',
-  story_summary: '母亲发现儿子冻结信用卡并控制公司资产后准备反击',
-  article_material: {
-    ok: true,
-    title: '母亲发现儿子冻结信用卡并控制公司资产后准备反击',
-    text_excerpt: '母亲发现儿子冻结信用卡并控制公司资产后准备反击，随后通过法律方式处理家庭资产问题。',
-  },
-  lead_link_status: 'qualified',
-  lead_link_source: 'comment',
-  lead_url_raw: 'https://site.test/a',
-  landing_url: 'https://site.test/a',
-};
+    copied_summary = {
+        "post_url": "https://facebook.com/example/posts/copied-summary",
+        "output_status": "ready_for_output",
+        "posted_at": "2026年6月1日 12:00",
+        "time_confirmed": True,
+        "time_source": "dom_aria_label",
+        "summary_source": "article",
+        "story_summary": "母亲发现儿子冻结信用卡并控制公司资产后准备反击",
+        "article_material": {
+            "ok": True,
+            "title": "母亲发现儿子冻结信用卡并控制公司资产后准备反击",
+            "text_excerpt": "母亲发现儿子冻结信用卡并控制公司资产后准备反击，随后通过法律方式处理家庭资产问题。",
+        },
+        "lead_link_status": "qualified",
+        "lead_link_source": "comment",
+        "lead_url_raw": "https://site.test/a",
+        "landing_url": "https://site.test/a",
+        "likes": 12,
+        "comments": 3,
+        "shares": 1,
+        "post_type": "图文",
+    }
+    assert not has_valid_story_summary(copied_summary)
+    assert output_status_for(copied_summary, {}) != "ready_for_output"
+    counts = audit_reason_counts([copied_summary], {})
+    assert counts["article_summary"] == 1
 
-if (hasValidStorySummary(copiedSummary)) process.exit(1);
-if (outputStatusFor(copiedSummary) === 'ready_for_output') process.exit(2);
-const counts = enrichmentReasonCounts([copiedSummary]);
-if (counts.missing_article_summary !== 1) {
-  console.error(JSON.stringify(counts, null, 2));
-  process.exit(3);
-}
-const summary = buildCoverageSummary({ posts: [copiedSummary], date_filtered_out: [] }, 1);
-if (summary.ready_for_output !== 0 || summary.needs_enrichment !== 1) {
-  console.error(JSON.stringify(summary, null, 2));
-  process.exit(4);
-}
-
-const rawPayloadCopied = {
-  ...copiedSummary,
-  article_material: undefined,
-  raw_payload: JSON.stringify({ article_material: copiedSummary.article_material }),
-};
-if (hasValidStorySummary(rawPayloadCopied)) process.exit(5);
-"""
-    result = run(["node", "--input-type=module", "-e", js])
-    assert result.returncode == 0, result.stderr or result.stdout
+    raw_payload_copied = {
+        **copied_summary,
+        "article_material": None,
+        "raw_payload": json.dumps({"article_material": copied_summary["article_material"]}, ensure_ascii=False),
+    }
+    assert not has_valid_story_summary(raw_payload_copied)
 
 
 def assert_prepare_capture_keeps_photo_media_links_as_candidates(tmp_path: Path) -> None:
@@ -5551,13 +5318,12 @@ def assert_detail_results_match_facebook_url_variants(tmp_path: Path) -> None:
 def assert_enrichment_worker_requeues_opencli_session_busy(tmp_path: Path) -> None:
     config = tmp_path / "settings_worker_session_busy.yaml"
     db_path = tmp_path / "worker-session-busy.sqlite"
-    fake_bin = tmp_path / "bin-session-busy"
-    fake_node = fake_bin / "node"
+    fake_opencli = tmp_path / "fake-opencli-session-busy"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
-    config.write_text(
-        config.read_text(encoding="utf-8").replace("database_path: data/posts.sqlite", f"database_path: {db_path}"),
-        encoding="utf-8",
-    )
+    config_text = config.read_text(encoding="utf-8")
+    config_text = config_text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
+    config_text = config_text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    config.write_text(config_text, encoding="utf-8")
     sample = tmp_path / "session_busy_posts.json"
     sample.write_text(
         json.dumps(
@@ -5579,8 +5345,8 @@ def assert_enrichment_worker_requeues_opencli_session_busy(tmp_path: Path) -> No
     )
     imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
     assert imported.returncode == 0, imported.stdout
-    fake_bin.mkdir()
-    fake_node.write_text(
+    write_fake_opencli_adapter(
+        fake_opencli,
         """#!/usr/bin/env python3
 import json
 print(json.dumps({
@@ -5591,11 +5357,8 @@ print(json.dumps({
 }, ensure_ascii=False))
 raise SystemExit(73)
 """,
-        encoding="utf-8",
     )
-    fake_node.chmod(0o755)
     env = dict(os.environ)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     worker = run(
         [
             PYTHON,
@@ -5910,15 +5673,12 @@ def assert_enrichment_worker_scopes_tasks_to_account(tmp_path: Path) -> None:
 
 def assert_enrichment_worker_scope_includes_unknown_date_candidates(tmp_path: Path) -> None:
     config = tmp_path / "settings_worker_unknown_date.yaml"
-    fake_bin = tmp_path / "fake-bin"
-    fake_node = fake_bin / "node"
+    fake_opencli = tmp_path / "fake-opencli-worker-unknown-date"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
-    config.write_text(
-        config.read_text(encoding="utf-8").replace(
-            "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'worker-unknown-date.sqlite'}"
-        ),
-        encoding="utf-8",
-    )
+    config_text = config.read_text(encoding="utf-8")
+    config_text = config_text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'worker-unknown-date.sqlite'}")
+    config_text = config_text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
+    config.write_text(config_text, encoding="utf-8")
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
     from store import connect, enqueue_enrichment_tasks_for_posts, upsert_post
@@ -5948,8 +5708,8 @@ def assert_enrichment_worker_scope_includes_unknown_date_candidates(tmp_path: Pa
         upsert_post(conn, post)
         enqueue_enrichment_tasks_for_posts(conn, [post])
 
-    fake_bin.mkdir()
-    fake_node.write_text(
+    write_fake_opencli_adapter(
+        fake_opencli,
         """#!/usr/bin/env python3
 import json
 import sys
@@ -5971,11 +5731,8 @@ for post in payload.get("posts", []):
     posts.append(next_post)
 output_path.write_text(json.dumps({"ok": True, "posts": posts}, ensure_ascii=False), encoding="utf-8")
 """,
-        encoding="utf-8",
     )
-    fake_node.chmod(0o755)
     env = dict(os.environ)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     worker = run(
         [
             PYTHON,
@@ -8151,7 +7908,6 @@ exit 1
 
 def assert_run_capture_pipeline_applies_expected_coverage(tmp_path: Path) -> None:
     config = tmp_path / "settings_capture_expected.yaml"
-    fake_bin = tmp_path / "bin"
     fake_opencli = tmp_path / "fake-opencli"
     db_path = tmp_path / "capture-expected.sqlite"
     opencli_status = start_opencli_status_server()
@@ -8161,16 +7917,8 @@ def assert_run_capture_pipeline_applies_expected_coverage(tmp_path: Path) -> Non
     text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
     text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
     config.write_text(text, encoding="utf-8")
-    fake_opencli.write_text(
-        """#!/bin/sh
-echo '1.8.1'
-exit 0
-""",
-        encoding="utf-8",
-    )
-    fake_opencli.chmod(0o755)
-    fake_bin.mkdir()
-    (fake_bin / "node").write_text(
+    write_fake_opencli_adapter(
+        fake_opencli,
         """#!/usr/bin/env python3
 import json
 payload = {
@@ -8195,11 +7943,8 @@ payload = {
 }
 print(json.dumps(payload, ensure_ascii=False))
 """,
-        encoding="utf-8",
     )
-    (fake_bin / "node").chmod(0o755)
     env = dict(os.environ)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
 
     try:
         result = run(
@@ -8290,9 +8035,8 @@ print(json.dumps(payload, ensure_ascii=False))
 
 def assert_run_account_job_passes_snapshot_budget(tmp_path: Path) -> None:
     config = tmp_path / "settings_account_job_snapshots.yaml"
-    fake_bin = tmp_path / "bin-account-snapshots"
     fake_opencli = tmp_path / "fake-opencli-account-snapshots"
-    args_file = tmp_path / "account-node-argv.json"
+    args_file = tmp_path / "account-opencli-argv.json"
     db_path = tmp_path / "account-snapshots.sqlite"
     opencli_status = start_opencli_status_server()
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
@@ -8301,10 +8045,8 @@ def assert_run_account_job_passes_snapshot_budget(tmp_path: Path) -> None:
     text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
     text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
     config.write_text(text, encoding="utf-8")
-    fake_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
-    fake_opencli.chmod(0o755)
-    fake_bin.mkdir()
-    (fake_bin / "node").write_text(
+    write_fake_opencli_adapter(
+        fake_opencli,
         f"""#!/usr/bin/env python3
 import json
 import pathlib
@@ -8327,11 +8069,8 @@ payload = {{
 }}
 print(json.dumps(payload, ensure_ascii=False))
 """,
-        encoding="utf-8",
     )
-    (fake_bin / "node").chmod(0o755)
     env = dict(os.environ)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
 
     try:
         result = run(
@@ -8369,7 +8108,6 @@ print(json.dumps(payload, ensure_ascii=False))
 
 def assert_run_account_job_auto_retries_snapshot_cap(tmp_path: Path) -> None:
     config = tmp_path / "settings_account_retry_snapshots.yaml"
-    fake_bin = tmp_path / "bin-account-retry-snapshots"
     fake_opencli = tmp_path / "fake-opencli-account-retry-snapshots"
     calls_file = tmp_path / "account-retry-calls.json"
     db_path = tmp_path / "account-retry-snapshots.sqlite"
@@ -8380,10 +8118,8 @@ def assert_run_account_job_auto_retries_snapshot_cap(tmp_path: Path) -> None:
     text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
     text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
     config.write_text(text, encoding="utf-8")
-    fake_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
-    fake_opencli.chmod(0o755)
-    fake_bin.mkdir()
-    (fake_bin / "node").write_text(
+    write_fake_opencli_adapter(
+        fake_opencli,
         f"""#!{PYTHON}
 import json
 import pathlib
@@ -8447,11 +8183,8 @@ else:
     }}
 print(json.dumps(payload, ensure_ascii=False))
 """,
-        encoding="utf-8",
     )
-    (fake_bin / "node").chmod(0o755)
     env = dict(os.environ)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
 
     try:
         result = run(
@@ -8498,7 +8231,6 @@ print(json.dumps(payload, ensure_ascii=False))
 
 def assert_run_account_job_auto_retries_expected_coverage_gap(tmp_path: Path) -> None:
     config = tmp_path / "settings_account_expected_retry.yaml"
-    fake_bin = tmp_path / "bin-account-expected-retry"
     fake_opencli = tmp_path / "fake-opencli-account-expected-retry"
     calls_file = tmp_path / "account-expected-retry-calls.json"
     db_path = tmp_path / "account-expected-retry.sqlite"
@@ -8509,10 +8241,8 @@ def assert_run_account_job_auto_retries_expected_coverage_gap(tmp_path: Path) ->
     text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
     text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
     config.write_text(text, encoding="utf-8")
-    fake_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
-    fake_opencli.chmod(0o755)
-    fake_bin.mkdir()
-    (fake_bin / "node").write_text(
+    write_fake_opencli_adapter(
+        fake_opencli,
         f"""#!{PYTHON}
 import json
 import pathlib
@@ -8559,11 +8289,8 @@ payload = {{
 }}
 print(json.dumps(payload, ensure_ascii=False))
 """,
-        encoding="utf-8",
     )
-    (fake_bin / "node").chmod(0o755)
     env = dict(os.environ)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
 
     try:
         result = run(
@@ -8777,16 +8504,11 @@ sys.exit(code)
     assert "--resume-only" not in internal_calls[0]
     assert "--resume-only" in internal_calls[1]
     assert "--force-recover-running" in internal_calls[1]
-    assert "--tab-page" in internal_calls[0]
-    assert "--tab-page" in internal_calls[1]
-    assert internal_calls[0][internal_calls[0].index("--tab-page") + 1] == internal_calls[1][internal_calls[1].index("--tab-page") + 1]
+    assert "--tab-page" not in internal_calls[0]
+    assert "--tab-page" not in internal_calls[1]
     assert "export_summary_requests.py" not in internal_calls[1]
     opencli_calls = json.loads(opencli_calls_file.read_text(encoding="utf-8"))
-    assert len([call for call in opencli_calls if call["kind"] == "opencli" and "new" in call["argv"]]) == 2
-    assert len([call for call in opencli_calls if call["kind"] == "opencli" and "close" in call["argv"]]) == 2
-    first_close_index = next(index for index, call in enumerate(opencli_calls) if call["kind"] == "opencli" and "close" in call["argv"])
-    second_new_index = [index for index, call in enumerate(opencli_calls) if call["kind"] == "opencli" and "new" in call["argv"]][1]
-    assert first_close_index < second_new_index
+    assert [call for call in opencli_calls if call["kind"] == "opencli"] == []
     assert all("--target-date" in call and "260603" in call for call in calls)
     assert all("--sync" in call and "--dry-run" in call for call in calls)
 
@@ -9961,7 +9683,8 @@ def assert_run_accounts_job_auto_follow_exhausted_prefers_batch_rerun() -> None:
     assert batch_rerun[batch_rerun.index("--limit") + 1] == "3"
     assert "--sync" in batch_rerun
     assert "--dry-run" in batch_rerun
-    assert "--no-open-account-tabs" in batch_rerun
+    assert "--no-open-account-tabs" not in batch_rerun
+    assert "--open-account-tabs" not in batch_rerun
     assert batch_rerun[batch_rerun.index("--auto-follow-attempts") + 1] == "6"
     assert batch_rerun[batch_rerun.index("--max-snapshots") + 1] == "40"
     assert batch_rerun[batch_rerun.index("--min-snapshots") + 1] == "8"
@@ -10509,13 +10232,10 @@ def assert_run_accounts_job_opencli_blocker_preserves_batch_retry(tmp_path: Path
     config = tmp_path / "settings_batch_opencli_blocker.yaml"
     fake_lark = tmp_path / "fake-lark-cli-opencli-blocker"
     fake_python = tmp_path / "fake-python-opencli-blocker"
-    fake_opencli = tmp_path / "fake-opencli-opencli-blocker"
     calls_file = tmp_path / "batch-opencli-blocker-calls.json"
-    opencli_calls_file = tmp_path / "batch-opencli-blocker-opencli-calls.json"
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
     text = config.read_text(encoding="utf-8")
     text = text.replace("lark_cli_path: auto", f"lark_cli_path: {fake_lark}")
-    text = text.replace("opencli_path: auto", f"opencli_path: {fake_opencli}")
     text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'batch_opencli_blocker.sqlite'}")
     text = text.replace('source_spreadsheet_url: ""', 'source_spreadsheet_url: "https://fake.feishu.cn/sheets/source"')
     config.write_text(text, encoding="utf-8")
@@ -10538,31 +10258,6 @@ print(json.dumps(payload, ensure_ascii=False))
         encoding="utf-8",
     )
     fake_lark.chmod(0o755)
-    fake_opencli.write_text(
-        f"""#!/usr/bin/env python3
-import json
-import pathlib
-import sys
-calls_path = pathlib.Path(r"{opencli_calls_file}")
-calls = json.loads(calls_path.read_text(encoding="utf-8")) if calls_path.exists() else []
-calls.append(sys.argv)
-calls_path.write_text(json.dumps(calls), encoding="utf-8")
-if sys.argv[1:4] == ["browser", "fb-competitor", "tab"] and len(sys.argv) >= 6 and sys.argv[4] == "new":
-    url = sys.argv[5]
-    if "blockedpage" in url:
-        print(json.dumps({{"ok": False, "error": "browser_bridge_not_connected"}}))
-        sys.exit(1)
-    print(json.dumps({{"page": "opened-good", "url": url}}))
-    sys.exit(0)
-if sys.argv[1:4] == ["browser", "fb-competitor", "tab"] and len(sys.argv) >= 6 and sys.argv[4] == "close":
-    print(json.dumps({{"ok": True, "closed": sys.argv[5]}}))
-    sys.exit(0)
-print("unexpected opencli call", sys.argv, file=sys.stderr)
-sys.exit(1)
-""",
-        encoding="utf-8",
-    )
-    fake_opencli.chmod(0o755)
     fake_python.write_text(
         f"""#!/usr/bin/env python3
 import json
@@ -10575,6 +10270,38 @@ calls_path.write_text(json.dumps(calls), encoding="utf-8")
 account_url = sys.argv[sys.argv.index("--account-url") + 1]
 account_name = sys.argv[sys.argv.index("--account-name") + 1]
 account_type = sys.argv[sys.argv.index("--account-type") + 1]
+if "blockedpage" in account_url:
+    payload = {{
+        "ok": False,
+        "run_status": "blocked_opencli",
+        "complete": False,
+        "account_url": account_url,
+        "account_name": account_name,
+        "account_type": account_type,
+        "post_count": 0,
+        "quality_summary": {{
+            "coverage_health": "incomplete",
+            "ledger_candidate_count": 0,
+            "final_usable_count": 0,
+            "final_usable_rate": 0.0,
+            "open_task_count": 0
+        }},
+        "completion_blockers": [{{"code": "blocked_opencli", "severity": "hard_blocker"}}],
+        "next_commands": [
+            {{
+                "reason": "blocked_opencli",
+                "description": "fix OpenCLI",
+                "command": "python3 scripts/check_env.py --config " + sys.argv[sys.argv.index("--config") + 1] + " --fix-opencli"
+            }},
+            {{
+                "reason": "rerun_batch_after_opencli",
+                "description": "rerun batch",
+                "command": "python3 scripts/run_accounts_job.py --config " + sys.argv[sys.argv.index("--config") + 1] + " --target-date 260603 --sync --dry-run --auto-follow-attempts 6 --max-snapshots 40 --min-snapshots 8 --max-resume-passes 9 --enrichment-limit 25 --expected-post-count 13 --expected-labels 38m,1h,2h --require-coverage-complete --min-final-usable-rate 0.9"
+            }}
+        ]
+    }}
+    print(json.dumps(payload, ensure_ascii=False))
+    sys.exit(1)
 payload = {{
     "ok": True,
     "run_status": "complete",
@@ -10632,7 +10359,7 @@ sys.exit(0)
     assert result.returncode == 2, result.stdout or result.stderr
     data = json.loads(result.stdout)
     calls = json.loads(calls_file.read_text(encoding="utf-8"))
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert data["run_status"] == "accounts_blocked"
     assert data["accounts_completed"] == 1
     assert data["accounts_hard_blocked"] == 1
@@ -10647,7 +10374,8 @@ sys.exit(0)
     assert rerun[rerun.index("--target-date") + 1] == "260603"
     assert "--sync" in rerun
     assert "--dry-run" in rerun
-    assert "--open-account-tabs" in rerun
+    assert "--open-account-tabs" not in rerun
+    assert "--no-open-account-tabs" not in rerun
     assert rerun[rerun.index("--auto-follow-attempts") + 1] == "6"
     assert rerun[rerun.index("--max-snapshots") + 1] == "40"
     assert rerun[rerun.index("--min-snapshots") + 1] == "8"
@@ -10657,9 +10385,6 @@ sys.exit(0)
     assert rerun[rerun.index("--expected-labels") + 1] == "38m,1h,2h"
     assert "--require-coverage-complete" in rerun
     assert rerun[rerun.index("--min-final-usable-rate") + 1] == "0.9"
-    opencli_calls = json.loads(opencli_calls_file.read_text(encoding="utf-8"))
-    assert len([call for call in opencli_calls if "new" in call]) == 2
-    assert len([call for call in opencli_calls if "close" in call]) == 1
 
 
 def assert_run_accounts_job_child_opencli_blocker_preserves_batch_retry(tmp_path: Path) -> None:
@@ -10815,7 +10540,8 @@ sys.exit(0)
     assert batch_rerun[batch_rerun.index("--target-date") + 1] == "260603"
     assert "--sync" in batch_rerun
     assert "--dry-run" in batch_rerun
-    assert "--no-open-account-tabs" in batch_rerun
+    assert "--no-open-account-tabs" not in batch_rerun
+    assert "--open-account-tabs" not in batch_rerun
     assert batch_rerun[batch_rerun.index("--auto-follow-attempts") + 1] == "6"
     assert batch_rerun[batch_rerun.index("--max-snapshots") + 1] == "40"
     assert batch_rerun[batch_rerun.index("--min-snapshots") + 1] == "8"
@@ -11161,7 +10887,8 @@ sys.exit(0)
     assert batch_rerun[batch_rerun.index("--target-date") + 1] == "260603"
     assert "--sync" in batch_rerun
     assert "--dry-run" in batch_rerun
-    assert "--no-open-account-tabs" in batch_rerun
+    assert "--no-open-account-tabs" not in batch_rerun
+    assert "--open-account-tabs" not in batch_rerun
     assert batch_rerun[batch_rerun.index("--auto-follow-attempts") + 1] == "6"
     assert batch_rerun[batch_rerun.index("--max-snapshots") + 1] == "40"
     assert batch_rerun[batch_rerun.index("--min-snapshots") + 1] == "8"
@@ -11326,7 +11053,8 @@ sys.exit(0)
     assert batch_rerun[batch_rerun.index("--target-date") + 1] == "260603"
     assert "--sync" in batch_rerun
     assert "--dry-run" in batch_rerun
-    assert "--no-open-account-tabs" in batch_rerun
+    assert "--no-open-account-tabs" not in batch_rerun
+    assert "--open-account-tabs" not in batch_rerun
     assert batch_rerun[batch_rerun.index("--auto-follow-attempts") + 1] == "6"
     assert batch_rerun[batch_rerun.index("--max-snapshots") + 1] == "40"
     assert batch_rerun[batch_rerun.index("--min-snapshots") + 1] == "8"
@@ -11460,7 +11188,8 @@ sys.exit(0)
     assert batch_rerun[batch_rerun.index("--target-date") + 1] == "260603"
     assert "--sync" in batch_rerun
     assert "--dry-run" in batch_rerun
-    assert "--no-open-account-tabs" in batch_rerun
+    assert "--no-open-account-tabs" not in batch_rerun
+    assert "--open-account-tabs" not in batch_rerun
     assert batch_rerun[batch_rerun.index("--auto-follow-attempts") + 1] == "6"
     assert batch_rerun[batch_rerun.index("--max-snapshots") + 1] == "40"
     assert batch_rerun[batch_rerun.index("--min-snapshots") + 1] == "8"
@@ -11535,7 +11264,8 @@ def assert_run_accounts_job_unverified_complete_preserves_batch_retry() -> None:
     assert batch_rerun[batch_rerun.index("--limit") + 1] == "2"
     assert "--sync" in batch_rerun
     assert "--dry-run" in batch_rerun
-    assert "--no-open-account-tabs" in batch_rerun
+    assert "--no-open-account-tabs" not in batch_rerun
+    assert "--open-account-tabs" not in batch_rerun
     assert batch_rerun[batch_rerun.index("--auto-follow-attempts") + 1] == "6"
     assert batch_rerun[batch_rerun.index("--max-snapshots") + 1] == "40"
     assert batch_rerun[batch_rerun.index("--min-snapshots") + 1] == "8"
@@ -11700,7 +11430,8 @@ exit 1
     assert rerun[rerun.index("--limit") + 1] == "2"
     assert "--sync" in rerun
     assert "--dry-run" in rerun
-    assert "--no-open-account-tabs" in rerun
+    assert "--no-open-account-tabs" not in rerun
+    assert "--open-account-tabs" not in rerun
     assert rerun[rerun.index("--auto-follow-attempts") + 1] == "6"
     assert rerun[rerun.index("--max-snapshots") + 1] == "40"
     assert rerun[rerun.index("--min-snapshots") + 1] == "8"
@@ -11795,7 +11526,8 @@ print(json.dumps(payload, ensure_ascii=False))
     assert rerun[rerun.index("--limit") + 1] == "2"
     assert "--sync" in rerun
     assert "--dry-run" in rerun
-    assert "--no-open-account-tabs" in rerun
+    assert "--no-open-account-tabs" not in rerun
+    assert "--open-account-tabs" not in rerun
     assert rerun[rerun.index("--auto-follow-attempts") + 1] == "6"
     assert rerun[rerun.index("--max-snapshots") + 1] == "40"
     assert rerun[rerun.index("--min-snapshots") + 1] == "8"
@@ -11821,32 +11553,29 @@ def assert_run_account_job_structures_prepare_and_import_failures(tmp_path: Path
         text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
         text = text.replace("database_path: data/posts.sqlite", f"database_path: {prepare_db_path}")
         prepare_config.write_text(text, encoding="utf-8")
-        prepare_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
-        prepare_opencli.chmod(0o755)
-        prepare_bin.mkdir()
-        (prepare_bin / "node").write_text(
-            f"#!{PYTHON}\n"
-            + """import json
-payload = {
+        write_fake_opencli_adapter(
+            prepare_opencli,
+            f"""#!{PYTHON}
+import json
+payload = {{
   "ok": True,
   "post_count": 1,
   "raw_candidate_count": 1,
   "capture_complete": True,
-  "coverage": {"capture_complete": True},
+  "coverage": {{"capture_complete": True}},
   "posts": [
-    {
+    {{
       "post_url": "https://www.facebook.com/accountpreparefail/posts/one",
       "post_time_text": "1h",
       "crawled_at": "2026-06-03T12:00:00",
       "raw_text": "candidate one"
-    }
+    }}
   ]
-}
+}}
 print(json.dumps(payload, ensure_ascii=False))
 """,
-            encoding="utf-8",
         )
-        (prepare_bin / "node").chmod(0o755)
+        prepare_bin.mkdir()
         (prepare_bin / "python3").write_text(
             f"#!{PYTHON}\n"
             + """import json
@@ -11911,32 +11640,29 @@ sys.exit(completed.returncode)
         text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
         text = text.replace("database_path: data/posts.sqlite", f"database_path: {import_db_path}")
         import_config.write_text(text, encoding="utf-8")
-        import_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
-        import_opencli.chmod(0o755)
-        import_bin.mkdir()
-        (import_bin / "node").write_text(
-            f"#!{PYTHON}\n"
-            + """import json
-payload = {
+        write_fake_opencli_adapter(
+            import_opencli,
+            f"""#!{PYTHON}
+import json
+payload = {{
   "ok": True,
   "post_count": 1,
   "raw_candidate_count": 1,
   "capture_complete": True,
-  "coverage": {"capture_complete": True},
+  "coverage": {{"capture_complete": True}},
   "posts": [
-    {
+    {{
       "post_url": "https://www.facebook.com/accountimportfail/posts/one",
       "post_time_text": "1h",
       "crawled_at": "2026-06-03T12:00:00",
       "raw_text": "candidate one"
-    }
+    }}
   ]
-}
+}}
 print(json.dumps(payload, ensure_ascii=False))
 """,
-            encoding="utf-8",
         )
-        (import_bin / "node").chmod(0o755)
+        import_bin.mkdir()
         (import_bin / "python3").write_text(
             f"#!{PYTHON}\n"
             + """import json
@@ -12036,9 +11762,8 @@ sys.exit(completed.returncode)
 
 def assert_run_capture_pipeline_passes_snapshot_budget(tmp_path: Path) -> None:
     config = tmp_path / "settings_capture_snapshots.yaml"
-    fake_bin = tmp_path / "bin-snapshots"
     fake_opencli = tmp_path / "fake-opencli-snapshots"
-    args_file = tmp_path / "node-argv.json"
+    args_file = tmp_path / "opencli-argv.json"
     db_path = tmp_path / "capture-snapshots.sqlite"
     opencli_status = start_opencli_status_server()
     shutil.copy(ROOT / "config" / "settings.yaml.example", config)
@@ -12047,10 +11772,8 @@ def assert_run_capture_pipeline_passes_snapshot_budget(tmp_path: Path) -> None:
     text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
     text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
     config.write_text(text, encoding="utf-8")
-    fake_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
-    fake_opencli.chmod(0o755)
-    fake_bin.mkdir()
-    (fake_bin / "node").write_text(
+    write_fake_opencli_adapter(
+        fake_opencli,
         f"""#!/usr/bin/env python3
 import json
 import pathlib
@@ -12073,11 +11796,8 @@ payload = {{
 }}
 print(json.dumps(payload, ensure_ascii=False))
 """,
-        encoding="utf-8",
     )
-    (fake_bin / "node").chmod(0o755)
     env = dict(os.environ)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
 
     try:
         result = run(
@@ -12112,7 +11832,6 @@ print(json.dumps(payload, ensure_ascii=False))
 
 def assert_run_capture_pipeline_auto_retries_snapshot_cap(tmp_path: Path) -> None:
     config = tmp_path / "settings_capture_retry_snapshots.yaml"
-    fake_bin = tmp_path / "bin-capture-retry-snapshots"
     fake_opencli = tmp_path / "fake-opencli-capture-retry-snapshots"
     calls_file = tmp_path / "capture-retry-calls.json"
     db_path = tmp_path / "capture-retry-snapshots.sqlite"
@@ -12123,10 +11842,8 @@ def assert_run_capture_pipeline_auto_retries_snapshot_cap(tmp_path: Path) -> Non
     text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
     text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
     config.write_text(text, encoding="utf-8")
-    fake_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
-    fake_opencli.chmod(0o755)
-    fake_bin.mkdir()
-    (fake_bin / "node").write_text(
+    write_fake_opencli_adapter(
+        fake_opencli,
         f"""#!{PYTHON}
 import json
 import pathlib
@@ -12188,11 +11905,8 @@ else:
     }}
 print(json.dumps(payload, ensure_ascii=False))
 """,
-        encoding="utf-8",
     )
-    (fake_bin / "node").chmod(0o755)
     env = dict(os.environ)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
 
     try:
         result = run(
@@ -12236,7 +11950,6 @@ print(json.dumps(payload, ensure_ascii=False))
 
 def assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path: Path) -> None:
     config = tmp_path / "settings_capture_login.yaml"
-    fake_bin = tmp_path / "bin-login"
     fake_opencli = tmp_path / "fake-opencli-login"
     db_path = tmp_path / "capture-login.sqlite"
     opencli_status = start_opencli_status_server()
@@ -12246,10 +11959,8 @@ def assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path: P
     text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
     text = text.replace("database_path: data/posts.sqlite", f"database_path: {db_path}")
     config.write_text(text, encoding="utf-8")
-    fake_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
-    fake_opencli.chmod(0o755)
-    fake_bin.mkdir()
-    (fake_bin / "node").write_text(
+    write_fake_opencli_adapter(
+        fake_opencli,
         """#!/usr/bin/env python3
 import json
 payload = {
@@ -12261,11 +11972,8 @@ payload = {
 print(json.dumps(payload, ensure_ascii=False))
 raise SystemExit(3)
 """,
-        encoding="utf-8",
     )
-    (fake_bin / "node").chmod(0o755)
     env = dict(os.environ)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
 
     try:
         result = run(
@@ -12300,7 +12008,6 @@ def assert_run_capture_pipeline_structures_prepare_and_import_failures(tmp_path:
     opencli_status = start_opencli_status_server()
     try:
         prepare_config = tmp_path / "settings_capture_prepare_fail.yaml"
-        prepare_bin = tmp_path / "bin-prepare-fail"
         prepare_opencli = tmp_path / "fake-opencli-prepare-fail"
         shutil.copy(ROOT / "config" / "settings.yaml.example", prepare_config)
         text = prepare_config.read_text(encoding="utf-8")
@@ -12308,10 +12015,8 @@ def assert_run_capture_pipeline_structures_prepare_and_import_failures(tmp_path:
         text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
         text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path / 'prepare-fail.sqlite'}")
         prepare_config.write_text(text, encoding="utf-8")
-        prepare_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
-        prepare_opencli.chmod(0o755)
-        prepare_bin.mkdir()
-        (prepare_bin / "node").write_text(
+        write_fake_opencli_adapter(
+            prepare_opencli,
             """#!/usr/bin/env python3
 import json
 payload = {
@@ -12324,11 +12029,8 @@ payload = {
 }
 print(json.dumps(payload, ensure_ascii=False))
 """,
-            encoding="utf-8",
         )
-        (prepare_bin / "node").chmod(0o755)
         prepare_env = dict(os.environ)
-        prepare_env["PATH"] = f"{prepare_bin}:{prepare_env.get('PATH', '')}"
         prepare_result = run(
             [
                 PYTHON,
@@ -12353,7 +12055,6 @@ print(json.dumps(payload, ensure_ascii=False))
         assert "--resume-only" not in prepare_data["next_commands"][0]["command"]
 
         import_config = tmp_path / "settings_capture_import_fail.yaml"
-        import_bin = tmp_path / "bin-import-fail"
         import_opencli = tmp_path / "fake-opencli-import-fail"
         shutil.copy(ROOT / "config" / "settings.yaml.example", import_config)
         text = import_config.read_text(encoding="utf-8")
@@ -12361,10 +12062,8 @@ print(json.dumps(payload, ensure_ascii=False))
         text = text.replace("opencli_daemon_port: 19825", f"opencli_daemon_port: {opencli_status.server_port}")
         text = text.replace("database_path: data/posts.sqlite", f"database_path: {tmp_path}")
         import_config.write_text(text, encoding="utf-8")
-        import_opencli.write_text("#!/bin/sh\necho '1.8.1'\nexit 0\n", encoding="utf-8")
-        import_opencli.chmod(0o755)
-        import_bin.mkdir()
-        (import_bin / "node").write_text(
+        write_fake_opencli_adapter(
+            import_opencli,
             """#!/usr/bin/env python3
 import json
 payload = {
@@ -12384,11 +12083,8 @@ payload = {
 }
 print(json.dumps(payload, ensure_ascii=False))
 """,
-            encoding="utf-8",
         )
-        (import_bin / "node").chmod(0o755)
         import_env = dict(os.environ)
-        import_env["PATH"] = f"{import_bin}:{import_env.get('PATH', '')}"
         import_result = run(
             [
                 PYTHON,
@@ -13527,13 +13223,11 @@ def main() -> int:
     assert_opencli_extract_helpers_dedupe_homepage_candidates()
     assert_opencli_extract_has_under_capture_guards()
     assert_opencli_extract_stable_end_is_complete_coverage()
-    assert_opencli_extract_script_requires_human_intervention()
-    assert_opencli_runtime_avoids_binding_current_tab()
-    assert_opencli_runtime_requires_matching_account_tab()
-    assert_opencli_runtime_uses_explicit_tab_page_only()
-    assert_opencli_tab_tracker_closes_only_registered_tabs()
-    assert_opencli_detail_session_lock_recovers_stale_files()
-    assert_opencli_detail_enrichment_reuses_tab_with_fallback()
+    assert_opencli_adapter_scaffold_contract()
+    assert_project_opencli_wrapper_is_project_local()
+    assert_account_and_worker_call_opencli_adapter()
+    assert_run_accounts_uses_adapter_not_tab_preopen()
+    assert_detail_enrichment_is_adapter_owned()
     assert_opencli_detail_enrichment_blocks_for_human_login()
     assert_feishu_writes_require_user_identity()
     assert_sync_failures_include_recovery_actions()
@@ -13627,7 +13321,7 @@ def main() -> int:
         assert_comment_lead_link_overrides_ad_links(tmp_path)
         assert_prepare_capture_skips_bad_candidate_without_failing_batch(tmp_path)
         assert_prepare_capture_has_no_base_time_argument()
-        assert_exact_time_verifier_summary_contract()
+        assert_detail_time_helpers_parse_exact_facebook_time()
         assert_opencli_detail_enrichment_supports_target_date_filter()
         assert_opencli_detail_enrichment_rejects_string_false_time()
         assert_opencli_detail_enrichment_rejects_copied_article_summary()

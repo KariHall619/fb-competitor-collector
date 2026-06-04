@@ -142,9 +142,7 @@ For code changes:
 python3 tests/test_local_pipeline.py
 PYTHONPYCACHEPREFIX=/private/tmp/fb-competitor-pycache python3 -m py_compile scripts/*.py tests/test_local_pipeline.py
 node -c scripts/fb_dom_extractors.js
-node -c scripts/check_opencli_runtime_backend.mjs
-node -c scripts/opencli_enrich_post_details.mjs
-node -c scripts/opencli_extract_current_tab.mjs
-node -c scripts/opencli_runtime.mjs
-node -c scripts/opencli_verify_exact_time.mjs
+node -c scripts/fb_detail_extractors.js
+node -c scripts/fb_time_extractors.js
+node -c opencli/clis/facebook/fb-competitor-posts.js
 ```
