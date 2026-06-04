@@ -5,6 +5,13 @@ description: Use when a business user wants to collect visible Facebook competit
 
 # FB Competitor Collector
 
+## Document Roles
+
+- `README.md`: repository quick start, directory map, validation commands.
+- `README_FOR_OPERATOR.md`: no-code business runbook and operator-facing blockers.
+- `SKILL.md`: Codex routing contract for natural-language requests.
+- `AGENTS.md`: project memory and engineering rules for future code changes.
+
 This skill turns business-language requests into the full FB competitor collection workflow:
 
 ```text
@@ -174,7 +181,7 @@ Preferred fields:
 - `fb_link_kind`: `parent_post`, `reel`, `photo`, `video`, or `facebook`
 - `post_type`
 - `posted_date`: `YYMMDD`
-- `posted_at`: hour-level or better post time, e.g. `2026年5月19日 17:00`; if only a Facebook relative label is available, estimate from crawl time and mark `time_source=relative_estimated`
+- `posted_at`: hour-level or better post time confirmed from the detail page, e.g. `2026年5月19日 17:00`; relative labels are not accepted for formal output
 - `relative_time_text`: visible FB label, e.g. `1h`
 - `article_url`
 - `lead_url_raw`

@@ -1,5 +1,22 @@
+# OS/editor noise
 .DS_Store
+
+# Python caches
 __pycache__/
 *.py[cod]
+.pytest_cache/
+
+# JavaScript dependencies, if local tooling installs them
+node_modules/
+
+# Local runtime state. These directories may contain Chrome profiles, SQLite
+# databases, raw captures, debug images, and generated summary payloads.
 data/
 exports/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Local secrets or machine-specific overrides
+.env
+.env.*

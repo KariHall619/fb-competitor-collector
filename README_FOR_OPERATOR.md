@@ -1,281 +1,158 @@
-# FB Competitor Collector Operator Notes
+# FB 竞品采集操作手册
 
-## Goal
+这份文档给业务使用者和帮业务执行的 Codex 看。正常使用时，不需要手动拼脚本，直接在 Codex 里说要采集什么。
 
-This package is the single entry point for FB competitor/internal-page collection:
-
-```text
-normal Chrome Facebook tab -> OpenCLI Browser Bridge -> normalize -> SQLite dedupe -> Feishu sync -> filter
-```
-
-Business users should operate it through natural language in Codex.
-
-## Setup
-
-```bash
-cp config/settings.yaml.example config/settings.yaml
-python3 scripts/check_env.py --config config/settings.yaml
-```
-
-Cross-platform runtime detection:
-
-- `lark_cli_path: auto` lets the project detect the current OS and resolve the real command.
-- On Mac, the current validated override is `/Users/a1/.npm-global/bin/lark-cli`.
-- On Windows, the default command is `lark-cli.cmd`; keep it available in PATH, or set `platform_overrides.windows.lark_cli_path` to the installed full path.
-- `opencli_path: auto` resolves a global `opencli` command first and falls back to `npx -y @jackwener/opencli` when npx is available.
-- `opencli_session: fb-competitor` keeps the Browser Bridge tab lease scoped to this project.
-- Real Feishu writes must use user identity, not bot identity.
-- Identity policy is forced with `default-as user` and `strict-mode user`.
-- If `tokenStatus` is `needs_refresh`, run `lark-cli auth login` before writing Feishu.
-- Live Facebook capture requires OpenCLI Browser Bridge in the same normal Chrome profile where Facebook is logged in.
-- A normal shell can confirm OpenCLI readiness with `opencli doctor` or `npx -y @jackwener/opencli doctor`.
-
-Configured Feishu workbooks:
+## 一句话流程
 
 ```text
-Account source wiki URL: https://pic6ktmsyi.feishu.cn/wiki/QzfUwyYyTi3zt7kl7TDcSzZKn3f?sheet=oZg2HR
-Account source spreadsheet URL: https://pic6ktmsyi.feishu.cn/sheets/QkRSshqQDh2dfWtfLtLcikWKnIb
-Account source sheet id: oZg2HR
-
-Output wiki URL: https://pic6ktmsyi.feishu.cn/wiki/BqkSw67zgiYlbikZWx3cqwZ5nAf
-Output spreadsheet URL: https://pic6ktmsyi.feishu.cn/sheets/Md8As2SJzhyuBHtMuOmcLqy3nyf
-Output sheet id: 44013b
+你发采集指令
+-> Codex 检查飞书、OpenCLI、Chrome/Facebook 状态
+-> 能自动修复的先自动修复
+-> 不能自动修复的中断并告诉你怎么处理
+-> 后台打开目标账号页并采集
+-> 自动补抓缺字段
+-> 字段完整后写入 FB竞品帖子链接
+-> Codex 汇报账号、帖子数、完整度和异常
 ```
 
-## Live Facebook Capture
+## 常用说法
 
-Supported route:
+检查能不能用：
 
 ```text
-business user opens the visible Facebook page in normal Chrome
--> OpenCLI Browser Bridge reads the bound Facebook tab with low-disturbance direct tab access when possible
--> homepage relative labels such as 3h/12h/1d define the candidate window
--> a reused detail tab confirms exact posted_at and comment lead link, with the original fresh-tab flow as fallback
--> normalize -> SQLite dedupe -> Feishu sync
+检查 FB 竞品采集工具现在是否准备好。
 ```
 
-If the environment check says OpenCLI or Browser Bridge is not ready, stop and fix the OpenCLI CLI/daemon/extension/profile setup first. Do not use another browser route for live Facebook capture.
+采集全部账号：
 
-If the capture tab shows a login prompt, visitor preview, or only one preview post, stop immediately with `human_intervention_required`. The operator must manually log in or confirm the Chrome profile before retrying. Do not keep scrolling, import, or sync from that state.
+```text
+采集全部目标账号过去 24 小时的帖子，并同步到飞书。
+```
 
-Low-disturbance capture is an optimization, not a quality tradeoff. Runtime reads first try direct `--tab` access and detail enrichment first reuses one detail tab to reduce visible Chrome tab churn. If those paths fail or collect less usable detail, the scripts fall back to the original select/new-tab flow for that post. Valid Facebook candidates still enter SQLite as `needs_enrichment` when fields are missing; the final-output quality gate only controls Feishu sync.
+采集某个账号：
 
-Detail enrichment records only the tabs opened by automation and closes those detail tabs at the end of the batch, including blocked/error exits. It does not close the user's original Facebook homepage tab. Use `--keep-opened-tabs` only for debugging when the operator intentionally wants detail tabs left open for inspection.
+```text
+采集这个 Facebook 账号今天的帖子，并同步到飞书：<账号主页链接>
+```
 
-For "today's posts" on a Facebook page, always reload/open the account homepage from the top and collect posts in visible homepage time order until the current-day boundary is covered. Do not continue from a previously low scroll position: Facebook virtualizes the feed DOM, so continuing from the current low position can omit newer posts above it. When the business user provides visible labels such as `38m, 1h, 2h ... 17h`, treat that sequence as the coverage checklist and open each post detail/comment area to find the account's comment or reply lead link.
+补抓某条帖子：
 
-## OpenCLI Browser Bridge Troubleshooting
+```text
+补抓这条 Facebook 帖子，字段完整后同步到飞书：<帖子链接>
+```
 
-Use these checks when Codex cannot verify exact Facebook time from the same-profile capture window:
+导入已有结果：
+
+```text
+把这个 JSON/CSV 抓取结果导入内容库：<文件路径>
+```
+
+只筛选本地库：
+
+```text
+筛选 5 月 21 日的竞品帖子。
+```
+
+## Codex 会自动做什么
+
+- 读取本次范围：全部账号、单账号、单帖、库内补抓、库外导入。
+- 检查 `config/settings.yaml`。
+- 检查飞书来源表、输出表和 `lark-cli` 用户身份。
+- 遇到可恢复的 Feishu token 状态时先自动刷新。
+- 检查 OpenCLI daemon 和 Browser Bridge。
+- OpenCLI daemon 没启动时先自动恢复。
+- 通过 OpenCLI 在同一个正常 Chrome profile 里打开后台账号页。
+- 从账号主页顶部发现候选帖子。
+- 打开详情页补精确发帖时间、评论/回复引流链接、互动数据、帖子类型和文章材料。
+- 生成/应用基于文章材料的中文故事概要。
+- 不完整记录留在 SQLite 和补抓队列。
+- 只有完整记录通过质量门后，才写入正式飞书表。
+
+## 什么时候需要你手动处理
+
+出现以下情况时，Codex 会停止采集并说明处理步骤：
+
+- Facebook 已退出登录。
+- 页面是游客预览，或只看到一条预览帖子。
+- 出现验证码、风控、权限页面。
+- Chrome profile 不对。
+- OpenCLI Browser Bridge 扩展没有连接到正在使用的 Chrome profile。
+- 目标账号主页没有真实加载出帖子列表。
+
+处理后，直接让 Codex 按它输出的 `next_commands` 或原始采集指令继续。
+
+## 正式入表标准
+
+普通“同步到飞书”只写完整结果。每条正式输出必须满足：
+
+- 有有效 Facebook 帖子/视频/图片/Reel/分享链接。
+- 发帖时间来自详情页精确时间，不使用 `1h`、`12h` 这类相对时间估算。
+- 引流链接来自账号自己的评论、评论回复，或当前主帖里的明确 CTA。
+- 引流链接最终落到 Facebook/Meta 之外的网站。
+- 有文章/落地页材料。
+- 故事概要是中文，并基于文章材料生成。
+- 帖子类型、互动数据和覆盖状态通过当前质量检查。
+
+缺字段的候选不会丢，会留在本地继续补抓；但不会被普通 `--sync` 写进正式飞书表。
+
+## 结果汇报怎么看
+
+Codex 最后应该汇报：
+
+- 本次尝试了哪些账号。
+- 每个账号发现多少候选帖子。
+- 每个账号最终写入/可用多少条。
+- 是否所有必填字段都完整。
+- 剩余缺口属于覆盖、精确时间、引流链接、互动数据、帖子类型、文章材料、故事概要、飞书同步还是人工登录问题。
+- 是否存在几乎没有抓到字段的特殊帖子。
+
+只要 `run_status` 不是 `complete`，就说明本次业务流程还没完全完成。
+
+## 工程命令速查
+
+检查环境并尽量自动修复：
 
 ```bash
-opencli doctor
-curl -H 'X-OpenCLI: 1' http://127.0.0.1:19825/status
-node scripts/check_opencli_runtime_backend.mjs
+python3 scripts/check_env.py --config config/settings.yaml --fix-auth --fix-opencli
 ```
 
-If `opencli doctor` reports `Extension: not connected`, the blocker is the OpenCLI Browser Bridge extension/profile connection, not Facebook login or the project code. Install or enable the OpenCLI extension in the business Chrome profile, then rerun:
+采集全部账号：
 
 ```bash
-node scripts/opencli_verify_exact_time.mjs --run --account-url "<facebook-account-url>"
+python3 scripts/run_accounts_job.py --config config/settings.yaml --last-hours 24 --sync
 ```
 
-
-## OpenCLI Facebook Boundary
-
-OpenCLI is the browser runtime and Facebook connectivity dependency for live capture. The project does not use the built-in `opencli facebook feed` output as the business result, because that adapter returns generic feed columns. This project still evaluates `scripts/fb_dom_extractors.js`, then runs the existing normalization, detail enrichment, quality gate, SQLite dedupe, and Feishu sync flow.
-
-## Local Import Test
+采集单账号：
 
 ```bash
-python3 scripts/import_existing_result.py \
-  --config config/settings.yaml \
-  --input samples/sample_posts.json \
-  --no-sync
+python3 scripts/run_account_job.py --config config/settings.yaml --account-url "<facebook-account-url>" --last-hours 24 --sync
 ```
 
-Run it twice to verify post-link dedupe.
-
-Expected second run result:
-
-```json
-{
-  "input": 1,
-  "inserted": 0,
-  "updated": 1,
-  "errors": 0
-}
-```
-
-## Filter Test
+续跑单账号：
 
 ```bash
-python3 scripts/filter_posts.py \
-  --config config/settings.yaml \
-  --date 260521 \
-  --account-type competitor
+python3 scripts/run_account_job.py --config config/settings.yaml --account-url "<facebook-account-url>" --target-date YYMMDD --resume-only --force-recover-running --sync
 ```
 
-## Feishu Sync
-
-After `lark-cli auth status` reports `identity=user` and `tokenStatus=valid`:
+读取账号配置：
 
 ```bash
-python3 scripts/import_existing_result.py \
-  --config config/settings.yaml \
-  --input samples/sample_posts.json \
-  --sync
+python3 scripts/read_accounts.py --config config/settings.yaml
 ```
 
-Important: write only to the output workbook `FB竞品帖子链接`. The account source workbook is read-only for this tool.
-The current output workbook uses A-K columns from `feishu.field_schema.output_headers`: `账号`, `账户类型`, `帖子链接`, `帖子类型`, `发帖时间`, `文章链接`, `故事概要`, `互动数据（点赞量）`, `浏览量`, `是否采用`, `对应站内链接`. `scripts/field_schema.py` is the single code source for those columns and known header aliases.
-
-Before syncing live FB capture results, the quality gate requires:
-
-- hour-level or better post time in `posted_at`, formatted like `2026年5月19日 17:00`
-- `posted_at` must be confirmed from Facebook's exact timestamp tooltip or timestamp DOM attributes. Estimated relative-time sources such as `relative_estimated`, `relative_hour`, or `relative_label` are rejected at sync time.
-- Timestamp tooltip capture is automated. The skill first tries synthetic hover through the OpenCLI Browser Bridge, then can fall back to automated extension mouse movement. Operators should not manually hover timestamps except when debugging with Codex.
-- a lead link posted by the account in the comment area or a comment reply. The link must resolve to an external non-Facebook site and be stored as `landing_url` with `lead_link_status=qualified`.
-- The homepage/comment lead link is authoritative. If the post detail page also exposes unrelated right-column/feed ads, those ad links must not overwrite a previously captured comment/reply lead link.
-- story summary generated from the landing page/article, with `summary_source=article`
-- short posts and other valid FB candidates are kept in SQLite if they have a valid FB content URL, but remain `needs_enrichment` until exact detail-page time, lead link, landing URL, article-based summary, and other required output fields are available
-
-Capture should preserve all real FB content candidates. If the capture sees `photo.php`, `/photo/`, `/reel/`, `/watch/`, or `/videos/`, keep the original content link and mark `fb_link_kind`.
-
-Media handling rule:
-
-- If a parent post link such as `/posts/`, `story.php`, or `permalink.php` is available, store it in `parent_post_url` and use it as the preferred dedupe key.
-- If no parent post link is available, keep the original `reel/photo/watch/video` link as the FB content link. Do not drop the candidate.
-- Parent-link absence does not block capture or local storage. Final Feishu output is blocked when required output fields are missing: exact detail-page time, qualified comment/reply or post-CTA lead link, landing URL, article-based summary, post type, engagement, or coverage completion.
-
-If a candidate has no share count, add a coverage warning. It may still be a valid post, and the detail enrichment step should continue to check comments/replies for lead links.
-
-Relative FB labels such as `19m`, `1h`, `16h`, or `1d` are stored as `relative_time_text` and used to decide how far the homepage scroll should go. They are not converted into `posted_at` for formal output. `posted_at` must come from Facebook's exact timestamp tooltip or DOM attributes such as `aria-label`, `title`, `datetime`, or `data-tooltip-*`. The hover step is performed automatically by the skill; human intervention is reserved for login/risk-control/page-loading blockers.
-
-Prepare raw OpenCLI Browser Bridge capture output:
-
-```bash
-python3 scripts/prepare_capture_result.py \
-  --input exports/raw.json \
-  --output exports/prepared.json \
-  --target-date 260527
-```
-
-Open each prepared candidate detail page, confirm exact time, and capture the comment/reply lead link:
-
-```bash
-node scripts/opencli_enrich_post_details.mjs \
-  --input exports/prepared.json \
-  --output exports/detail_enriched.json \
-  --target-date 260527
-```
-
-Attach article material for Codex summarization:
-
-```bash
-python3 scripts/enrich_article_summaries.py \
-  --input exports/detail_enriched.json \
-  --output exports/with_article_material.json
-```
-
-Apply Codex-written Chinese summaries to a JSON payload:
-
-```bash
-python3 scripts/apply_article_summaries.py \
-  --input exports/with_article_material.json \
-  --summaries exports/article_summaries.json \
-  --output exports/ready_for_time_confirmation.json
-```
-
-For SQLite enrichment runs, article material is prepared first and the summary request is exported for Codex. The worker does not turn article title, meta description, or English excerpts into `故事概要`.
-
-```bash
-python3 scripts/enrichment_worker.py --config config/settings.yaml --stages article_material --limit 50
-python3 scripts/export_summary_requests.py --config config/settings.yaml --output exports/summary_requests.json
-python3 scripts/apply_article_summaries.py --config config/settings.yaml --summaries exports/article_summaries.json
-```
-
-Audit local summaries that were previously mis-marked as article summaries:
-
-```bash
-python3 scripts/audit_story_summaries.py --config config/settings.yaml
-python3 scripts/audit_story_summaries.py --config config/settings.yaml --fix
-```
-
-If all exact time signals are missing, do not sync formal output. A relative time label is only a homepage windowing clue; do not estimate it into `posted_at` for the formal Feishu table.
-
-Validate exact Facebook time capture before removing any legacy relative-time fallback. This check runs through OpenCLI Browser Bridge:
-
-```bash
-node scripts/opencli_verify_exact_time.mjs --run --account-url "<facebook-account-url>"
-```
-
-Passing output contains `status=exact_time_confirmed` and at least one `confirmed_examples[].posted_at` such as `2026年5月27日 15:11`. If it reports `facebook_tab_missing`, `login_required`, `visitor_preview`, or `exact_time_not_found`, keep the row as `needs_enrichment` and do not sync formal output for that post time.
-
-## Date Filtering Policy
-
-Facebook often shows relative labels on feed pages. The proven workflow uses two layers:
-
-- `posted_at`: hour-level or better time. This is the time field accepted for final Feishu output.
-- `relative_time_text`: visible label such as `3h`, `12h`, or `1d`. This is the homepage candidate-window clue and must not be used as the final output time.
-
-For a specific calendar day request, the reliable process is:
-
-1. On the account homepage, scroll and collect visible posts while using relative labels to keep a broad candidate window around the target day. For "today", labels such as `3h` or `12h` are included; the first stable `1d` boundary is a stopping clue, not a final date proof.
-2. Preserve every plausible parent post/reel/photo/watch/video candidate; do not drop short-text posts at homepage capture time.
-3. Open each candidate detail page through OpenCLI Browser Bridge and confirm exact `posted_at` from tooltip/DOM time attributes.
-4. Expand comments/replies and prefer the account-owned comment/reply lead link. Resolve that link to the final external landing page.
-5. Generate the Chinese story summary from the resolved landing page/article, not from Facebook text and not from unrelated ad pages.
-6. Keep records without exact time, qualified lead link, or article summary in local SQLite as `needs_enrichment`.
-7. Sync only rows whose `posted_at`, qualified lead link, landing URL, and article summary are confirmed.
-
-In the GLAS Story validation run, several homepage labels that looked like "today" resolved to the previous calendar date after detail-page exact-time confirmation. This is expected and is why formal sync is gated on exact detail time rather than homepage relative labels.
-
-Dry-run example:
-
-```bash
-python3 scripts/filter_posts.py \
-  --config config/settings.yaml \
-  --date 260521 \
-  --account-type competitor \
-  --sync \
-  --dry-run
-```
-
-## Local Test Suite
+本地测试：
 
 ```bash
 python3 tests/test_local_pipeline.py
-PYTHONPYCACHEPREFIX=/private/tmp/fb-competitor-pycache python3 -m py_compile scripts/*.py tests/test_local_pipeline.py
-node -c scripts/fb_dom_extractors.js
-node -c scripts/check_opencli_runtime_backend.mjs
-node -c scripts/opencli_enrich_post_details.mjs
-node -c scripts/opencli_extract_current_tab.mjs
-node -c scripts/opencli_runtime.mjs
-node -c scripts/opencli_verify_exact_time.mjs
 ```
 
-## Mac/Windows Handoff
+## 不要做的事
 
-The project should normally run with:
-
-```yaml
-lark_cli_path: auto
-opencli_path: auto
-opencli_session: fb-competitor
-```
-
-Windows business machines only need extra configuration when `lark-cli.cmd` or `opencli.cmd` is not in PATH:
-
-```yaml
-platform_overrides:
-  windows:
-    lark_cli_path: "C:\\Users\\<user>\\AppData\\Roaming\\npm\\lark-cli.cmd"
-    opencli_path: "C:\\Users\\<user>\\AppData\\Roaming\\npm\\opencli.cmd"
-```
-
-The remaining handoff checks are:
-
-- OpenCLI Browser Bridge is installed and enabled in the same Chrome profile where Facebook is logged in.
-- `lark-cli auth status` reports `identity=user` and `tokenStatus=valid`.
-- Scheduler setup is configured only if daily automation is enabled later.
+- 不要让业务人员手动写脚本命令，除非他们明确要求。
+- 不要用 Playwright、CDP-only、旧 Chrome Extension、userscript 替代 OpenCLI Browser Bridge 做实时 Facebook 采集。
+- 不要写入账号来源表。
+- 不要把游客预览数据导入或同步。
+- 不要因为帖子短、是图片、视频、Reel、watch 或缺父帖链接就丢弃候选。
+- 不要用主页相对时间当正式发帖时间。
+- 不要用 Facebook 正文、文章标题、meta 描述或英文原文冒充故事概要。
+- 不要把 `data/`、`exports/`、Chrome profile、SQLite 数据库当源码提交。

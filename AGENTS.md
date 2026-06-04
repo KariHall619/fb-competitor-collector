@@ -2,6 +2,21 @@
 
 This file is the first-stop project memory for future agents working in this repo. Read it before changing capture, Feishu sync, or documentation.
 
+## Documentation Map
+
+- `README.md`: concise repository quick start, directory map, completion rules, and validation commands. Keep this current when entrypoints, directories, or test commands change.
+- `README_FOR_OPERATOR.md`: business/operator runbook. Keep it no-code first and focused on what Codex does, when humans must intervene, and how to interpret results.
+- `SKILL.md`: Codex skill routing contract. Keep request-to-script mapping, hard blockers, and reporting rules here.
+- `AGENTS.md`: engineering memory. Keep durable project facts, non-regression rules, and implementation constraints here. Do not turn it into an operator manual.
+
+## Directory Contract
+
+- `scripts/run_accounts_job.py` and `scripts/run_account_job.py` are the business entrypoints. Lower-level scripts stay available for recovery, tests, and debugging.
+- `config/settings.yaml` is local live config; `config/settings.yaml.example` is the portable template.
+- `samples/` contains committed test/import fixtures only.
+- `data/` and `exports/` are ignored runtime directories. They may contain SQLite databases, Chrome profile data, raw captures, debug screenshots, and generated summary payloads. Do not stage them.
+- Long-lived examples should move from `exports/` to `samples/` only after removing private/customer-specific data.
+
 ## Current Project State
 
 - Branch context: `codex/fix-fb-capture-coverage-engagement`.
