@@ -84,7 +84,6 @@ def capture_pipeline_command_args(args: argparse.Namespace) -> argparse.Namespac
     values["sync"] = bool(args.sync_partial)
     values["strict_ready_only"] = False
     values["resume_only"] = False
-    values["max_resume_passes"] = 2
     return argparse.Namespace(**values)
 
 
@@ -216,6 +215,9 @@ def main() -> int:
     parser.add_argument("--max-text", default="1500")
     parser.add_argument("--max-snapshots", type=int, default=32)
     parser.add_argument("--min-snapshots", type=int, default=6)
+    parser.add_argument("--max-resume-passes", type=int, default=8)
+    parser.add_argument("--enrichment-limit", type=int, default=50)
+    parser.add_argument("--resume-stale-running-seconds", type=int, default=1800)
     parser.add_argument("--expected-post-count", type=int, default=0)
     parser.add_argument("--expected-labels", default="", help="Comma-separated visible relative-time labels from the operator checklist.")
     parser.add_argument(

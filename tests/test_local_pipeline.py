@@ -12168,6 +12168,9 @@ def assert_run_capture_pipeline_no_candidates_reports_full_capture_command() -> 
         dry_run=True,
         max_snapshots=20,
         min_snapshots=6,
+        max_resume_passes=8,
+        enrichment_limit=50,
+        resume_stale_running_seconds=1800,
         expected_post_count=13,
         expected_labels="38m,1h,2h",
         require_coverage_complete=True,
@@ -12191,6 +12194,9 @@ def assert_run_capture_pipeline_no_candidates_reports_full_capture_command() -> 
     assert command[command.index("--target-date") + 1] == "260603"
     assert command[command.index("--max-snapshots") + 1] == "20"
     assert command[command.index("--min-snapshots") + 1] == "6"
+    assert command[command.index("--max-resume-passes") + 1] == "8"
+    assert command[command.index("--enrichment-limit") + 1] == "50"
+    assert command[command.index("--resume-stale-running-seconds") + 1] == "1800"
     assert command[command.index("--expected-post-count") + 1] == "13"
     assert command[command.index("--expected-labels") + 1] == "38m,1h,2h"
     assert "--sync" in command
@@ -12203,6 +12209,54 @@ def assert_run_capture_pipeline_no_candidates_reports_full_capture_command() -> 
     assert command[command.index("--min-completion-rate") + 1] == "0.8"
     assert command[command.index("--min-expected-post-coverage-rate") + 1] == "0.9"
     assert command[command.index("--min-expected-label-coverage-rate") + 1] == "0.95"
+
+
+def assert_run_capture_pipeline_preserves_resume_budget() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_capture_pipeline
+
+    args = Namespace(
+        config="config/settings.yaml",
+        account_url="https://www.facebook.com/pipelinebudget",
+        account_name="Pipeline Budget",
+        account_type="competitor",
+        target_date="260603",
+        sync_partial=True,
+        dry_run=True,
+        max_snapshots=20,
+        min_snapshots=6,
+        max_resume_passes=5,
+        enrichment_limit=17,
+        resume_stale_running_seconds=90,
+        expected_post_count=0,
+        expected_labels="",
+        require_coverage_complete=False,
+        min_ledger_usable_rate=0.0,
+        min_final_usable_rate=0.0,
+        min_completion_rate=0.0,
+        min_expected_post_coverage_rate=0.0,
+        min_expected_label_coverage_rate=0.0,
+    )
+    commands = run_capture_pipeline.capture_pipeline_next_commands(
+        args,
+        run_status="incomplete_pending_tasks",
+        completion={
+            "post_count": 2,
+            "open_task_count": 2,
+            "has_auto_enrichment_work": True,
+            "open_task_stage_counts": {"post_type": 2},
+        },
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+
+    assert commands[0]["reason"] == "pending_enrichment"
+    command = shlex.split(commands[0]["command"])
+    assert "scripts/run_account_job.py" in command
+    assert "--resume-only" in command
+    assert "--force-recover-running" in command
+    assert command[command.index("--max-resume-passes") + 1] == "5"
+    assert command[command.index("--enrichment-limit") + 1] == "17"
+    assert command[command.index("--resume-stale-running-seconds") + 1] == "90"
 
 
 def assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path: Path) -> None:
@@ -13390,6 +13444,7 @@ def main() -> int:
         assert_run_capture_pipeline_promotes_human_intervention_discover(tmp_path)
         assert_run_capture_pipeline_structures_prepare_and_import_failures(tmp_path)
         assert_run_capture_pipeline_no_candidates_reports_full_capture_command()
+        assert_run_capture_pipeline_preserves_resume_budget()
         assert_run_account_job_scope_includes_unknown_date_candidates(tmp_path)
         assert_expected_coverage_marks_missing_posts()
         assert_run_account_job_expected_coverage_marks_missing_posts()
