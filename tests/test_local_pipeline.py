@@ -2263,6 +2263,24 @@ def assert_sync_status_prioritizes_auto_work_over_summary(tmp_path: Path) -> Non
     assert result["complete"] is False
 
 
+def assert_sync_status_detects_auto_work_from_stage_counts() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from sync_status import completion_run_status, has_auto_enrichment_work
+
+    completion = {
+        "post_count": 2,
+        "open_task_count": 0,
+        "auto_open_task_count": 0,
+        "has_auto_enrichment_work": False,
+        "has_incomplete_enrichment": True,
+        "missing_stage_counts": {"post_type": 2},
+    }
+
+    assert has_auto_enrichment_work(completion) is True
+    assert completion_run_status(completion, ledger_mode=False) == "incomplete_pending_tasks"
+    assert completion_run_status(completion, ledger_mode=True) == "synced_ledger_incomplete"
+
+
 def assert_completion_summary_uses_quality_audit_config(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
@@ -13083,6 +13101,7 @@ def main() -> int:
         assert_sync_posts_self_heals_missing_business_field_tasks(tmp_path)
         assert_sync_status_promotes_summary_only_work(tmp_path)
         assert_sync_status_prioritizes_auto_work_over_summary(tmp_path)
+        assert_sync_status_detects_auto_work_from_stage_counts()
         assert_completion_summary_uses_quality_audit_config(tmp_path)
         assert_strict_sync_uses_quality_audit_config(tmp_path)
         assert_export_summary_requests_can_scope_account_job(tmp_path)

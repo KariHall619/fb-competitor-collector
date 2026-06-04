@@ -150,6 +150,13 @@ def _field_gap_notes(field_gap_counts: dict[str, int]) -> list[str]:
 def has_auto_enrichment_work(completion: dict[str, Any]) -> bool:
     """Return True when a machine-runnable refetch/enrichment stage remains."""
 
+    for key in ("open_task_stage_counts", "missing_stage_counts"):
+        counts = completion.get(key)
+        if not isinstance(counts, dict):
+            continue
+        for stage, count in counts.items():
+            if stage in AUTO_ENRICHMENT_STAGES and int(count or 0) > 0:
+                return True
     return bool(
         completion.get("auto_open_task_count")
         or completion.get("coverage_incomplete_count")
