@@ -86,18 +86,18 @@ Do not import or sync visitor-preview data.
 .
 ├── README.md                  # developer/operator quick start
 ├── README_FOR_OPERATOR.md     # no-code business runbook
-├── SKILL.md                   # Codex skill routing contract
-├── AGENTS.md                  # project memory and engineering rules
+├── SKILL.md                   # concise Codex skill routing contract
+├── AGENTS.md                  # concise repo rules for Codex
+├── docs/
+│   ├── skill-execution.md     # why docs are split this way
+│   ├── architecture.md        # runtime and data flow
+│   ├── data-contract.md       # fields, Feishu output, quality gate
+│   ├── script-reference.md    # command reference and validation
+│   └── troubleshooting.md     # recovery order and blockers
 ├── config/
 │   ├── settings.yaml          # local live config
-│   └── settings.yaml.example  # template without private workbook values
-├── scripts/
-│   ├── run_accounts_job.py    # preferred all-account business entrypoint
-│   ├── run_account_job.py     # preferred single-account business entrypoint
-│   ├── check_env.py           # config/auth/OpenCLI preflight
-│   ├── opencli_*.mjs          # OpenCLI browser runtime and extraction
-│   ├── *_summary*.py          # article material and Chinese summary flow
-│   └── store.py/models.py/... # SQLite, schema, quality, and sync helpers
+│   └── settings.yaml.example  # portable template
+├── scripts/                   # business entrypoints and helpers
 ├── samples/                   # committed fixtures for import/tests
 ├── tests/                     # local regression tests
 ├── data/                      # ignored runtime SQLite/profile data
