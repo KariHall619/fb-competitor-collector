@@ -6695,6 +6695,128 @@ def assert_run_account_job_summary_only_next_command_exports_requests() -> None:
     assert "--force-recover-running" in failed_commands[1]["command"]
 
 
+def assert_run_account_job_summary_commands_survive_coverage_gap() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/coverage-summary",
+            "account_name": "Coverage Summary",
+            "account_type": "competitor",
+            "sync": True,
+            "dry_run": False,
+            "strict_ready_only": False,
+            "resume_only": False,
+            "max_snapshots": 20,
+            "min_snapshots": 6,
+            "max_resume_passes": 2,
+            "enrichment_limit": 25,
+            "resume_stale_running_seconds": 120,
+            "expected_post_count": 13,
+            "expected_labels": "1h,2h",
+            "require_coverage_complete": False,
+            "min_ledger_usable_rate": 0.0,
+            "min_final_usable_rate": 0.0,
+            "min_completion_rate": 0.0,
+            "min_expected_post_coverage_rate": 0.0,
+            "min_expected_label_coverage_rate": 0.0,
+        },
+    )()
+    completion = {
+        "post_count": 3,
+        "open_task_count": 1,
+        "summary_open_task_count": 1,
+        "auto_open_task_count": 0,
+        "requires_codex_summary_count": 1,
+        "has_summary_only_work": True,
+        "has_auto_enrichment_work": True,
+        "coverage_incomplete_count": 1,
+        "open_task_stage_counts": {"summary": 1},
+        "missing_stage_counts": {"coverage": 1, "summary": 1},
+    }
+    discover = {"source": "discover", "complete": False, "incomplete": True, "reasons": ["coverage_incomplete"]}
+
+    commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260603"],
+        run_status="coverage_incomplete",
+        completion=completion,
+        discover_coverage=discover,
+    )
+
+    assert run_account_job.has_pre_summary_auto_enrichment_work(completion) is False
+    assert [item["reason"] for item in commands] == [
+        "coverage_incomplete",
+        "needs_codex_summary",
+        "needs_codex_summary",
+    ]
+    assert "export_summary_requests.py" in commands[1]["command"]
+    assert "--date 260603" in commands[1]["command"]
+    assert "run_account_job.py" in commands[2]["command"]
+    assert "--resume-only" in commands[2]["command"]
+    assert "--force-recover-running" in commands[2]["command"]
+
+
+def assert_run_account_job_waits_for_material_before_summary_command() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import run_account_job
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": "config/settings.yaml",
+            "account_url": "https://www.facebook.com/material-first",
+            "account_name": "Material First",
+            "account_type": "competitor",
+            "sync": True,
+            "dry_run": False,
+            "strict_ready_only": False,
+            "resume_only": False,
+            "max_snapshots": 20,
+            "min_snapshots": 6,
+            "max_resume_passes": 2,
+            "enrichment_limit": 25,
+            "resume_stale_running_seconds": 120,
+            "expected_post_count": 0,
+            "expected_labels": "",
+            "require_coverage_complete": False,
+            "min_ledger_usable_rate": 0.0,
+            "min_final_usable_rate": 0.0,
+            "min_completion_rate": 0.0,
+            "min_expected_post_coverage_rate": 0.0,
+            "min_expected_label_coverage_rate": 0.0,
+        },
+    )()
+    completion = {
+        "post_count": 2,
+        "open_task_count": 2,
+        "summary_open_task_count": 1,
+        "auto_open_task_count": 1,
+        "requires_codex_summary_count": 1,
+        "has_summary_only_work": False,
+        "has_auto_enrichment_work": True,
+        "open_task_stage_counts": {"article_material": 1, "summary": 1},
+        "missing_stage_counts": {"article_material": 1, "summary": 1},
+    }
+
+    commands = run_account_job.next_commands_for_status(
+        args=args,
+        target_dates=["260603"],
+        run_status="incomplete_pending_tasks",
+        completion=completion,
+        discover_coverage={"source": "not_run", "complete": True, "incomplete": False, "reasons": []},
+    )
+
+    assert run_account_job.has_pre_summary_auto_enrichment_work(completion) is True
+    assert [item["reason"] for item in commands] == ["pending_enrichment"]
+    assert "export_summary_requests.py" not in commands[0]["command"]
+
+
 def assert_run_account_job_skips_worker_for_summary_only_completion() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     import run_account_job
@@ -13165,6 +13287,8 @@ def main() -> int:
         assert_run_account_job_reports_unsynced_local_completion_command()
         assert_run_account_job_reports_worker_retry_later()
         assert_run_account_job_summary_only_next_command_exports_requests()
+        assert_run_account_job_summary_commands_survive_coverage_gap()
+        assert_run_account_job_waits_for_material_before_summary_command()
         assert_run_account_job_skips_worker_for_summary_only_completion()
         assert_run_account_job_opencli_requirement_merges_stage_sources()
         assert_run_account_job_worker_pass_surfaces_summary_required()

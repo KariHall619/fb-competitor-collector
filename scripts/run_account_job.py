@@ -892,7 +892,6 @@ def next_commands_for_status(
     append_quality_threshold_args(base, args)
     commands: list[dict[str, Any]] = []
     primary_date = target_dates[-1] if target_dates else ""
-    has_auto_work = has_auto_enrichment_work(completion)
     hard_blockers = {"blocked_opencli", "blocked_auth", "human_intervention_required", "worker_failed"}
     if run_status not in hard_blockers and (
         run_status in {"incomplete_pending_tasks", "synced_ledger_incomplete"}
@@ -987,7 +986,9 @@ def next_commands_for_status(
             }
         )
     if run_status == "needs_codex_summary" or (
-        run_status != "summary_auto_apply_failed" and completion.get("requires_codex_summary_count") and not has_auto_work
+        run_status != "summary_auto_apply_failed"
+        and completion.get("requires_codex_summary_count")
+        and not has_pre_summary_auto_enrichment_work(completion)
     ):
         output = summary_requests_output_path_for_dates(target_dates)
         command = [
