@@ -727,7 +727,7 @@ def account_open_blocker(account: dict[str, Any], open_result: dict[str, Any], a
             {
                 "reason": "blocked_opencli",
                 "description": "OpenCLI Browser Bridge 恢复后重新运行批量账号作业。",
-                "command": "python3 scripts/check_env.py --config config/settings.yaml --fix-opencli",
+                "command": command_text(["python3", "scripts/check_env.py", "--config", args.config, "--fix-opencli"]),
             },
             {
                 "reason": "rerun_batch_after_opencli",
@@ -1181,13 +1181,18 @@ def main() -> int:
                             "error": str(exc),
                         },
                         "next_actions": ["完成飞书用户授权后，重新运行同一批量账号作业。"],
-                        "next_commands": [
-                            {
-                                "reason": "blocked_auth",
-                                "description": "完成飞书用户授权后，按原批量范围继续采集、补抓和同步。",
-                                "command": retry_command,
-                            }
-                        ],
+                    "next_commands": [
+                        {
+                            "reason": "blocked_auth",
+                            "description": "先检查并尝试修复飞书用户授权。",
+                            "command": command_text(["python3", "scripts/check_env.py", "--config", args.config, "--fix-auth"]),
+                        },
+                        {
+                            "reason": "rerun_batch_after_auth",
+                            "description": "飞书用户授权恢复后，按原批量范围继续采集、补抓和同步。",
+                            "command": retry_command,
+                        }
+                    ],
                     },
                     ensure_ascii=False,
                     indent=2,

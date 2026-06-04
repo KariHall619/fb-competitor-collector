@@ -10591,6 +10591,8 @@ sys.exit(0)
         "rerun_batch_after_opencli",
         "resume_after_opencli",
     ]
+    opencli_fix = shlex.split(data["next_commands"][0]["command"])
+    assert opencli_fix == ["python3", "scripts/check_env.py", "--config", str(config), "--fix-opencli"]
     batch_rerun = shlex.split(data["next_commands"][1]["command"])
     assert "scripts/run_accounts_job.py" in batch_rerun
     assert batch_rerun[batch_rerun.index("--config") + 1] == str(config)
@@ -11395,7 +11397,10 @@ exit 0
     assert data["complete"] is False
     assert data["feishu_auth_preflight"]["stage"] == "feishu_auth_preflight"
     assert data["next_commands"][0]["reason"] == "blocked_auth"
-    rerun = shlex.split(data["next_commands"][0]["command"])
+    auth_fix = shlex.split(data["next_commands"][0]["command"])
+    assert auth_fix == ["python3", "scripts/check_env.py", "--config", str(config), "--fix-auth"]
+    assert data["next_commands"][1]["reason"] == "rerun_batch_after_auth"
+    rerun = shlex.split(data["next_commands"][1]["command"])
     assert "scripts/run_accounts_job.py" in rerun
     assert rerun[rerun.index("--config") + 1] == str(config)
     assert rerun[rerun.index("--target-date") + 1] == "260603"
