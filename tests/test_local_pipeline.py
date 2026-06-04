@@ -5184,6 +5184,44 @@ def assert_enrichment_queue_limit_keeps_article_material_moving(tmp_path: Path) 
     assert "article_material" in stages
 
 
+def assert_query_posts_matches_account_url_variants(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, pending_enrichment_tasks_for_posts, query_posts, upsert_post
+
+    conn = connect(tmp_path / "account-url-variant-scope.sqlite")
+    post = normalize_post(
+        {
+            "account_name": "Scope Variant",
+            "account_url": "https://www.facebook.com/scopevariant",
+            "account_type": "competitor",
+            "post_url": "https://www.facebook.com/scopevariant/posts/one",
+            "relative_time_text": "1h",
+            "article_url": "https://story.example/scope",
+            "crawled_at": "2026-06-03T12:00:00",
+        },
+        {"source_skill": "test"},
+    )
+    upsert_post(conn, post)
+    stored = query_posts(
+        conn,
+        date="260603",
+        include_unknown_date=True,
+        account_url="https://facebook.com/scopevariant/?utm_source=operator",
+        account_type="competitor",
+    )
+    assert len(stored) == 1
+    assert stored[0]["account_url"] == "https://www.facebook.com/scopevariant"
+    enqueue_enrichment_tasks_for_posts(conn, stored)
+    tasks = pending_enrichment_tasks_for_posts(
+        conn,
+        stored,
+        stages=["detail_time", "post_type", "article_material"],
+        limit=10,
+    )
+    assert sorted(task["stage"] for task in tasks) == ["article_material", "detail_time", "post_type"]
+
+
 def assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path: Path) -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
     from models import normalize_post
@@ -13058,6 +13096,7 @@ def main() -> int:
         assert_article_material_extractor(tmp_path)
         assert_partial_review_status_and_task_queue(tmp_path)
         assert_enrichment_queue_limit_keeps_article_material_moving(tmp_path)
+        assert_query_posts_matches_account_url_variants(tmp_path)
         assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path)
         assert_detail_results_match_facebook_url_variants(tmp_path)
         assert_enrichment_worker_requeues_opencli_session_busy(tmp_path)

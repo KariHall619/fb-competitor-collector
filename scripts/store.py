@@ -8,10 +8,11 @@ from pathlib import Path
 import json
 from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 from field_audit import audit_fields_for_storage
 from field_audit import is_system_audit_marker
-from models import has_qualified_comment_lead_link
+from models import clean_post_url, has_qualified_comment_lead_link
 from pipeline_status import crawl_status_for, missing_enrichment_stages, output_status_for
 from story_summary_policy import has_valid_story_summary
 from value_utils import parse_bool
@@ -915,6 +916,34 @@ def log_error(conn: sqlite3.Connection, payload: dict[str, Any], stage: str, mes
     conn.commit()
 
 
+def account_url_variants(value: Any) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    variants: list[str] = []
+
+    def add(item: str) -> None:
+        normalized = item.strip()
+        if normalized and normalized not in variants:
+            variants.append(normalized)
+
+    for candidate in (text, clean_post_url(text)):
+        if not candidate:
+            continue
+        add(candidate)
+        parsed = urlparse(candidate)
+        netloc = parsed.netloc.lower()
+        path = parsed.path.rstrip("/")
+        query = parsed.query
+        if netloc.startswith("www."):
+            add(urlunparse((parsed.scheme or "https", netloc[4:], path, "", query, "")))
+        elif netloc == "facebook.com":
+            add(urlunparse((parsed.scheme or "https", f"www.{netloc}", path, "", query, "")))
+        if query:
+            add(urlunparse((parsed.scheme or "https", netloc or "facebook.com", path, "", "", "")))
+    return variants
+
+
 def query_posts(
     conn: sqlite3.Connection,
     *,
@@ -954,8 +983,10 @@ def query_posts(
         clauses.append("account_name = ?")
         params.append(account_name)
     if account_url:
-        clauses.append("account_url = ?")
-        params.append(account_url)
+        variants = account_url_variants(account_url)
+        placeholders = ", ".join("?" for _ in variants)
+        clauses.append(f"account_url IN ({placeholders})")
+        params.extend(variants)
     if account_type:
         clauses.append("account_type = ?")
         params.append(account_type)
