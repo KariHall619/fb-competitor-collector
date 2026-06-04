@@ -824,6 +824,10 @@ def assert_opencli_adapter_scaffold_contract() -> None:
     assert "visitor_preview" in script_text
     assert "capture_complete" in script_text
     assert "coverage_incomplete" in script_text
+    assert "default: 520" in script_text
+    assert "older_than_time_window" in script_text
+    assert "{ name: 'posted-after'" in script_text
+    assert "{ name: 'posted-before'" in script_text
 
 
 def assert_opencli_adapter_install_is_real_opencli_home() -> None:
@@ -4937,6 +4941,9 @@ def assert_opencli_extract_has_under_capture_guards() -> None:
     assert "已达到最大滚动快照数但最后一屏仍有新增候选" in script_text
     assert "target.scrollBy(0, delta)" in script_text
     assert "target: target === document.scrollingElement" in script_text
+    assert "const scrollPixels = intArg(kwargs['scroll-pixels'], 520)" in script_text
+    assert "const viewportStep = Math.max(320, Math.floor((window.innerHeight || 800) * 0.55))" in script_text
+    assert "oldPostWindowCount >= oldPostStopSnapshots" in script_text
 
 
 def assert_opencli_extract_stable_end_is_complete_coverage() -> None:
@@ -5022,8 +5029,16 @@ def assert_run_account_job_passes_posted_at_window_to_prepare() -> None:
     assert 'parser.add_argument("--posted-before"' in script_text
     assert 'prepare_command.extend(["--posted-after", args.posted_after])' in script_text
     assert 'prepare_command.extend(["--posted-before", args.posted_before])' in script_text
+    assert 'command.extend(["--posted-after", posted_after])' in script_text
+    assert 'command.extend(["--posted-before", posted_before])' in script_text
+    assert '"--scroll-pixels"' in script_text
     assert 'parser.add_argument("--max-snapshots", type=int, default=48)' in script_text
     assert 'parser.add_argument("--min-snapshots", type=int, default=10)' in script_text
+    assert 'parser.add_argument("--scroll-pixels", type=int, default=520)' in script_text
+    pipeline_text = (ROOT / "scripts" / "run_capture_pipeline.py").read_text(encoding="utf-8")
+    assert 'parser.add_argument("--scroll-pixels", type=int, default=520)' in pipeline_text
+    assert 'parser.add_argument("--posted-after", default="")' in pipeline_text
+    assert 'prepare_command.extend(["--posted-after", args.posted_after])' in pipeline_text
 
 
 def assert_detail_time_helpers_parse_exact_facebook_time() -> None:
@@ -8349,6 +8364,8 @@ print(json.dumps(payload, ensure_ascii=False))
                 "44",
                 "--min-snapshots",
                 "9",
+                "--posted-after",
+                "2026-06-03 12:00",
             ],
             env=env,
         )
@@ -8361,6 +8378,12 @@ print(json.dumps(payload, ensure_ascii=False))
     assert argv[argv.index("--max-snapshots") + 1] == "44"
     assert "--min-snapshots" in argv
     assert argv[argv.index("--min-snapshots") + 1] == "9"
+    assert "--scroll-pixels" in argv
+    assert argv[argv.index("--scroll-pixels") + 1] == "520"
+    assert "--target-date" in argv
+    assert argv[argv.index("--target-date") + 1] == "260603"
+    assert "--posted-after" in argv
+    assert argv[argv.index("--posted-after") + 1] == "2026-06-03 12:00"
 
 
 def assert_run_account_job_auto_retries_snapshot_cap(tmp_path: Path) -> None:

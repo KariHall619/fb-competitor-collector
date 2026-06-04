@@ -221,6 +221,10 @@ def discover_homepage_once(
         str(max_snapshots),
         "--min-snapshots",
         str(min_snapshots),
+        "--target-date",
+        str(normalize_date_text(args.target_date) if args.target_date else ""),
+        "--scroll-pixels",
+        str(getattr(args, "scroll_pixels", 520)),
         "--window",
         "background",
         "--site-session",
@@ -228,6 +232,12 @@ def discover_homepage_once(
         "-f",
         "json",
     ]
+    posted_after = getattr(args, "posted_after", "")
+    posted_before = getattr(args, "posted_before", "")
+    if posted_after:
+        command.extend(["--posted-after", posted_after])
+    if posted_before:
+        command.extend(["--posted-before", posted_before])
     discover = run_command(command)
     payload = parse_json_output(discover)
     payload["returncode"] = discover.returncode
@@ -1898,6 +1908,7 @@ def main() -> int:
     parser.add_argument("--max-text", type=int, default=1500)
     parser.add_argument("--max-snapshots", type=int, default=48)
     parser.add_argument("--min-snapshots", type=int, default=10)
+    parser.add_argument("--scroll-pixels", type=int, default=520)
     parser.add_argument("--expected-post-count", type=int, default=0)
     parser.add_argument("--expected-labels", default="", help="Comma-separated visible relative-time labels from the operator checklist.")
     parser.add_argument(

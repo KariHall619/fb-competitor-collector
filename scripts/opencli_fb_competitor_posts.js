@@ -33,6 +33,57 @@ function intArg(value, fallback) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
+function dateKeyToDate(value) {
+  const text = clean(value);
+  const match = text.match(/^(\d{2})(\d{2})(\d{2})$/);
+  if (!match) return null;
+  const [, yy, mm, dd] = match;
+  const year = 2000 + Number(yy);
+  const month = Number(mm);
+  const day = Number(dd);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
+}
+
+function parsePostTime(value) {
+  const text = clean(value);
+  if (!text) return null;
+  let match = text.match(/^(20\d\d)年(\d{1,2})月(\d{1,2})日\s+(\d{1,2}):(\d{2})$/);
+  if (match) {
+    const [, year, month, day, hour, minute] = match;
+    return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), 0));
+  }
+  match = text.match(/^(20\d\d)-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})$/);
+  if (match) {
+    const [, year, month, day, hour, minute] = match;
+    return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), 0));
+  }
+  return null;
+}
+
+function discoveryTimeWindow(kwargs) {
+  const targetDate = dateKeyToDate(kwargs['target-date']);
+  const postedAfter = parsePostTime(kwargs['posted-after']);
+  const postedBefore = parsePostTime(kwargs['posted-before']);
+  let lower = postedAfter;
+  let upper = postedBefore;
+  if (targetDate) {
+    const nextDate = new Date(targetDate.getTime() + 24 * 60 * 60 * 1000);
+    lower = lower && lower > targetDate ? lower : targetDate;
+    upper = upper && upper < nextDate ? upper : nextDate;
+  }
+  return { lower, upper, enabled: Boolean(lower || upper) };
+}
+
+function postTimeState(post, window) {
+  if (!window?.enabled) return 'unknown';
+  const parsed = parsePostTime(post?.posted_at);
+  if (!parsed) return 'unknown';
+  if (window.lower && parsed < window.lower) return 'before';
+  if (window.upper && parsed >= window.upper) return 'after';
+  return 'inside';
+}
+
 function boolArg(value) {
   if (value === true) return true;
   return /^(1|true|yes)$/i.test(String(value || ''));
@@ -216,7 +267,9 @@ async function scrollToTop(page) {
 
 async function scrollDown(page, pixels) {
   return readPage(page, `(() => {
-    const delta = ${Number(pixels) || 1400};
+    const requested = ${Number(pixels) || 520};
+    const viewportStep = Math.max(320, Math.floor((window.innerHeight || 800) * 0.55));
+    const delta = Math.min(requested, viewportStep);
     const visibleEnough = (el) => {
       const rect = el.getBoundingClientRect?.();
       if (!rect) return false;
@@ -269,8 +322,10 @@ async function discover(page, kwargs) {
   const maxSnapshots = intArg(kwargs['max-snapshots'], 32);
   const minSnapshots = Math.min(intArg(kwargs['min-snapshots'], 6), maxSnapshots);
   const stableSnapshots = intArg(kwargs['stable-snapshots'], 3);
-  const scrollPixels = intArg(kwargs['scroll-pixels'], 1400);
+  const scrollPixels = intArg(kwargs['scroll-pixels'], 520);
   const maxText = intArg(kwargs['max-text'], 1500);
+  const timeWindow = discoveryTimeWindow(kwargs);
+  const oldPostStopSnapshots = intArg(kwargs['old-post-stop-snapshots'], 2);
   await page.goto(accountUrl, { settleMs: 4000 });
   await scrollToTop(page);
 
@@ -282,6 +337,7 @@ async function discover(page, kwargs) {
   let previousSeenCount = 0;
   let noMovementCount = 0;
   let previousScrollHeight = 0;
+  let oldPostWindowCount = 0;
   for (let index = 0; index < maxSnapshots; index += 1) {
     const extraction = await readPage(page, browserExpression(maxText));
     if (extraction.capture_blocked) {
@@ -298,8 +354,13 @@ async function discover(page, kwargs) {
       break;
     }
     let newPosts = 0;
+    let oldWindowPosts = 0;
+    let insideWindowPosts = 0;
     for (const candidate of extraction.candidates || []) {
       if (!validCandidate(candidate)) continue;
+      const timeState = postTimeState(candidate, timeWindow);
+      if (timeState === 'before') oldWindowPosts += 1;
+      if (timeState === 'inside') insideWindowPosts += 1;
       const key = postKey(candidate);
       if (!key || seen.has(key)) continue;
       seen.set(key, candidate);
@@ -312,6 +373,8 @@ async function discover(page, kwargs) {
       raw_candidate_count: extraction.real_post_count || 0,
       new_posts: newPosts,
       seen_posts: seen.size,
+      old_window_posts: oldWindowPosts,
+      inside_window_posts: insideWindowPosts,
       visible_time_texts: (extraction.candidates || [])
         .flatMap((candidate) => candidate.time_texts || [candidate.post_time_text || ''])
         .filter(Boolean)
@@ -319,6 +382,13 @@ async function discover(page, kwargs) {
     });
     stable = seen.size === previousSeenCount ? stable + 1 : 0;
     previousSeenCount = seen.size;
+    oldPostWindowCount = timeWindow.enabled && oldWindowPosts > 0 && insideWindowPosts === 0
+      ? oldPostWindowCount + 1
+      : 0;
+    if (oldPostWindowCount >= oldPostStopSnapshots) {
+      stopReason = 'older_than_time_window';
+      break;
+    }
     if (snapshots.length >= minSnapshots && stable >= stableSnapshots && noMovementCount >= 1) {
       stopReason = 'stable_no_new_posts';
       break;
@@ -360,6 +430,7 @@ async function discover(page, kwargs) {
       snapshot_count: snapshots.length,
       stop_reason: stopReason,
       stable_snapshot_count: stable,
+      old_post_window_snapshot_count: oldPostWindowCount,
       no_movement_snapshot_count: noMovementCount,
       coverage_blocked: coverage.coverage_blocked,
       coverage_incomplete: coverage.coverage_incomplete,
@@ -649,7 +720,10 @@ cli({
     { name: 'max-snapshots', type: 'int', default: 32, help: 'Maximum homepage snapshots' },
     { name: 'min-snapshots', type: 'int', default: 6, help: 'Minimum homepage snapshots before stable stop' },
     { name: 'stable-snapshots', type: 'int', default: 3, help: 'Stable snapshot count before stopping discovery' },
-    { name: 'scroll-pixels', type: 'int', default: 1400, help: 'Pixels to scroll between discovery snapshots' },
+    { name: 'scroll-pixels', type: 'int', default: 520, help: 'Pixels to scroll between discovery snapshots' },
+    { name: 'posted-after', help: 'Discovery time-window lower bound, YYYY-MM-DD HH:MM' },
+    { name: 'posted-before', help: 'Discovery time-window upper bound, YYYY-MM-DD HH:MM' },
+    { name: 'old-post-stop-snapshots', type: 'int', default: 2, help: 'Stop discovery after this many snapshots are older than the requested time window' },
     { name: 'skip-time', type: 'bool', default: false, help: 'Skip exact time enrichment' },
     { name: 'skip-lead-link', type: 'bool', default: false, help: 'Skip lead link enrichment' },
     { name: 'skip-engagement', type: 'bool', default: false, help: 'Skip engagement enrichment' },

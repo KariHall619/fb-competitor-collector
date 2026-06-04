@@ -215,6 +215,9 @@ def main() -> int:
     parser.add_argument("--max-text", default="1500")
     parser.add_argument("--max-snapshots", type=int, default=32)
     parser.add_argument("--min-snapshots", type=int, default=6)
+    parser.add_argument("--scroll-pixels", type=int, default=520)
+    parser.add_argument("--posted-after", default="")
+    parser.add_argument("--posted-before", default="")
     parser.add_argument("--max-resume-passes", type=int, default=8)
     parser.add_argument("--enrichment-limit", type=int, default=50)
     parser.add_argument("--resume-stale-running-seconds", type=int, default=1800)
@@ -370,24 +373,27 @@ def main() -> int:
         raw_path.write_text(json.dumps(discover_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
         prepare_started = time.monotonic()
-        prepare = run_command(
-            [
-                "python3",
-                "scripts/prepare_capture_result.py",
-                "--input",
-                str(raw_path),
-                "--output",
-                str(prepared_path),
-                "--target-date",
-                args.target_date,
-                "--account-url",
-                args.account_url,
-                "--account-name",
-                args.account_name,
-                "--account-type",
-                args.account_type,
-            ]
-        )
+        prepare_command = [
+            "python3",
+            "scripts/prepare_capture_result.py",
+            "--input",
+            str(raw_path),
+            "--output",
+            str(prepared_path),
+            "--target-date",
+            args.target_date,
+            "--account-url",
+            args.account_url,
+            "--account-name",
+            args.account_name,
+            "--account-type",
+            args.account_type,
+        ]
+        if args.posted_after:
+            prepare_command.extend(["--posted-after", args.posted_after])
+        if args.posted_before:
+            prepare_command.extend(["--posted-before", args.posted_before])
+        prepare = run_command(prepare_command)
         if prepare.returncode != 0:
             discover_coverage = discover_coverage_summary(discover_report_for_quality(discover_payload))
             print(
