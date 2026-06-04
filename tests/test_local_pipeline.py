@@ -5221,6 +5221,68 @@ def assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path: Path) -> None
     assert len(batches[0]) == 1
 
 
+def assert_detail_results_match_facebook_url_variants(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from models import normalize_post
+    from store import connect, enqueue_enrichment_tasks_for_posts, pending_enrichment_tasks, row_for_post, upsert_post
+    import enrichment_worker
+
+    conn = connect(tmp_path / "detail-url-variant.sqlite")
+    post = normalize_post(
+        {
+            "account_name": "Variant Page",
+            "account_url": "https://www.facebook.com/variantpage",
+            "post_url": "https://www.facebook.com/photo.php?fbid=1553393959512631&set=p.1553393959512631&type=3",
+            "relative_time_text": "1h",
+            "crawled_at": "2026-06-03T12:00:00",
+        },
+        {"source_skill": "test"},
+    )
+    upsert_post(conn, post)
+    stored_before = row_for_post(conn, post) or post
+    enqueue_enrichment_tasks_for_posts(conn, [stored_before])
+    detail_tasks = pending_enrichment_tasks(
+        conn,
+        stages=["detail_time", "engagement", "post_type"],
+        limit=20,
+    )
+    for task in detail_tasks:
+        conn.execute("UPDATE enrichment_tasks SET status = 'running' WHERE id = ?", (task["id"],))
+    conn.commit()
+
+    enrichment_worker.apply_detail_results(
+        conn,
+        [stored_before],
+        [
+            {
+                "post_url": "https://www.facebook.com/variantpage/photos/a.123/1553393959512631/?type=3",
+                "posted_at": "2026年6月3日 11:30",
+                "time_confirmed": True,
+                "time_source": "dom_aria_label",
+                "post_type": "图文",
+                "likes": 18,
+                "comments": 4,
+                "shares": 2,
+                "engagement_confidence": "anchored_main_post",
+            }
+        ],
+        config={"quality_audit": {"required_post_types": ["图文", "视频", "仅图片", "仅文字"]}},
+    )
+    stored_after = row_for_post(conn, stored_before)
+    assert stored_after is not None
+    assert stored_after["canonical_post_url"] == stored_before["canonical_post_url"]
+    assert stored_after["post_url"] == stored_before["post_url"]
+    assert stored_after["posted_at"] == "2026年6月3日 11:30"
+    assert stored_after["time_confirmed"] == 1
+    assert stored_after["post_type"] == "图文"
+    assert stored_after["likes"] == 18
+    assert stored_after["comments"] == 4
+    assert stored_after["shares"] == 2
+    assert stored_after["account_name"] == "Variant Page"
+    for stage in ("detail_time", "engagement", "post_type"):
+        assert enrichment_worker.detail_stage_satisfied(stored_after, stage) is True
+
+
 def assert_enrichment_worker_requeues_opencli_session_busy(tmp_path: Path) -> None:
     config = tmp_path / "settings_worker_session_busy.yaml"
     db_path = tmp_path / "worker-session-busy.sqlite"
@@ -12997,6 +13059,7 @@ def main() -> int:
         assert_partial_review_status_and_task_queue(tmp_path)
         assert_enrichment_queue_limit_keeps_article_material_moving(tmp_path)
         assert_enrichment_worker_groups_detail_tasks_by_post(tmp_path)
+        assert_detail_results_match_facebook_url_variants(tmp_path)
         assert_enrichment_worker_requeues_opencli_session_busy(tmp_path)
         assert_enrichment_worker_lead_stage_requires_external_landing_url()
         assert_stale_running_enrichment_tasks_are_recovered(tmp_path)

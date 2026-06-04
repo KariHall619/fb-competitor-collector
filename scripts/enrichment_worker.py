@@ -16,7 +16,7 @@ from typing import Any
 from config_loader import deep_get, load_config
 from field_audit import audit_post_fields
 from fetch_article_material import extract_material
-from models import has_qualified_comment_lead_link
+from models import canonicalize_post_url, facebook_content_key, has_qualified_comment_lead_link
 from pipeline_status import crawl_status_for, has_confirmed_time, output_status_for
 from story_summary_policy import has_valid_story_summary, story_summary_errors
 from store import (
@@ -142,16 +142,42 @@ def apply_detail_results(
     enriched_posts: list[dict[str, Any]],
     config: dict[str, Any] | None = None,
 ) -> None:
-    by_key = {
-        (post.get("canonical_post_url") or post.get("post_url")): post
-        for post in enriched_posts
-        if post.get("post_url")
-    }
+    def detail_match_keys(post: dict[str, Any]) -> list[str]:
+        keys: list[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            for key in (text, canonicalize_post_url(text)):
+                if key and key not in keys:
+                    keys.append(key)
+            fb_key = facebook_content_key(text)
+            if fb_key and f"fbkey:{fb_key}" not in keys:
+                keys.append(f"fbkey:{fb_key}")
+
+        for field in ("canonical_post_url", "post_url", "parent_post_url", "raw_fb_url"):
+            add(post.get(field))
+        return keys
+
+    by_key: dict[str, dict[str, Any]] = {}
+    for enriched in enriched_posts:
+        for key in detail_match_keys(enriched):
+            by_key.setdefault(key, enriched)
     for post in original_posts:
-        key = post.get("canonical_post_url") or post.get("post_url")
-        enriched = by_key.get(key)
+        enriched = next((by_key[key] for key in detail_match_keys(post) if key in by_key), None)
         if not enriched:
             continue
+        enriched = {
+            **post,
+            **enriched,
+            "canonical_post_url": post.get("canonical_post_url") or enriched.get("canonical_post_url"),
+            "post_url": post.get("post_url") or enriched.get("post_url"),
+            "account_name": post.get("account_name") or enriched.get("account_name"),
+            "account_url": post.get("account_url") or enriched.get("account_url"),
+            "account_type": post.get("account_type") or enriched.get("account_type"),
+            "posted_date": enriched.get("posted_date") or post.get("posted_date"),
+        }
         enriched["output_status"] = output_status_for(enriched, config)
         enriched["crawl_status"] = crawl_status_for(enriched, config)
         upsert_post(conn, enriched, config)
