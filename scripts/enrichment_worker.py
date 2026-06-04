@@ -162,6 +162,8 @@ def detail_args_for_stages(stages: set[str]) -> list[str]:
     args: list[str] = []
     if "detail_time" not in stages:
         args.append("--skip-time")
+    else:
+        args.append("--force-time")
     if "lead_link" not in stages:
         args.append("--skip-lead-link")
     if "engagement" not in stages:

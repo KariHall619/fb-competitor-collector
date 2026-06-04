@@ -630,7 +630,7 @@ if (candidate.lead_link_source !== 'comment_reply' || !candidate.lead_url_raw.in
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def assert_dom_extractor_strips_comment_id_from_candidate_post_url() -> None:
+def assert_dom_extractor_excludes_comment_only_permalink_candidate() -> None:
     script = """
 const { browserExpression } = require('./scripts/fb_dom_extractors');
 class Node {
@@ -703,18 +703,82 @@ global.document = {
 };
 global.location = new URL('https://www.facebook.com/healingjourneys.mani');
 const result = eval(browserExpression(1000));
-if (result.real_post_count !== 1) {
+if (result.real_post_count !== 0 || result.candidates.length !== 0) {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(1);
+}
+"""
+    result = run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def assert_dom_extractor_keeps_photo_chrome_as_media_fallback_only() -> None:
+    script = """
+const { browserExpression } = require('./scripts/fb_dom_extractors');
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() { return this.innerText; }
+  get href() {
+    if (!this.attrs.href) return '';
+    return new URL(this.attrs.href, global.location.href).href;
+  }
+  getAttribute(name) { return this.attrs[name] || ''; }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a[href]') return node.tagName === 'A' && !!node.attrs.href;
+      if (current === 'h1') return node.tagName === 'H1';
+      if (current === 'h2') return node.tagName === 'H2';
+      if (current === 'article') return node.tagName === 'ARTICLE';
+      if (current === 'div[role="article"]') return node.tagName === 'DIV' && node.attrs.role === 'article';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+const chrome = new Node('div', { role: 'article' }, [
+  new Node('span', {}, [], 'Facebook'),
+  new Node('span', {}, [], 'Facebook'),
+  new Node('a', { href: '/photo/?fbid=1596682352022768&set=a.863890281968649&__cft__[0]=abc' }, [], 'Photo'),
+  new Node('span', {}, [], 'Healing Journeys'),
+  new Node('p', {}, [], 'A Millionaire Stopped for a Girl With a Red Backpack and found a secret.'),
+  new Node('a', { href: 'https://windowarab.com/a-millionaire-stopped-for-a-girl/' }, [], 'Read more')
+]);
+const body = new Node('body', {}, [
+  new Node('h1', {}, [], 'Healing Journeys'),
+  chrome
+]);
+global.document = {
+  title: 'Healing Journeys | Facebook',
+  body,
+  querySelectorAll: (selector) => body.querySelectorAll(selector)
+};
+global.location = new URL('https://www.facebook.com/healingjourneys.mani');
+const result = eval(browserExpression(1000));
+if (result.real_post_count !== 1 || result.candidates.length !== 1) {
   console.error(JSON.stringify(result, null, 2));
   process.exit(1);
 }
 const candidate = result.candidates[0];
-if (candidate.post_url.includes('comment_id=') || candidate.post_url.includes('__cft__')) {
+if (candidate.source_split !== 'media_fallback' || candidate.post_time_text || candidate.lead_link_status === 'qualified') {
   console.error(JSON.stringify(candidate, null, 2));
   process.exit(2);
-}
-if (!candidate.raw_fb_url.includes('comment_id=')) {
-  console.error(JSON.stringify(candidate, null, 2));
-  process.exit(3);
 }
 """
     result = run(["node", "-e", script])
@@ -5119,6 +5183,74 @@ if (results.length !== 1 || !results[0].href.includes('kaylestore.net/i-took-car
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_detail_enrichment_rejects_media_resource_comment_links() -> None:
+    script = """
+import detailExtractors from './scripts/fb_detail_extractors.js';
+const { leadLinkScanBrowserExpression } = detailExtractors;
+
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() { return this.innerText; }
+  get href() { return this.attrs.href ? new URL(this.attrs.href, global.location.href).href : ''; }
+  getAttribute(name) { return this.attrs[name] || ''; }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (selector.includes('[role="article"]') && node.attrs.role === 'article') return node;
+      if (selector.includes('[role="complementary"]') && node.attrs.role === 'complementary') return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a[href]') return node.tagName === 'A' && !!node.attrs.href;
+      if (current === '[role="article"]') return node.attrs.role === 'article';
+      if (current === 'div[aria-label]') return node.tagName === 'DIV' && !!node.attrs['aria-label'];
+      if (current === 'li') return node.tagName === 'LI';
+      if (current === 'div') return node.tagName === 'DIV';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+const mediaOnly = new Node('div', { role: 'article' }, [
+  new Node('span', {}, [], 'Healing Journeys'),
+  new Node('span', {}, [], 'Sticker'),
+  new Node('a', { href: 'https://media2.giphy.com/media/v1/test/giphy.gif' }, [], 'GIPHY'),
+  new Node('a', { href: '/healingjourneys.mani/posts/pfbid?comment_id=123' }, [], '48m'),
+  new Node('span', {}, [], 'Reply')
+]);
+const body = new Node('body', {}, [mediaOnly]);
+global.document = { querySelectorAll: (selector) => body.querySelectorAll(selector) };
+global.location = new URL('https://www.facebook.com/healingjourneys.mani/posts/pfbid');
+const results = eval(leadLinkScanBrowserExpression('Healing Journeys', 'default'));
+if (results.length !== 0) {
+  console.error(JSON.stringify(results, null, 2));
+  process.exit(1);
+}
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_detail_enrichment_detects_post_cta_watch_more_links() -> None:
     script = """
 import detailExtractors from './scripts/fb_detail_extractors.js';
@@ -5708,6 +5840,10 @@ def assert_opencli_extract_helpers_dedupe_homepage_candidates() -> None:
     assert "photo:" in adapter_text
     assert "video:" in adapter_text
 
+    current_tab_text = (ROOT / "scripts" / "opencli_extract_current_tab.mjs").read_text(encoding="utf-8")
+    assert 'candidate.source_split === "media_fallback"' in current_tab_text
+    assert 'candidate.selected_post_link_kind === "media"' in current_tab_text
+
 
 def assert_opencli_extract_has_under_capture_guards() -> None:
     script_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
@@ -6183,6 +6319,85 @@ if (!target || target.text !== '15h' || target.comment_link || !target.target_ma
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_detail_time_target_ignores_comment_permalink_time() -> None:
+    script = """
+const { headerTimeTargetExpression } = require('./scripts/fb_detail_extractors.js');
+
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '', rect = {}) {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.rect = { x: 0, y: 120, width: 22, height: 14, ...rect };
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() { return this.innerText; }
+  get href() {
+    return this.attrs.href ? new URL(this.attrs.href, global.location.href).href : '';
+  }
+  getAttribute(name) { return this.attrs[name] || ''; }
+  getBoundingClientRect() { return this.rect; }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (selector.includes('[role="article"]') && node.attrs.role === 'article') return node;
+      if (selector.includes('[role="navigation"]') && node.attrs.role === 'navigation') return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a') return node.tagName === 'A';
+      if (current === 'abbr') return node.tagName === 'ABBR';
+      if (current === 'span') return node.tagName === 'SPAN';
+      if (current === '[role="article"]') return node.attrs.role === 'article';
+      if (current === 'article') return node.tagName === 'ARTICLE';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+
+const targetUrl = 'https://www.facebook.com/healingjourneys.mani/posts/pfbid-main';
+const commentOnly = new Node('div', { role: 'article' }, [
+  new Node('span', {}, [], 'Author'),
+  new Node('strong', {}, [], 'Healing Journeys'),
+  new Node('a', { href: '/healingjourneys.mani/posts/pfbid-main?comment_id=123&reply_comment_id=456' }, [], '4h', { y: 180, width: 20 }),
+  new Node('a', { href: 'https://windowarab.com/story/' }, [], 'Part 3'),
+  new Node('span', {}, [], 'Like'),
+  new Node('span', {}, [], 'Reply'),
+]);
+const body = new Node('body', {}, [commentOnly]);
+global.location = new URL(targetUrl);
+global.window = { innerHeight: 800 };
+global.document = {
+  body,
+  querySelectorAll: (selector) => body.querySelectorAll(selector),
+};
+
+const target = eval(headerTimeTargetExpression(targetUrl));
+if (target) {
+  console.error(JSON.stringify(target, null, 2));
+  process.exit(1);
+}
+"""
+    result = run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_synthetic_hover_ignores_existing_page_times() -> None:
     script = """
 const { syntheticHoverTimeExpression } = require('./scripts/fb_detail_extractors.js');
@@ -6259,6 +6474,28 @@ def assert_detail_adapter_prefers_real_mouse_time_when_enabled() -> None:
     assert "hoverExact = await readRealMouseTooltipTime" in extract_slice
     assert "exact = hoverExact" in extract_slice
     assert extract_slice.index("hoverExact = await readRealMouseTooltipTime") < extract_slice.index("syntheticHoverTimeExpression")
+
+
+def assert_detail_time_force_rechecks_confirmed_times() -> None:
+    adapter_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
+    worker_text = (ROOT / "scripts" / "enrichment_worker.py").read_text(encoding="utf-8")
+    extract_start = adapter_text.index("async function extractExactTime")
+    extract_end = adapter_text.index("async function readRealMouseTooltipTime")
+    extract_slice = adapter_text[extract_start:extract_end]
+    assert "!options.forceTime" in extract_slice
+    assert "{ name: 'force-time'" in adapter_text
+    assert "forceTime: boolArg(kwargs['force-time'])" in adapter_text
+    assert '"--force-time"' in worker_text
+
+
+def assert_detail_navigation_preserves_photo_query_fbid() -> None:
+    adapter_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
+    detail_start = adapter_text.index("function detailNavigationUrl")
+    detail_end = adapter_text.index("function validCandidate", detail_start)
+    detail_slice = adapter_text[detail_start:detail_end]
+    assert "photo/?fbid=" in detail_slice
+    assert "encodeURIComponent(fbid)" in detail_slice
+    assert "photo.php" in detail_slice
 
 
 def assert_opencli_detail_enrichment_supports_target_date_filter() -> None:
@@ -7096,7 +7333,15 @@ def assert_enrichment_worker_lead_stage_requires_external_landing_url() -> None:
         "landing_url": "https://story.example/usable",
         "article_url": "https://story.example/usable",
     }
+    media_lead = {
+        "lead_link_status": "qualified",
+        "lead_link_source": "comment",
+        "lead_url_raw": "https://media2.giphy.com/media/v1/test/giphy.gif",
+        "landing_url": "https://media2.giphy.com/media/v1/test/giphy.gif",
+        "article_url": "https://media2.giphy.com/media/v1/test/giphy.gif",
+    }
     assert enrichment_worker.detail_stage_satisfied(internal_lead, "lead_link") is False
+    assert enrichment_worker.detail_stage_satisfied(media_lead, "lead_link") is False
     assert enrichment_worker.detail_stage_satisfied(external_lead, "lead_link") is True
 
 
@@ -14902,7 +15147,8 @@ def main() -> int:
     assert_dom_extractor_does_not_treat_story_clock_as_post_time()
     assert_dom_extractor_splits_multi_post_container()
     assert_dom_extractor_prefers_article_main_post_when_comments_have_times()
-    assert_dom_extractor_strips_comment_id_from_candidate_post_url()
+    assert_dom_extractor_excludes_comment_only_permalink_candidate()
+    assert_dom_extractor_keeps_photo_chrome_as_media_fallback_only()
     assert_dom_extractor_excludes_profile_shell_with_external_link()
     assert_dom_extractor_blocks_visitor_preview()
     assert_dom_extractor_prefers_parent_post_over_photo_link()
@@ -14915,6 +15161,7 @@ def main() -> int:
     assert_detail_embedded_publish_time_extracts_target_reel()
     assert_detail_enrichment_ignores_page_shell_ad_links()
     assert_detail_enrichment_detects_plain_text_comment_links()
+    assert_detail_enrichment_rejects_media_resource_comment_links()
     assert_detail_enrichment_detects_post_cta_watch_more_links()
     assert_detail_post_type_expression_classifies_business_types()
     assert_comment_mode_expression_can_select_all_comments()
@@ -15036,9 +15283,12 @@ def main() -> int:
         assert_enrichment_worker_scopes_posts_by_posted_window(tmp_path)
         assert_detail_time_helpers_parse_exact_facebook_time()
         assert_detail_time_target_anchors_to_current_post()
+        assert_detail_time_target_ignores_comment_permalink_time()
         assert_synthetic_hover_ignores_existing_page_times()
         assert_detail_adapter_real_mouse_hover_fallback_is_wired()
         assert_detail_adapter_prefers_real_mouse_time_when_enabled()
+        assert_detail_time_force_rechecks_confirmed_times()
+        assert_detail_navigation_preserves_photo_query_fbid()
         assert_opencli_detail_enrichment_supports_target_date_filter()
         assert_opencli_discovery_eval_has_timeout_guard()
         assert_opencli_detail_enrichment_rejects_string_false_time()

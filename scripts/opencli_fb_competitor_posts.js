@@ -192,6 +192,22 @@ function postKey(post) {
 }
 
 function detailNavigationUrl(post) {
+  const photoQueryCandidates = [post?.post_url, post?.raw_fb_url, post?.parent_post_url, post?.canonical_post_url];
+  for (const candidate of photoQueryCandidates) {
+    const cleaned = cleanUrl(candidate || '');
+    if (!cleaned) continue;
+    try {
+      const parsed = new URL(cleaned);
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      const isPhotoPath = parts.includes('photo') || parsed.pathname.includes('photo.php');
+      const fbid = parsed.searchParams.get('fbid') || (parts.includes('photo') ? parts[parts.indexOf('photo') + 1] : '');
+      if (isPhotoPath && fbid) {
+        return `${parsed.origin}/photo/?fbid=${encodeURIComponent(fbid)}`;
+      }
+    } catch {
+      // Fall through to the normal candidate order.
+    }
+  }
   const candidates = [
     post?.canonical_post_url,
     post?.parent_post_url,
@@ -530,7 +546,7 @@ async function extractExactTime(page, post, options) {
     return { posted_at_raw: '', posted_at: '', time_source: '', skipped: true };
   }
   const shouldRecheckExisting = hasConfirmedTime(post) && post.time_source === 'synthetic_hover_tooltip';
-  if (hasConfirmedTime(post) && !shouldRecheckExisting) {
+  if (hasConfirmedTime(post) && !shouldRecheckExisting && !options.forceTime) {
     return {
       posted_at_raw: post.posted_at_raw || '',
       posted_at: post.posted_at || '',
@@ -761,6 +777,7 @@ async function detail(page, kwargs) {
   const posts = Array.isArray(input) ? input : Array.isArray(input.posts) ? input.posts : [];
   const options = {
     skipTime: boolArg(kwargs['skip-time']),
+    forceTime: boolArg(kwargs['force-time']),
     skipLeadLink: boolArg(kwargs['skip-lead-link']),
     skipEngagement: boolArg(kwargs['skip-engagement']),
     skipPostType: boolArg(kwargs['skip-post-type']),
@@ -846,6 +863,7 @@ cli({
     { name: 'posted-before', help: 'Discovery time-window upper bound, YYYY-MM-DD HH:MM' },
     { name: 'old-post-stop-snapshots', type: 'int', default: 2, help: 'Stop discovery after this many snapshots are older than the requested time window' },
     { name: 'skip-time', type: 'bool', default: false, help: 'Skip exact time enrichment' },
+    { name: 'force-time', type: 'bool', default: false, help: 'Re-read exact time even when the input post already has a confirmed time' },
     { name: 'skip-lead-link', type: 'bool', default: false, help: 'Skip lead link enrichment' },
     { name: 'skip-engagement', type: 'bool', default: false, help: 'Skip engagement enrichment' },
     { name: 'skip-post-type', type: 'bool', default: false, help: 'Skip post type enrichment' },

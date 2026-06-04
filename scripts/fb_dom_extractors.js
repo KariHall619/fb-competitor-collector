@@ -59,17 +59,32 @@ function browserExpression(maxText = 1200) {
         return 'none';
       }
     };
+    const hasCommentParam = (href) => {
+      try {
+        const parsed = new URL(href, location.href);
+        return parsed.searchParams.has('comment_id') || parsed.searchParams.has('reply_comment_id');
+      } catch {
+        return false;
+      }
+    };
+    const mainPostHref = (href) => postHref(href) && !hasCommentParam(href);
     const bestPostLink = (links) => {
-      const realPost = links.find((item) => postHrefKind(item.href) === 'post');
+      const eligible = links.filter((item) => mainPostHref(item.href));
+      const realPost = eligible.find((item) => postHrefKind(item.href) === 'post');
       if (realPost) return realPost;
-      return links.find((item) => postHrefKind(item.href) === 'media') || links[0] || null;
+      return eligible.find((item) => postHrefKind(item.href) === 'media') || eligible[0] || null;
     };
     const cleanFacebookContentUrl = (href) => {
       if (!href) return '';
       try {
         const parsed = new URL(href, location.href);
         parsed.hash = '';
+        const isPhotoQuery = /\\/photo\\/?$/i.test(parsed.pathname) && parsed.searchParams.get('fbid');
         for (const key of [...parsed.searchParams.keys()]) {
+          if (isPhotoQuery && key !== 'fbid') {
+            parsed.searchParams.delete(key);
+            continue;
+          }
           if (key === 'comment_id' || key === 'reply_comment_id' || key === 'fbclid' || key.startsWith('utm_') || key.startsWith('__')) {
             parsed.searchParams.delete(key);
           }
@@ -307,7 +322,7 @@ function browserExpression(maxText = 1200) {
       for (let depth = 0; node && depth < 8; depth += 1) {
         const text = fullText(node);
         const links = nodeAnchors(node);
-        const postLinks = links.filter((item) => postHref(item.href));
+        const postLinks = links.filter((item) => mainPostHref(item.href));
         const timeLinks = links.filter((item) => timeText(item.text) || timeText(item.aria));
         const externalLinks = links.filter((item) => externalHref(item.href));
         const hasReaction = /All reactions|Like\\s+Comment\\s+Share|Like\\nComment\\nShare|\\b\\d+(?:\\.\\d+)?\\s*(?:K|M|万)?\\s*(?:views|plays|likes|comments|shares)\\b|\\d+(?:\\.\\d+)?\\s*万?\\s*(?:次播放|赞|评论|分享)|views|plays|Full Story|完整动态|次播放|赞|评论|分享/i.test(text);
@@ -336,10 +351,11 @@ function browserExpression(maxText = 1200) {
       if (!text) return null;
       const anchors = nodeAnchors(node);
       const postLinks = anchors.filter((a) => postHref(a.href));
+      const mainPostLinks = postLinks.filter((a) => mainPostHref(a.href));
       const selectedPostLink = meta.postLink || bestPostLink(postLinks);
       const externalLinks = anchors.filter((a) => externalHref(a.href));
       const leadLink = selectHomepageLeadLink(node, externalLinks);
-      const timeLinks = anchors.filter((a) => timeText(a.text) || timeText(a.aria));
+      const timeLinks = anchors.filter((a) => mainPostHref(a.href) && (timeText(a.text) || timeText(a.aria)));
       const rawSelectedTimeLink = meta.timeLink || timeLinks[0] || {};
       const selectedTimeLink = {
         text: rawSelectedTimeLink.text || '',
@@ -356,9 +372,11 @@ function browserExpression(maxText = 1200) {
       const reactionSignals = /All reactions|Like\\s+Comment\\s+Share|Like\\nComment\\nShare|\\b\\d+(?:\\.\\d+)?\\s*(?:K|M|万)?\\s*(?:views|plays|likes|comments|shares)\\b|\\d+(?:\\.\\d+)?\\s*万?\\s*(?:次播放|赞|评论|分享)|views|plays|Full Story|完整动态|次播放|赞|评论|分享/i.test(text);
       const commentSignals = /(^|\\n)Like\\nReply(\\n|$)|\\bLikeReply\\b|Write a comment|回复/i.test(text);
       const looksLikeComment = commentSignals && !reactionSignals && externalLinks.length === 0 && postLinks.length === 0;
-      const looksLikePost = postLinks.length > 0 && (timeLinks.length > 0 || reactionSignals || externalLinks.length > 0) && !looksLikeComment;
+      const looksLikePost = Boolean(selectedPostLink) && mainPostLinks.length > 0 && (timeLinks.length > 0 || reactionSignals || externalLinks.length > 0) && !looksLikeComment;
       if (!looksLikePost) return null;
       if (pageNames.length && !ownerMatched && externalLinks.length === 0 && !reactionSignals) return null;
+      if (firstLine === 'Facebook' && timeLinks.length === 0) return null;
+      if (postHrefKind(selectedPostLink?.href || '') === 'media' && timeLinks.length === 0) return null;
       const timeTextValue = selectedTimeLink.text || selectedTimeLink.aria || '';
       const storyText = meta.splitFromTime ? storyTextNearTime(text, timeTextValue) : compactStoryText(text);
       if (profileShellText(storyText)) return null;
@@ -401,15 +419,15 @@ function browserExpression(maxText = 1200) {
     const articleNodes = [...document.querySelectorAll('div[role="article"], article')];
     const anchorSeedNodes = [];
     for (const anchor of document.querySelectorAll('a[href]')) {
-      if (!postHref(anchor.href)) continue;
+      if (!mainPostHref(anchor.href)) continue;
       let node = anchor;
       let best = null;
       for (let depth = 0; node && depth < 8; depth += 1) {
         const text = fullText(node);
         const links = nodeAnchors(node);
-        const postCount = links.filter((item) => postHref(item.href)).length;
+        const postCount = links.filter((item) => mainPostHref(item.href)).length;
         const externalCount = links.filter((item) => externalHref(item.href)).length;
-        const hasTime = links.some((item) => timeText(item.text) || timeText(item.aria));
+        const hasTime = links.some((item) => mainPostHref(item.href) && (timeText(item.text) || timeText(item.aria)));
         const goodLength = text.length >= 25 && text.length <= 7000;
         if (goodLength && postCount > 0 && (hasTime || externalCount > 0 || /Like|Comment|Share|赞|评论|分享|Full Story|完整动态/i.test(text))) {
           best = node;
@@ -432,11 +450,11 @@ function browserExpression(maxText = 1200) {
     };
     for (const article of articles) {
       const anchors = nodeAnchors(article);
-      const timeLinks = anchors.filter((a) => timeText(a.text) || timeText(a.aria));
+      const timeLinks = anchors.filter((a) => mainPostHref(a.href) && (timeText(a.text) || timeText(a.aria)));
       const postLinks = anchors.filter((a) => postHref(a.href));
       const distinctRealPostKeys = new Set(
         postLinks
-          .filter((item) => postHrefKind(item.href) === 'post')
+          .filter((item) => mainPostHref(item.href) && postHrefKind(item.href) === 'post')
           .map((item) => postIdentityKey(item.href))
           .filter(Boolean)
       );
@@ -450,7 +468,7 @@ function browserExpression(maxText = 1200) {
         for (const timeLink of timeLinks) {
           const block = nearestPostBlockForTimeLink(timeLink, article);
           if (!block) continue;
-          const blockLinks = nodeAnchors(block).filter((a) => postHref(a.href));
+          const blockLinks = nodeAnchors(block).filter((a) => mainPostHref(a.href));
           if (pushCandidate(candidateFromNode(block, {
             timeLink,
             postLink: bestPostLink(blockLinks),
@@ -463,6 +481,66 @@ function browserExpression(maxText = 1200) {
       if (!articlePushed && !splitCount) {
         pushCandidate(candidateFromNode(article));
       }
+    }
+    const mediaFallbackLinks = [...document.querySelectorAll('a[href]')]
+      .map((element) => {
+        const href = new URL(element.getAttribute('href'), location.href).href;
+        let text = '';
+        let cursor = element;
+        for (let depth = 0; cursor && depth < 5; depth += 1) {
+          const currentText = clean(cursor.innerText || cursor.textContent || '');
+          if (currentText && (!text || currentText.length < text.length)) text = currentText;
+          cursor = cursor.parentElement;
+        }
+        return { element, href, text };
+      })
+      .filter((item) => mainPostHref(item.href) && postHrefKind(item.href) === 'media')
+      .filter((item) => {
+        const parsed = new URL(item.href, location.href);
+        const parts = parsed.pathname.split('/').filter(Boolean);
+        if (parts.includes('reel') && !parts[parts.indexOf('reel') + 1]) return false;
+        if ((parts.includes('watch') || parts.includes('video') || parts.includes('videos')) && !parsed.searchParams.get('v') && !parts.at(-1)?.match(/^\\d{6,}$/)) return false;
+        return true;
+      })
+      .filter((item) => !/\\/photos\\/?$/i.test(new URL(item.href, location.href).pathname))
+      .filter((item) => !/^(photos|see all photos?|profile photo|cover photo|照片|查看所有照片|头像|封面)$/i.test(item.text));
+    const hasParentPostCandidate = candidates.some((candidate) => postHrefKind(candidate.post_url) === 'post');
+    for (const media of mediaFallbackLinks.slice(0, 24)) {
+      if (hasParentPostCandidate) break;
+      pushCandidate({
+        post_url: cleanFacebookContentUrl(media.href),
+        raw_fb_url: media.href,
+        selected_post_link_kind: postHrefKind(media.href),
+        media_link_count: 1,
+        article_url: '',
+        lead_url_raw: '',
+        landing_url: '',
+        lead_link_status: '',
+        lead_link_source: '',
+        comment_lead_excerpt: '',
+        story_summary: media.text.slice(0, 500),
+        post_time_text: '',
+        posted_at_raw: '',
+        posted_at: '',
+        time_source: '',
+        time_confirmed: false,
+        engagement_data: '',
+        engagement_source: '',
+        reactions: null,
+        likes: null,
+        comments: null,
+        shares: null,
+        views: null,
+        raw_text: media.text.slice(0, ${Number(maxText) || 1200}),
+        source_surface: sourceSurface,
+        source_split: 'media_fallback',
+        first_line: textLines(media.text)[0] || '',
+        owner_matched: true,
+        post_url_count: 1,
+        external_url_count: 0,
+        time_texts: [],
+        link_count: 1,
+      });
     }
     const bodyText = document.body?.innerText || '';
     const loggedOut = /Log in to Facebook|登录 Facebook|Forgot Account|Forgot password|Forgotten password|Create new account|新建帐户|邮箱或手机号\\s+密码\\s+登录/i.test(bodyText);

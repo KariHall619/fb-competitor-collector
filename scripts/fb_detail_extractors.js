@@ -18,6 +18,107 @@ function pageStateExpression() {
   })()`;
 }
 
+function storyLandingPredicateSource() {
+  return `const isStoryLandingHref = (href) => {
+      try {
+        const parsed = new URL(href, location.href);
+        const host = parsed.hostname.replace(/^www\\./i, "").toLowerCase();
+        const path = parsed.pathname.toLowerCase();
+        if (!/^https?:$/i.test(parsed.protocol)) return false;
+        if (/l\\.facebook\\.com$/i.test(parsed.hostname) && parsed.searchParams.get("u")) {
+          return isStoryLandingHref(parsed.searchParams.get("u"));
+        }
+        if (host === "facebook.com" || host.endsWith(".facebook.com") || host === "fb.watch" || host === "meta.com" || host.endsWith(".meta.com")) return false;
+        if (/\\.(gif|jpe?g|png|webp|svg|mp4|mov|webm|m3u8|mp3|wav)(?:$|[?#])/i.test(path)) return false;
+        if (/^(?:media\\d*\\.)?giphy\\.com$|(?:^|\\.)giphy\\.com$|(?:^|\\.)tenor\\.com$|(?:^|\\.)fbcdn\\.net$|(?:^|\\.)cdninstagram\\.com$/i.test(host)) return false;
+        if (/\\b(?:image|img|media|static|cdn|assets?)\\b/i.test(host) && !/[a-z0-9-]{12,}/i.test(path)) return false;
+        return true;
+      } catch {
+        return false;
+      }
+    };`;
+}
+
+function detailMainRootHelpersSource() {
+  return `const visibleRect = (node) => {
+      const rect = node?.getBoundingClientRect?.();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+      return rect;
+    };
+    const textOf = (node) => clean(node?.innerText || node?.textContent || "");
+    const labelOf = (node) => clean(node?.getAttribute?.("aria-label") || "");
+    const commentArticleLike = (node) => {
+      const label = labelOf(node);
+      const text = textOf(node);
+      return /^Comment by |^Reply by /i.test(label) || /^Author\\s+[^\\n]{0,80}\\s+PART\\s+\\d+/i.test(text);
+    };
+    const metricButtonLike = (node) => {
+      const label = labelOf(node);
+      const text = textOf(node);
+      if (/^(Like|Leave a comment|Comment|Share)$/i.test(label) && /^\\d+(?:[.,]\\d+)?\\s*(?:K|M|万)?$/i.test(text)) return true;
+      if (/send this to friends|post it on your profile|share/i.test(label) && /^\\d+(?:[.,]\\d+)?\\s*(?:K|M|万)?$/i.test(text)) return true;
+      if (/^Like:\\s*\\d+/i.test(label)) return true;
+      return false;
+    };
+    const scoreDetailRoot = (node) => {
+      const rect = visibleRect(node);
+      if (!rect) return -1000;
+      const text = textOf(node);
+      if (!text || text.length < 60) return -1000;
+      if (commentArticleLike(node)) return -1000;
+      if (/Privacy\\s*·\\s*Terms|Create a post|What's on your mind|Sponsored|Suggested for you/i.test(text)) return -1000;
+      const metricButtons = [...node.querySelectorAll('[role="button"], div[aria-label]')].filter(metricButtonLike);
+      let score = 0;
+      if (metricButtons.length >= 2) score += 140;
+      if (/\\bMost relevant\\b|\\bComments\\b|View more comments|Write a comment|评论/i.test(text)) score += 55;
+      if (/\\bSee more\\b|FULL STORY IN COMMENTS?|FULL STORY IN COMMENT|完整/i.test(text)) score += 35;
+      const viewportWidth = globalThis.window?.innerWidth || 1200;
+      if (rect.left > viewportWidth * 0.45) score += 30;
+      if (rect.width >= 280 && rect.width <= 560) score += 25;
+      if (text.length > 280) score += 20;
+      if (text.length > 12000) score -= 70;
+      if (node.getAttribute?.("role") === "article") score += 8;
+      return score;
+    };
+    const detailRootFromMetricButtons = () => {
+      const roots = [];
+      const push = (node) => {
+        if (node && !roots.includes(node)) roots.push(node);
+      };
+      for (const button of [...document.querySelectorAll('[role="button"], div[aria-label]')].filter(metricButtonLike)) {
+        let cursor = button;
+        for (let depth = 0; cursor && depth < 10; depth += 1) {
+          push(cursor);
+          cursor = cursor.parentElement;
+        }
+      }
+      const scored = roots
+        .map((node) => ({ node, score: scoreDetailRoot(node), textLength: textOf(node).length }))
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score || a.textLength - b.textLength);
+      return scored[0]?.node || null;
+    };
+    const bestDetailRoot = (seed = null) => {
+      const roots = [];
+      const push = (node) => {
+        if (node && !roots.includes(node)) roots.push(node);
+      };
+      let cursor = seed;
+      for (let depth = 0; cursor && depth < 10; depth += 1) {
+        push(cursor);
+        cursor = cursor.parentElement;
+      }
+      for (const node of document.querySelectorAll('[role="article"], article')) push(node);
+      const metricRoot = detailRootFromMetricButtons();
+      push(metricRoot);
+      const scored = roots
+        .map((node) => ({ node, score: scoreDetailRoot(node), textLength: textOf(node).length }))
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score || a.textLength - b.textLength);
+      return scored[0]?.node || metricRoot || null;
+    };`;
+}
+
 function headerTimeTargetExpression(postUrl = "") {
   return `(() => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
@@ -68,7 +169,8 @@ function headerTimeTargetExpression(postUrl = "") {
       const href = el.href || "";
       const article = el.closest?.('[role="article"], article') || null;
       const articleText = clean(article?.innerText || article?.textContent || "");
-      const linkKey = canonicalPostKey(href);
+      const commentLink = hasCommentParam(href);
+      const linkKey = commentLink ? "" : canonicalPostKey(href);
       return {
         index,
         tag: el.tagName,
@@ -84,7 +186,7 @@ function headerTimeTargetExpression(postUrl = "") {
         w: rect.width,
         h: rect.height,
         target_match: Boolean(targetKey && linkKey && targetKey === linkKey),
-        comment_link: hasCommentParam(href),
+        comment_link: commentLink,
         article_preview: articleText.slice(0, 240),
         in_article: Boolean(article),
         forbidden_chrome: forbiddenChrome(el),
@@ -305,6 +407,7 @@ function detailEngagementBrowserExpression(target) {
     const target = ${JSON.stringify(target || null)};
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const linesFrom = (value) => String(value || "").split(/\\n+/).map(clean).filter(Boolean);
+    ${detailMainRootHelpersSource()}
     const countToken = "(\\\\d+(?:[.,]\\\\d+)?\\\\s*(?:K|k|M|m|万)?)";
     const relativeTimeOnly = (value) => /^(?:just now|yesterday|刚刚|昨天|\\d+\\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)(?:\\s+ago)?|\\d+\\s*(?:分钟|小时|天|周))$/i.test(clean(value));
     const parseCount = (value) => {
@@ -323,8 +426,11 @@ function detailEngagementBrowserExpression(target) {
     const hasActionOrMetric = (text) => /\\bLike\\b|\\bComment\\b|\\bShare\\b|赞|评论|分享|All reactions|reactions?|likes?|comments?|shares?|views?|plays?|次播放/i.test(text);
     const scoreRoot = (node) => {
       const text = clean(node?.innerText || node?.textContent || "");
-      if (!text || forbiddenChrome(node) || looksLikeAdOrShell(text)) return -1000;
+      const detailScore = scoreDetailRoot(node);
+      if (!text || (detailScore <= 0 && forbiddenChrome(node)) || looksLikeAdOrShell(text)) return -1000;
+      if (commentArticleLike(node)) return -1000;
       let score = 0;
+      score += Math.max(0, detailScore);
       if (node.getAttribute?.("role") === "article" || /^(ARTICLE)$/i.test(node.tagName || "")) score += 30;
       if (hasActionOrMetric(text)) score += 20;
       if (/All reactions|comments?|shares?|评论|分享|赞/i.test(text)) score += 15;
@@ -346,6 +452,7 @@ function detailEngagementBrowserExpression(target) {
       cursor = cursor.parentElement;
     }
     for (const node of document.querySelectorAll('[role="article"], article')) pushRoot(node);
+    pushRoot(bestDetailRoot(targetElement));
     const scored = roots
       .map((node) => ({ node, score: scoreRoot(node), text: clean(node?.innerText || node?.textContent || "") }))
       .filter((item) => item.score > 0)
@@ -399,6 +506,31 @@ function detailEngagementBrowserExpression(target) {
         node.innerText || node.textContent || "",
       ]) {
         readMetricText(text);
+      }
+    }
+    if (root) {
+      const actionButtons = [...root.querySelectorAll('[role="button"], div[aria-label]')]
+        .map((node) => ({
+          label: clean(node.getAttribute?.("aria-label") || ""),
+          text: clean(node.innerText || node.textContent || ""),
+        }))
+        .filter((item) => item.text && /^\\d+(?:[.,]\\d+)?\\s*(?:K|k|M|m|万)?$/i.test(item.text));
+      for (const item of actionButtons) {
+        const parsed = parseCount(item.text);
+        if (parsed === null || parsed === undefined) continue;
+        if (/^Like$/i.test(item.label)) {
+          result.reactions = parsed;
+          result.likes = parsed;
+          result.raw = item.label + " " + item.text;
+        }
+        if (/^(Leave a comment|Comment)$/i.test(item.label)) {
+          result.comments = parsed;
+          result.raw = result.raw || item.label + " " + item.text;
+        }
+        if (/^Share$/i.test(item.label) || /send this to friends|post it on your profile|share/i.test(item.label)) {
+          result.shares = parsed;
+          result.raw = result.raw || item.label + " " + item.text;
+        }
       }
     }
 
@@ -509,13 +641,14 @@ function detailEngagementBrowserExpression(target) {
 function detailPostTypeBrowserExpression() {
   return `(() => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    ${detailMainRootHelpersSource()}
     const forbiddenChrome = (node) => Boolean(node?.closest?.('[role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"], nav, aside, footer, header'));
     const looksLikeAdOrShell = (text) => /Sponsored|Suggested for you|Create a post|What's on your mind|Privacy\\s*·\\s*Terms|Ads Manager|Harness the Power of AI|Feed posts/i.test(text);
     const roots = [...document.querySelectorAll('[role="article"], article')]
       .map((node) => ({ node, text: clean(node.innerText || node.textContent || "") }))
       .filter((item) => item.text && !forbiddenChrome(item.node) && !looksLikeAdOrShell(item.text))
       .sort((a, b) => b.text.length - a.text.length);
-    const root = roots[0]?.node || document.body;
+    const root = bestDetailRoot() || roots[0]?.node || document.body;
     const text = clean(root.innerText || root.textContent || "");
     const hrefs = [...root.querySelectorAll("a[href]")].map((a) => {
       try { return new URL(a.getAttribute("href"), location.href).href; } catch { return ""; }
@@ -559,18 +692,22 @@ function expandCommentsExpression(commentRounds = 3, replyRounds = 3) {
       /\\d+\\s+repl(?:y|ies)/i,
       /view\\s+\\d+\\s+repl(?:y|ies)/i,
       /see\\s+\\d+\\s+repl(?:y|ies)/i,
+      /replied\\s*·\\s*\\d+\\s+repl(?:y|ies)/i,
       /查看更多评论/,
       /查看更多回复/,
       /查看回复/,
     ];
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    ${detailMainRootHelpersSource()}
     const visible = (el) => {
       const rect = el?.getBoundingClientRect?.();
       return Boolean(rect && rect.width > 240 && rect.height > 80 && rect.bottom > 80 && rect.top < window.innerHeight - 40);
     };
     const textLength = (el) => el?.innerText?.length || el?.textContent?.length || 0;
     const findConversationRoot = () => {
+      const mediaRoot = bestDetailRoot();
+      if (mediaRoot) return mediaRoot;
       const articles = [...document.querySelectorAll('[role="article"], article')]
         .filter(visible)
         .filter((el) => /Like|Comment|Share|赞|评论|分享|Reply|回复|All reactions|comments?|shares?/i.test(el.innerText || el.textContent || ""));
@@ -607,8 +744,11 @@ function expandCommentsExpression(commentRounds = 3, replyRounds = 3) {
       const bodyLengthBefore = root?.innerText?.length || document.body?.innerText?.length || 0;
       let clicked = 0;
       const clickScope = root && root.querySelectorAll ? root : document;
-      for (const el of clickScope.querySelectorAll('div[role="button"], span, a')) {
-        const text = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || "");
+      const controls = [...clickScope.querySelectorAll('div[role="button"], span, a')]
+        .map((el) => ({ el, text: clean(el.innerText || el.textContent || el.getAttribute("aria-label") || "") }))
+        .filter((item) => item.text && item.text.length <= 180)
+        .sort((a, b) => a.text.length - b.text.length);
+      for (const { el, text } of controls) {
         if (!text || !labels.some((re) => re.test(text))) continue;
         try {
           el.scrollIntoView?.({ block: "center", inline: "nearest" });
@@ -646,6 +786,7 @@ function expandCommentsExpression(commentRounds = 3, replyRounds = 3) {
 function focusDetailConversationExpression() {
   return `(() => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    ${detailMainRootHelpersSource()}
     const visible = (el) => {
       const rect = el?.getBoundingClientRect?.();
       return Boolean(rect && rect.width > 260 && rect.height > 80 && rect.bottom > 80 && rect.top < window.innerHeight - 40);
@@ -659,12 +800,13 @@ function focusDetailConversationExpression() {
       if (/Sponsored|Suggested for you|Create a post|What's on your mind/i.test(text)) score -= 120;
       return score;
     };
+    const mediaRoot = bestDetailRoot();
     const articles = [...document.querySelectorAll('[role="article"], article')]
       .filter(visible)
       .sort((a, b) => scoreArticle(b) - scoreArticle(a));
-    const article = articles[0] || null;
-    let root = article;
-    let current = article;
+    const article = mediaRoot || articles[0] || null;
+    let root = mediaRoot || article;
+    let current = root;
     for (let depth = 0; current && depth < 8; depth += 1) {
       const style = getComputedStyle(current);
       const overflow = [style.overflowY, style.overflow].join(" ");
@@ -744,6 +886,8 @@ function leadLinkScanBrowserExpression(accountName = "", mode = "default") {
   return `((expectedAccountName, commentMode) => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const linesFrom = (value) => String(value || "").split(/\\n+/).map(clean).filter(Boolean);
+    ${detailMainRootHelpersSource()}
+    ${storyLandingPredicateSource()}
     const isExternalHref = (href) => {
       try {
         const parsed = new URL(href, location.href);
@@ -777,7 +921,7 @@ function leadLinkScanBrowserExpression(accountName = "", mode = "default") {
       while ((match = pattern.exec(text))) {
         const raw = match[0].replace(/[.,;!?]+$/g, "");
         const href = raw.startsWith("http") ? raw : "https://" + raw;
-        if (isExternalHref(href)) {
+        if (isExternalHref(href) && isStoryLandingHref(href)) {
           found.push({ href: normalizeCandidateHref(href), text: raw, source_kind: "plain_text" });
         }
       }
@@ -809,10 +953,11 @@ function leadLinkScanBrowserExpression(accountName = "", mode = "default") {
         || /\\bReply\\b|replied|responded|回复/.test(shortText)
         || lines.some(commentTimeLine);
     };
-    const blocks = [...document.querySelectorAll('[role="article"], div[aria-label], li, div')];
+    const scope = bestDetailRoot() || document;
+    const blocks = [...scope.querySelectorAll('[role="article"], div[aria-label], li, div')];
     const results = [];
     for (const block of blocks) {
-      if (forbiddenChrome(block)) continue;
+      if (scope === document && forbiddenChrome(block)) continue;
       const rawText = block.innerText || block.textContent || "";
       const text = clean(rawText);
       if (!text || text.length > 3000 || looksLikePageShellOrAd(text)) continue;
@@ -823,7 +968,7 @@ function leadLinkScanBrowserExpression(accountName = "", mode = "default") {
           text: clean(a.innerText || a.textContent || a.getAttribute("aria-label") || ""),
           source_kind: "anchor",
         }))
-        .filter((link) => isExternalHref(link.href));
+        .filter((link) => isExternalHref(link.href) && isStoryLandingHref(link.href));
       const links = [...anchorLinks, ...plainTextLinks(rawText)]
         .filter((link, index, items) => link.href && items.findIndex((item) => item.href === link.href) === index);
       if (!links.length) continue;
@@ -852,6 +997,8 @@ function postCtaLeadLinkScanBrowserExpression(accountName = "") {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const linesFrom = (value) => String(value || "").split(/\\n+/).map(clean).filter(Boolean);
     const ctaPattern = /\\b(watch more|watch now|learn more|read more|shop now|sign up|subscribe|get offer|apply now|book now|download)\\b|观看更多|继续观看|了解更多|阅读更多|查看完整|阅读全文|完整内容/i;
+    ${detailMainRootHelpersSource()}
+    ${storyLandingPredicateSource()}
     const isExternalHref = (href) => {
       try {
         const parsed = new URL(href, location.href);
@@ -898,12 +1045,13 @@ function postCtaLeadLinkScanBrowserExpression(accountName = "") {
       }
       return found || node;
     };
-    const rawRoots = [...document.querySelectorAll('[role="article"], article')]
+    const mediaRoot = bestDetailRoot();
+    const rawRoots = (mediaRoot ? [mediaRoot] : [...document.querySelectorAll('[role="article"], article')])
       .map(outerArticle)
       .filter((node, index, items) => node && items.indexOf(node) === index);
     const results = [];
     for (const root of rawRoots) {
-      if (forbiddenChrome(root)) continue;
+      if (!mediaRoot && forbiddenChrome(root)) continue;
       const rawText = root.innerText || root.textContent || "";
       const text = clean(rawText);
       if (!text || text.length > 12000 || !ctaPattern.test(text) || looksLikePageShellOrAd(text)) continue;
@@ -922,7 +1070,7 @@ function postCtaLeadLinkScanBrowserExpression(accountName = "") {
             y: rect.y || 0,
           };
         })
-        .filter((link) => link.href && isExternalHref(link.href))
+        .filter((link) => link.href && isExternalHref(link.href) && isStoryLandingHref(link.href))
         .filter((link, index, items) => items.findIndex((item) => item.href === link.href) === index);
       if (!links.length) continue;
       const ctaLinks = links.filter((link) => ctaPattern.test([link.text, link.aria, link.title].join(" ")));

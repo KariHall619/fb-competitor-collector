@@ -309,6 +309,35 @@ def is_external_landing_url(value: Any) -> bool:
     return host_without_www not in FACEBOOK_INTERNAL_HOSTS and not host_without_www.endswith(".facebook.com")
 
 
+def is_story_landing_url(value: Any) -> bool:
+    if not is_external_landing_url(value):
+        return False
+    try:
+        parsed = urlparse(str(value).strip())
+    except Exception:
+        return False
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = parsed.path.lower()
+    if re.search(r"\.(gif|jpe?g|png|webp|svg|mp4|mov|webm|m3u8|mp3|wav)$", path):
+        return False
+    if (
+        host == "giphy.com"
+        or host.endswith(".giphy.com")
+        or host == "tenor.com"
+        or host.endswith(".tenor.com")
+        or host == "fbcdn.net"
+        or host.endswith(".fbcdn.net")
+        or host == "cdninstagram.com"
+        or host.endswith(".cdninstagram.com")
+    ):
+        return False
+    if re.search(r"\b(image|img|media|static|cdn|assets?)\b", host) and not re.search(r"[a-z0-9-]{12,}", path):
+        return False
+    return True
+
+
 def _drop_tracking_query(query: str, *, keep_keys: set[str] | None = None) -> str:
     keep_keys = keep_keys or set()
     kept: list[tuple[str, str]] = []
@@ -374,7 +403,7 @@ def comment_lead_landing_url(lead_url_raw: Any, lead_link_source: Any) -> str:
     if source not in QUALIFIED_LEAD_SOURCES:
         return ""
     cleaned = clean_article_url(lead_url_raw)
-    return cleaned if is_external_landing_url(cleaned) else ""
+    return cleaned if is_story_landing_url(cleaned) else ""
 
 
 def has_qualified_comment_lead_link(post: dict[str, Any]) -> bool:
@@ -385,7 +414,7 @@ def has_qualified_comment_lead_link(post: dict[str, Any]) -> bool:
     return (
         post.get("lead_link_status") == "qualified"
         and source in QUALIFIED_LEAD_SOURCES
-        and is_external_landing_url(landing_url)
+        and is_story_landing_url(landing_url)
     )
 
 
