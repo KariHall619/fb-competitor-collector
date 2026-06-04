@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
 from typing import Any
 
 from config_loader import deep_get, load_config
@@ -23,6 +24,41 @@ from sync_status import (
 )
 
 
+def parse_posted_at_filter(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y年%m月%d日 %H:%M"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def filter_by_posted_at(
+    posts: list[dict[str, Any]],
+    *,
+    posted_after: str = "",
+    posted_before: str = "",
+) -> list[dict[str, Any]]:
+    after = parse_posted_at_filter(posted_after)
+    before = parse_posted_at_filter(posted_before)
+    if after is None and before is None:
+        return posts
+    filtered: list[dict[str, Any]] = []
+    for post in posts:
+        posted_at = parse_posted_at_filter(str(post.get("posted_at") or ""))
+        if posted_at is None:
+            continue
+        if after is not None and posted_at < after:
+            continue
+        if before is not None and posted_at > before:
+            continue
+        filtered.append(post)
+    return filtered
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/settings.yaml")
@@ -33,10 +69,13 @@ def main() -> int:
     parser.add_argument("--account-url", default="")
     parser.add_argument("--account-type", default="")
     parser.add_argument("--post-type", default="")
+    parser.add_argument("--posted-after", default="", help="Only keep rows whose precise posted_at is at or after this time.")
+    parser.add_argument("--posted-before", default="", help="Only keep rows whose precise posted_at is at or before this time.")
     parser.add_argument("--min-views", type=int)
     parser.add_argument("--min-likes", type=int)
     parser.add_argument("--hot-views", action="store_true")
     parser.add_argument("--hot-likes", action="store_true")
+    parser.add_argument("--sheet", default="filter_result")
     parser.add_argument("--sync", action="store_true")
     parser.add_argument("--sync-audit", "--ledger-sync", dest="sync_audit", action="store_true", help="Write auditable candidates with missing-field markers.")
     parser.add_argument("--sync-partial", action="store_true")
@@ -82,6 +121,7 @@ def main() -> int:
         min_views=min_views,
         min_likes=min_likes,
     )
+    posts = filter_by_posted_at(posts, posted_after=args.posted_after, posted_before=args.posted_before)
     hit_rule = ", ".join(
         part
         for part in [
@@ -92,6 +132,8 @@ def main() -> int:
             f"account_url={args.account_url}" if args.account_url else "",
             f"account_type={args.account_type}" if args.account_type else "",
             f"post_type={args.post_type}" if args.post_type else "",
+            f"posted_after={args.posted_after}" if args.posted_after else "",
+            f"posted_before={args.posted_before}" if args.posted_before else "",
             f"views>={min_views}" if min_views is not None else "",
             f"likes>={min_likes}" if min_likes is not None else "",
         ]
@@ -118,7 +160,7 @@ def main() -> int:
         rows = [output_row_for_headers(post, headers, config) for post in partial_posts]
         result = write_rows(
             config,
-            "filter_result",
+            args.sheet,
             rows,
             headers=headers,
             mode="overwrite",
@@ -155,7 +197,7 @@ def main() -> int:
         rows = [output_row_for_headers(post, headers, config) for post in output_posts]
         result = write_rows(
             config,
-            "filter_result",
+            args.sheet,
             rows,
             headers=headers,
             mode="upsert",
@@ -208,7 +250,7 @@ def main() -> int:
         rows = [output_row_for_headers(post, headers, config) for post in ready_posts]
         result = write_rows(
             config,
-            "filter_result",
+            args.sheet,
             rows,
             headers=headers,
             mode="overwrite",

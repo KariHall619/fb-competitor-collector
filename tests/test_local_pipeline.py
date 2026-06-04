@@ -4093,6 +4093,82 @@ def assert_filter_sync_reports_audit_missing_field_counts(tmp_path: Path) -> Non
     assert "ledger_not_final" in blocker_codes
 
 
+def assert_filter_sync_can_target_sheet_and_posted_at_window(tmp_path: Path) -> None:
+    sample = tmp_path / "filter_posted_window.json"
+    config = tmp_path / "settings_filter_posted_window.yaml"
+    account_url = "https://www.facebook.com/windowpage"
+    old_post = "https://www.facebook.com/windowpage/posts/old"
+    new_post = "https://www.facebook.com/windowpage/posts/new"
+    base_post = {
+        "account_name": "Window Page",
+        "account_url": account_url,
+        "account_type": "competitor",
+        "time_confirmed": True,
+        "time_source": "dom_aria_label",
+        "article_url": "https://story.example/window",
+        "landing_url": "https://story.example/window",
+        "lead_url_raw": "https://story.example/window",
+        "lead_link_status": "qualified",
+        "lead_link_source": "comment",
+        "story_summary": VALID_CN_SUMMARY,
+        "summary_source": "article",
+        "likes": 20,
+        "comments": 4,
+        "shares": 2,
+        "post_type": "图文",
+    }
+    sample.write_text(
+        json.dumps(
+            {
+                "posts": [
+                    {**base_post, "post_url": old_post, "posted_at": "2026年6月4日 11:59"},
+                    {**base_post, "post_url": new_post, "posted_at": "2026年6月4日 12:01"},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    shutil.copy(ROOT / "config" / "settings.yaml.example", config)
+    config_text = config.read_text(encoding="utf-8").replace(
+        "database_path: data/posts.sqlite", f"database_path: {tmp_path / 'filter_posted_window.sqlite'}"
+    )
+    config_text = config_text.replace('filter_result: "筛选结果"', 'filter_result: "筛选结果"\n    sheet2: "Sheet2"')
+    config.write_text(config_text, encoding="utf-8")
+
+    imported = run([PYTHON, "scripts/import_existing_result.py", "--config", str(config), "--input", str(sample), "--no-sync"])
+    assert imported.returncode == 0, imported.stdout
+    filtered = run(
+        [
+            PYTHON,
+            "scripts/filter_posts.py",
+            "--config",
+            str(config),
+            "--date",
+            "260604",
+            "--account-url",
+            account_url,
+            "--account-type",
+            "competitor",
+            "--posted-after",
+            "2026-06-04 12:00",
+            "--sheet",
+            "sheet2",
+            "--sync",
+            "--dry-run",
+        ]
+    )
+    assert filtered.returncode == 0, filtered.stdout
+    filtered_data = json.loads(filtered.stdout)
+    assert filtered_data["count"] == 1
+    assert filtered_data["hit_rule"] == (
+        "date=260604, account_url=https://www.facebook.com/windowpage, "
+        "account_type=competitor, posted_after=2026-06-04 12:00"
+    )
+    assert filtered_data["feishu_sync"]["sheet"] == "Sheet2"
+    assert filtered_data["feishu_sync"]["ready_for_output"] == 1
+
+
 def assert_quality_gate_requires_comment_lead_source(tmp_path: Path) -> None:
     sample = tmp_path / "bad_lead_status.json"
     config = tmp_path / "settings_bad_lead_status.yaml"
@@ -13317,6 +13393,7 @@ def main() -> int:
         assert_article_url_alone_does_not_qualify_lead_link(tmp_path)
         assert_filter_sync_applies_output_quality_gate(tmp_path)
         assert_filter_sync_reports_audit_missing_field_counts(tmp_path)
+        assert_filter_sync_can_target_sheet_and_posted_at_window(tmp_path)
         assert_quality_gate_rejects_internal_landing_url(tmp_path)
         assert_quality_gate_requires_raw_comment_lead_url(tmp_path)
         assert_comment_lead_link_overrides_ad_links(tmp_path)
