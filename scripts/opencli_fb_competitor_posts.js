@@ -130,8 +130,9 @@ function cleanUrl(value) {
   try {
     const parsed = new URL(value);
     parsed.hash = '';
+    const trackingKeys = new Set(['fbclid', 'comment_id', 'reply_comment_id', 'notif_id', 'notif_t', 'ref', 'refid', 'mibextid', 'rdid']);
     for (const key of [...parsed.searchParams.keys()]) {
-      if (key === 'fbclid' || key.startsWith('utm_') || key.startsWith('__')) parsed.searchParams.delete(key);
+      if (trackingKeys.has(key) || key.startsWith('utm_') || key.startsWith('__')) parsed.searchParams.delete(key);
     }
     return parsed.href;
   } catch {
@@ -186,6 +187,20 @@ function postKey(post) {
   } catch {
     return url;
   }
+}
+
+function detailNavigationUrl(post) {
+  const candidates = [
+    post?.canonical_post_url,
+    post?.parent_post_url,
+    post?.post_url,
+    post?.raw_fb_url,
+  ];
+  for (const candidate of candidates) {
+    const cleaned = cleanUrl(candidate || '');
+    if (cleaned) return cleaned;
+  }
+  return '';
 }
 
 function validCandidate(candidate) {
@@ -684,7 +699,7 @@ async function detail(page, kwargs) {
   const enriched = [];
   const details = [];
   for (const post of posts) {
-    const url = clean(post.post_url || post.canonical_post_url || post.raw_fb_url || post.parent_post_url);
+    const url = detailNavigationUrl(post);
     if (!url) {
       enriched.push(post);
       continue;

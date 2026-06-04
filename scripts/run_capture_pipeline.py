@@ -569,6 +569,7 @@ def main() -> int:
             "capture_complete": discover_payload.get("capture_complete", True),
             "coverage": discover_payload.get("coverage", {}),
             "expected_coverage": (discover_payload.get("coverage") or {}).get("expected", {}),
+            "snapshot_budget": discover_payload.get("snapshot_budget", {}),
             "discover_retry": discover_retry,
             "prepared": prepared_payload.get("prepared", 0),
             "coverage_note": prepared_payload.get("coverage_note", ""),

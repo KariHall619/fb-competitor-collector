@@ -6,6 +6,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 import json
+import re
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -236,6 +237,29 @@ def has_engagement_value(post: dict[str, Any]) -> bool:
     return any(post.get(field) is not None for field in ("likes", "comments", "shares", "views"))
 
 
+def parse_int_value(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def engagement_raw_conflicts_with_numbers(raw: Any, post: dict[str, Any]) -> bool:
+    text = str(raw or "")
+    if not text:
+        return False
+    likes = parse_int_value(post.get("likes"))
+    if likes is None:
+        return False
+    match = re.search(r"点赞量：\s*(\d+)", text)
+    if not match:
+        return False
+    raw_likes = int(match.group(1))
+    return raw_likes >= 100000 and likes <= 100
+
+
 def non_empty(value: Any) -> bool:
     return value not in (None, "")
 
@@ -303,10 +327,18 @@ def choose_value(existing: dict[str, Any], incoming: dict[str, Any], column: str
         if has_valid_story_summary(existing) and not has_valid_story_summary(incoming):
             return current
         return new_value if non_empty(new_value) else current
-    if column in {"views", "likes", "comments", "shares", "engagement_raw"}:
+    if column in {"views", "likes", "comments", "shares"}:
         if has_engagement_value(existing) and not has_engagement_value(incoming):
             return current
         return new_value if new_value is not None else current
+    if column == "engagement_raw":
+        if non_empty(new_value):
+            return new_value
+        if engagement_raw_conflicts_with_numbers(current, {**existing, **incoming}):
+            return ""
+        if has_engagement_value(existing) and not has_engagement_value(incoming):
+            return current
+        return current
     if column in {"output_status", "crawl_status"}:
         if existing.get("output_status") in PROTECTED_FINAL_STATUSES and incoming.get("output_status") not in PROTECTED_FINAL_STATUSES:
             return current

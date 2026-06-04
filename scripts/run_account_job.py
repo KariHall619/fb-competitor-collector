@@ -247,13 +247,11 @@ def discover_homepage_once(
     min_snapshots: int,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any], int]:
     started = time.monotonic()
-    config = load_config(args.config)
     command = [
-        *opencli_command(config),
-        "facebook",
-        "fb-competitor-posts",
-        "--mode",
-        "discover",
+        "node",
+        "scripts/opencli_extract_current_tab.mjs",
+        "--config",
+        args.config,
         "--account-url",
         args.account_url,
         "--max-text",
@@ -266,12 +264,6 @@ def discover_homepage_once(
         str(normalize_date_text(args.target_date) if args.target_date else ""),
         "--scroll-pixels",
         str(getattr(args, "scroll_pixels", 520)),
-        "--window",
-        "background",
-        "--site-session",
-        "ephemeral",
-        "-f",
-        "json",
     ]
     posted_after = getattr(args, "posted_after", "")
     posted_before = getattr(args, "posted_before", "")
@@ -490,6 +482,7 @@ def discover_and_import(
                             "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
                             "expected_coverage": (discover_payload.get("coverage") or {}).get("expected", {}),
                             "auto_retry": (discover_payload.get("coverage") or {}).get("auto_retry", {}),
+                            "snapshot_budget": discover_payload.get("snapshot_budget", {}),
                         },
                         "prepared_counts": prepared_counts,
                         "prepared": prepared_counts[target_date],
@@ -517,6 +510,7 @@ def discover_and_import(
                 "coverage_incomplete": discover_payload.get("coverage_incomplete", False),
                 "expected_coverage": (discover_payload.get("coverage") or {}).get("expected", {}),
                 "auto_retry": (discover_payload.get("coverage") or {}).get("auto_retry", {}),
+                "snapshot_budget": discover_payload.get("snapshot_budget", {}),
             },
             "discover_retry": discover_retry,
             "prepared_counts": prepared_counts,

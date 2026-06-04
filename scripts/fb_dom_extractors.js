@@ -193,6 +193,7 @@ function browserExpression(maxText = 1200) {
         source: 'homepage_post_block',
       };
       const countToken = '([\\\\d.,]+\\\\s*(?:K|M|万|w)?)';
+      const relativeTimeOnly = (value) => /^(?:just now|yesterday|刚刚|昨天|\\d+\\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)(?:\\s+ago)?|\\d+\\s*(?:分钟|小时|天|周))$/i.test(clean(value));
       const setMetric = (key, value, rawText) => {
         const parsed = parseCount(value);
         if (parsed === null || parsed === undefined) return;
@@ -203,6 +204,7 @@ function browserExpression(maxText = 1200) {
       const readMetricText = (text) => {
         const item = clean(text);
         if (!item || item.length > 220) return;
+        if (relativeTimeOnly(item)) return;
         const patterns = [
           ['views', new RegExp(countToken + '\\\\s*(?:views?|plays?|次播放|播放|浏览)', 'i')],
           ['comments', new RegExp(countToken + '\\\\s*(?:comments?|评论)', 'i')],

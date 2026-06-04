@@ -106,6 +106,7 @@ function detailEngagementBrowserExpression(target) {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const linesFrom = (value) => String(value || "").split(/\\n+/).map(clean).filter(Boolean);
     const countToken = "(\\\\d+(?:[.,]\\\\d+)?\\\\s*(?:K|k|M|m|万)?)";
+    const relativeTimeOnly = (value) => /^(?:just now|yesterday|刚刚|昨天|\\d+\\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)(?:\\s+ago)?|\\d+\\s*(?:分钟|小时|天|周))$/i.test(clean(value));
     const parseCount = (value) => {
       const text = clean(value).replace(/,/g, "");
       const match = text.match(/(\\d+(?:\\.\\d+)?)\\s*(K|k|M|m|万)?/);
@@ -182,6 +183,7 @@ function detailEngagementBrowserExpression(target) {
     const readMetricText = (text) => {
       const item = clean(text);
       if (!item || item.length > 180) return;
+      if (relativeTimeOnly(item)) return;
       const patterns = [
         ["views", new RegExp(countToken + "\\\\s*(?:views?|plays?|次播放|播放|浏览)", "i")],
         ["comments", new RegExp(countToken + "\\\\s*(?:comments?|评论)", "i")],
