@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from models import COMMENT_LEAD_SOURCES, ESTIMATED_TIME_SOURCES, has_qualified_comment_lead_link
+from models import QUALIFIED_LEAD_SOURCES, ESTIMATED_TIME_SOURCES, has_qualified_comment_lead_link
 from field_audit import audit_post_fields, audit_refetch_stages
 from story_summary_policy import article_material_for_post, has_valid_story_summary
 from value_utils import parse_bool
@@ -111,4 +111,4 @@ def is_partial_output(post: dict[str, Any]) -> bool:
 
 
 def has_qualified_lead_source(post: dict[str, Any]) -> bool:
-    return post.get("lead_link_source") in COMMENT_LEAD_SOURCES
+    return post.get("lead_link_source") in QUALIFIED_LEAD_SOURCES

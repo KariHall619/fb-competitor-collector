@@ -31,6 +31,7 @@ This file is the first-stop project memory for future agents working in this rep
 - Some homepage labels that look like "today" can resolve to the previous calendar date after detail-page exact-time confirmation. Formal output is gated on detail-page exact time, not homepage relative labels.
 - Short posts, photo/reel/watch/video links, missing parent post links, missing share counts, missing engagement, or missing summary must not cause capture-time deletion. Keep them as `needs_enrichment`.
 - Comment/reply lead links posted by the account are authoritative. Do not let detail-page right-column ads, suggested posts, feed ads, or unrelated external links overwrite a captured comment/reply lead link.
+- Some posts expose the external story through a main-post CTA such as `Watch more` instead of an account comment/reply. Treat an external link behind that main-post CTA as `lead_link_source=post_cta` and a qualified lead only when it is anchored inside the current post article, resolves outside Facebook/Meta, and is not from right-column ads, suggested posts, feed ads, page shell, or unrelated surfaces.
 - Quality gate is an output/sync gate, not an import gate. Valid candidates should enter SQLite first as `needs_enrichment`; later enrichment can promote them to `ready_for_output`.
 - Detail-page engagement must be anchored to the current main post DOM. Do not parse `document.body.innerText` or broad page text for likes/comments/shares, because comment blocks, recommendations, and ads can bind the wrong number to labels such as `Like`.
 - When a detail page exposes clustered metrics like `811 / 350 / 31`, treat them positionally as reactions/likes, comments, and shares after confirming the cluster belongs to the main post.
@@ -154,7 +155,7 @@ Final output requires all of the following:
 - `time_confirmed=true`.
 - `time_source` is not `relative_estimated`, `relative_hour`, or `relative_label`.
 - `lead_link_status=qualified`.
-- `lead_link_source` is `comment` or `comment_reply`.
+- `lead_link_source` is `comment`, `comment_reply`, or `post_cta`.
 - `landing_url` or `article_url` resolves outside Facebook/Meta.
 - `story_summary` is a valid Chinese article summary and `summary_source=article`; copied article title, meta description, text excerpt, or English source text does not qualify.
 

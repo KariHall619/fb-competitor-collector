@@ -927,6 +927,103 @@ function leadLinkScanBrowserExpression(accountName = "", mode = "default") {
   })(${JSON.stringify(accountName)}, ${JSON.stringify(mode)})`;
 }
 
+function postCtaLeadLinkScanBrowserExpression(accountName = "") {
+  return `((expectedAccountName) => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const linesFrom = (value) => String(value || "").split(/\\n+/).map(clean).filter(Boolean);
+    const ctaPattern = /\\b(watch more|watch now|learn more|read more|shop now|sign up|subscribe|get offer|apply now|book now|download)\\b|观看更多|继续观看|了解更多|阅读更多|查看完整|阅读全文|完整内容/i;
+    const isExternalHref = (href) => {
+      try {
+        const parsed = new URL(href, location.href);
+        const host = parsed.hostname.replace(/^www\\./i, "").toLowerCase();
+        if (!/^https?:$/i.test(parsed.protocol)) return false;
+        if (/l\\.facebook\\.com$/i.test(parsed.hostname) && parsed.searchParams.get("u")) return true;
+        return host !== "facebook.com"
+          && !host.endsWith(".facebook.com")
+          && host !== "fb.watch"
+          && host !== "meta.com"
+          && !host.endsWith(".meta.com");
+      } catch {
+        return false;
+      }
+    };
+    const normalizeCandidateHref = (href) => {
+      try {
+        const parsed = new URL(href, location.href);
+        if (/l\\.facebook\\.com$/i.test(parsed.hostname) && parsed.searchParams.get("u")) {
+          return new URL(parsed.searchParams.get("u"), location.href).href;
+        }
+        return parsed.href;
+      } catch {
+        return "";
+      }
+    };
+    const ownerName = clean(expectedAccountName);
+    const ownerNameLower = ownerName.toLowerCase();
+    const forbiddenChrome = (node) => {
+      const shell = node.closest?.('[role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"], nav, aside, footer, header');
+      return Boolean(shell);
+    };
+    const looksLikePageShellOrAd = (text) => /Sponsored|Suggested for you|Create a post|What's on your mind|Privacy\\s*·\\s*Terms|Ads Manager|Harness the Power of AI|Feed posts/i.test(text);
+    const ownerMatchedNearTop = (lines) => {
+      if (!ownerName) return true;
+      return lines.slice(0, 18).some((line) => line.toLowerCase() === ownerNameLower);
+    };
+    const outerArticle = (node) => {
+      let current = node;
+      let found = null;
+      while (current) {
+        if (current.matches?.('[role="article"], article')) found = current;
+        current = current.parentElement;
+      }
+      return found || node;
+    };
+    const rawRoots = [...document.querySelectorAll('[role="article"], article')]
+      .map(outerArticle)
+      .filter((node, index, items) => node && items.indexOf(node) === index);
+    const roots = rawRoots;
+    const results = [];
+    for (const root of roots) {
+      if (forbiddenChrome(root)) continue;
+      const rawText = root.innerText || root.textContent || "";
+      const text = clean(rawText);
+      if (!text || text.length > 12000 || !ctaPattern.test(text) || looksLikePageShellOrAd(text)) continue;
+      const lines = linesFrom(rawText);
+      const ownerMatched = ownerMatchedNearTop(lines);
+      if (!ownerMatched) continue;
+      const links = [...root.querySelectorAll("a[href]")]
+        .map((a) => {
+          const rect = a.getBoundingClientRect?.() || { x: 0, y: 0 };
+          return {
+            href: normalizeCandidateHref(a.getAttribute("href")),
+            text: clean(a.innerText || a.textContent || ""),
+            aria: clean(a.getAttribute("aria-label") || ""),
+            title: clean(a.getAttribute("title") || ""),
+            x: rect.x || 0,
+            y: rect.y || 0,
+          };
+        })
+        .filter((link) => link.href && isExternalHref(link.href))
+        .filter((link, index, items) => items.findIndex((item) => item.href === link.href) === index);
+      if (!links.length) continue;
+      const ctaLinks = links.filter((link) => ctaPattern.test([link.text, link.aria, link.title].join(" ")));
+      const selected = ctaLinks[0] || links[0];
+      const ctaLine = lines.find((line) => ctaPattern.test(line)) || selected.text || selected.aria || selected.title || "post_cta";
+      results.push({
+        href: selected.href,
+        text: selected.text || selected.aria || selected.title || ctaLine,
+        block_text: text.slice(0, 900),
+        source: "post_cta",
+        owner_matched: ownerMatched,
+        cta_text: ctaLine,
+        cta_link_text_matched: ctaLinks.length > 0,
+      });
+    }
+    results.sort((a, b) => Number(b.cta_link_text_matched) - Number(a.cta_link_text_matched));
+    return results.slice(0, 10);
+  })(${JSON.stringify(accountName)})`;
+}
+
 function cleanExternalUrl(href) {
   if (!href) return "";
   try {
@@ -1046,6 +1143,38 @@ async function extractLeadLink(context, accountName = "") {
       };
     }
   }
+  const ctaCandidates = await evalPayload(context, postCtaLeadLinkScanBrowserExpression(accountName));
+  const ctaSelected = (ctaCandidates || []).find((item) => item.owner_matched) || (ctaCandidates || [])[0] || null;
+  attempts.push({
+    mode: "post_cta",
+    candidate_count: (ctaCandidates || []).length,
+    selected: ctaSelected
+      ? {
+          href: ctaSelected.href,
+          source: ctaSelected.source,
+          owner_matched: ctaSelected.owner_matched,
+          cta_text: ctaSelected.cta_text,
+          block_text: ctaSelected.block_text,
+        }
+      : null,
+  });
+  if (ctaSelected) {
+    const landingUrl = await resolveLandingUrl(ctaSelected.href);
+    if (landingUrl) {
+      return {
+        status: "qualified",
+        lead_url_raw: ctaSelected.href,
+        landing_url: landingUrl,
+        lead_link_source: "post_cta",
+        owner_matched: ctaSelected.owner_matched,
+        comment_excerpt: ctaSelected.block_text,
+        cta_text: ctaSelected.cta_text,
+        candidates: ctaCandidates || [],
+        attempts,
+      };
+    }
+    if (!fallbackSelected) fallbackSelected = ctaSelected;
+  }
   if (!fallbackSelected) {
     return { status: "missing", candidates: [], attempts };
   }
@@ -1064,7 +1193,7 @@ async function extractLeadLink(context, accountName = "") {
 function hasQualifiedLeadLink(post) {
   return Boolean(
     post.lead_link_status === "qualified"
-    && ["comment", "comment_reply"].includes(post.lead_link_source || "")
+    && ["comment", "comment_reply", "post_cta"].includes(post.lead_link_source || "")
     && post.lead_url_raw
     && qualifiedLandingUrlFor(post)
   );
@@ -1368,7 +1497,7 @@ async function enrichPostInContext(post, context) {
       post.lead_link_status = "missing";
     }
     if (leadLink.status !== "qualified") {
-      post.note = appendSemicolonNote(post.note, "评论区或评论回复引流链接待确认");
+      post.note = appendSemicolonNote(post.note, "评论区、评论回复或主帖CTA引流链接待确认");
     }
   }
   post.output_status = outputStatusFor(post);
@@ -1597,4 +1726,5 @@ export {
   leadLinkScanBrowserExpression,
   outputStatusFor,
   parseBool,
+  postCtaLeadLinkScanBrowserExpression,
 };

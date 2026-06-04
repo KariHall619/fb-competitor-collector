@@ -15,7 +15,7 @@ from value_utils import parse_bool
 DEFAULT_REQUIRED_ENGAGEMENT_FIELDS = ["likes", "comments", "shares"]
 DEFAULT_REQUIRED_POST_TYPES = ["图文", "视频", "仅图片", "仅文字"]
 SYSTEM_MARKER_PREFIX = "待补抓："
-COMMENT_LEAD_SOURCES = {"comment", "comment_reply"}
+QUALIFIED_LEAD_SOURCES = {"comment", "comment_reply", "post_cta"}
 ESTIMATED_TIME_SOURCES = {"relative_hour", "relative_estimated", "relative_label"}
 COVERAGE_INCOMPLETE_REASONS = {"coverage_blocked", "coverage_incomplete"}
 FACEBOOK_INTERNAL_HOSTS = {
@@ -89,7 +89,7 @@ def has_qualified_audit_lead(post: dict[str, Any]) -> bool:
     landing_url = post.get("landing_url") or post.get("article_url")
     return bool(
         post.get("lead_link_status") == "qualified"
-        and post.get("lead_link_source") in COMMENT_LEAD_SOURCES
+        and post.get("lead_link_source") in QUALIFIED_LEAD_SOURCES
         and landing_url
         and is_external_landing_url(landing_url)
     )

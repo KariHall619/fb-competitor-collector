@@ -25,6 +25,7 @@ from models import (
     is_estimated_time_source,
     normalize_posted_at,
     parse_count,
+    QUALIFIED_LEAD_SOURCES,
 )
 from pipeline_status import crawl_status_for, output_status_for
 
@@ -217,7 +218,7 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
     article_url = landing_url
     if comment_landing_url:
         lead_link_status = "qualified"
-    elif lead_link_status != "qualified" and lead_url_raw and lead_link_source in {"comment", "comment_reply"} and is_external_landing_url(landing_url):
+    elif lead_link_status != "qualified" and lead_url_raw and lead_link_source in QUALIFIED_LEAD_SOURCES and is_external_landing_url(landing_url):
         lead_link_status = "qualified"
     relative_time = str(raw.get("relative_time_text") or raw.get("post_time_text") or "").strip()
     posted_at = normalize_posted_at(raw.get("posted_at") or raw.get("posted_at_raw") or "")
@@ -244,7 +245,7 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
     if target_date and not candidate_date:
         note_parts.append("目标日期待确认")
     if not article_url:
-        note_parts.append("评论/回复引流落地链接待确认")
+        note_parts.append("评论/回复或主帖CTA引流落地链接待确认")
     story_summary = clean_story_placeholder(raw)
     summary_source = summary_source_for_story(raw, story_summary)
     post_type = str(first_raw_value(raw, POST_TYPE_KEYS)).strip()
@@ -253,7 +254,7 @@ def prepare_record(raw: dict[str, Any], defaults: dict[str, str], target_date: s
     if not post_type:
         note_parts.append("帖子类型待确认")
     if lead_link_status != "qualified":
-        note_parts.append("评论区或评论回复引流链接待确认")
+        note_parts.append("评论区、评论回复或主帖CTA引流链接待确认")
     if views is None and likes is None and not engagement:
         note_parts.append("互动数据未确认")
     if parse_count(first_raw_value(raw, SHARE_KEYS)) is None:

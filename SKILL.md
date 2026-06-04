@@ -154,8 +154,8 @@ Preferred fields:
 - `article_url`
 - `lead_url_raw`
 - `landing_url`
-- `lead_link_status`: `qualified` only after a comment/reply lead link resolves to an external site
-- `lead_link_source`: `comment` or `comment_reply`
+- `lead_link_status`: `qualified` only after a comment/reply or main-post CTA lead link resolves to an external site
+- `lead_link_source`: `comment`, `comment_reply`, or `post_cta`
 - `story_summary`
 - `summary_source`: `article` when the summary is based on article material
 - `views`
@@ -174,8 +174,8 @@ Rules:
 - Never store passwords, cookies, API keys, or tokens.
 - Capture must keep `photo.php`, `/photo/`, `/photos/`, `/reel/`, `/watch/`, `/video/`, `/videos/`, `/share/`, and group-post candidates. These are valid FB content candidates and must not be dropped just because a parent `/posts/` link is missing.
 - Parent post links are best-effort dedupe helpers. If a parent link is available, store it in `parent_post_url`; if not, keep the original `raw_fb_url` / `post_url` and leave later similarity review to a separate pass.
-- Formal output requires a lead link posted by the account in the comment area or a comment reply. The link must resolve outside Facebook/Meta and be stored as `landing_url`; set `lead_link_status=qualified`.
-- A comment/reply lead link already captured from the homepage or post comments is authoritative. Detail-page enrichment must not overwrite it with unrelated external links from right-column ads, suggested posts, feed ads, or other non-comment page surfaces.
+- Formal output requires a lead link posted by the account in the comment area, a comment reply, or a main-post CTA such as `Watch more`. The link must resolve outside Facebook/Meta and be stored as `landing_url`; set `lead_link_status=qualified`.
+- A comment/reply lead link already captured from the homepage or post comments is authoritative. Detail-page enrichment must not overwrite it with unrelated external links from right-column ads, suggested posts, feed ads, or other page surfaces. A `post_cta` link is valid only when it is anchored inside the current main post article and the CTA text clearly represents an outbound story/action button such as `Watch more`.
 - Missing share count, parent post URL, exact time, summary, or lead link must not drop the candidate at capture time. Keep the candidate as `needs_enrichment`; normal `--sync` may still upsert it to the formal Feishu table with a `待补抓：...` marker in `是否采用`.
 - Normal `--sync` writes confirmed Facebook post candidates to the formal Feishu ledger even when fields are incomplete. Estimated time, missing article summary, missing lead link, missing engagement, missing post type, or incomplete coverage must be marked in `是否采用` as `待补抓：...`.
 - Feishu upsert must not downgrade previously filled `帖子类型` or article-sourced `故事概要` to blank when a later partial/audit row for the same post is still incomplete. Manual `是否采用` values stay protected; system `待补抓：...` markers may update or clear as gaps change.
@@ -185,7 +185,7 @@ Rules:
 - Timestamp tooltip capture is automated by the skill. First try synthetic page hover through OpenCLI Browser Bridge; if Facebook does not show the tooltip, the skill may use OpenCLI Browser Bridge mouse movement as an automated fallback. Do not ask the business user to manually hover timestamps.
 - Human intervention is only for blocking states such as login expiry, visitor preview, CAPTCHA/risk control, the wrong Chrome profile, or a page where posts are not visibly loaded.
 - Before deleting any remaining relative-time fallback code, run the exact-time verifier against a real logged-in Facebook tab through the trusted OpenCLI Browser Bridge runtime and require `status=exact_time_confirmed`.
-- Short posts must be kept if they have a valid FB content URL. If comment/reply lead link, landing URL, article summary, engagement, or exact time is missing, keep them as `needs_enrichment` instead of dropping them.
+- Short posts must be kept if they have a valid FB content URL. If comment/reply/main-post CTA lead link, landing URL, article summary, engagement, or exact time is missing, keep them as `needs_enrichment` instead of dropping them.
 - For scale-out runs, first import visible candidates as `partial_review`, then resume queued enrichment stages in SQLite. Normal formal `--sync` upserts auditable candidates by post URL and fills missing-field reasons in `是否采用`; use `--strict-ready-only` only when the operator explicitly wants the legacy ready-only gate.
 - For business capture-and-write requests, prefer `run_account_job.py` over manual stage stitching. The job result must be interpreted by `run_status`: `complete` means the scoped job finished; `synced_ledger_incomplete`, `incomplete_pending_tasks`, `coverage_incomplete`, or `needs_codex_summary` means Feishu may have ledger rows but the capture job is not done.
 - For “all target accounts” capture-and-write requests, prefer `run_accounts_job.py` over manual loops. The batch result is complete only when every account-level `run_status` is `complete`; otherwise report the affected accounts and the emitted per-account `next_commands`. The batch entrypoint automatically follows same-account machine-runnable recovery commands before reporting incomplete.
@@ -211,7 +211,7 @@ Rules:
 - Stable no-new-post extraction stop is normal completion. Business account capture defaults to `--max-snapshots 32 --min-snapshots 6` so Facebook virtualized feeds get multiple scroll samples before stopping. If current-tab extraction returns raw snapshot-cap `coverage_incomplete=true`, `run_account_job.py` and `run_capture_pipeline.py` automatically retry once from the page top with a higher snapshot budget before reporting the run. If it remains incomplete after the automatic retry, keep rows visible in the ledger and mark coverage as `待补抓：覆盖不足`.
 - `coverage_note` should clear after a later same-post homepage rerun proves coverage complete. Do not preserve an old coverage marker forever, or the batch can keep reporting `coverage_incomplete` after the user-visible coverage has already been fixed.
 - If the user supplies a visible expected count or label checklist, missing expected posts/labels is also `coverage_incomplete` even when scrolling itself looked stable.
-- Re-importing the same post must preserve higher-quality stored fields. Do not overwrite confirmed detail time, qualified comment/reply lead links, external landing URLs, valid Chinese article summaries, engagement values, manual `是否采用`, or final output status with weaker partial data.
+- Re-importing the same post must preserve higher-quality stored fields. Do not overwrite confirmed detail time, qualified comment/reply/main-post CTA lead links, external landing URLs, valid Chinese article summaries, engagement values, manual `是否采用`, or final output status with weaker partial data.
 - Import and prepare paths must recognize business header aliases for the two fields operators reported missing: `内容类型` is `post_type`, and `内容摘要` / `文章摘要` / `摘要` / `故事概要` are article-sourced `story_summary` fields. If a post has these explicit fields, do not leave the Feishu `帖子类型` / `故事概要` cells empty.
 - Real project status recomputation must use the loaded config. `ready_for_output` is only valid after current `quality_audit` passes, so rows missing `post_type` or a valid article-sourced `story_summary` stay incomplete and keep the corresponding补抓/summary work visible.
 - A historical `enrichment_tasks.status=done` only means that stage was satisfied at that time. If the current row later lacks `post_type`, engagement, article material, or a valid article-based Chinese summary, the normal account job must reopen the non-running task as `pending` and continue the pipeline.
@@ -264,7 +264,7 @@ Do not implement article generation, site publishing, FB lead-post generation, s
 
 - `scripts/fb_dom_extractors.js`: visible DOM post-link, timestamp, external-link, and engagement extraction.
 - `scripts/opencli_extract_current_tab.mjs`: syntax-checkable reference for the current-tab route. Actual live execution should use the OpenCLI Browser Bridge runtime.
-- `scripts/opencli_enrich_post_details.mjs`: post detail exact-time, comment/reply expansion, lead-link resolution, target-date filtering, and ready/needs-enrichment status updates.
+- `scripts/opencli_enrich_post_details.mjs`: post detail exact-time, comment/reply expansion, main-post CTA lead-link detection, lead-link resolution, target-date filtering, and ready/needs-enrichment status updates.
 - `scripts/field_schema.py`: Feishu A-K output format and account/source sheet header aliases.
 - OpenCLI's built-in Facebook adapter is a browser/connectivity dependency and research reference; do not use its generic `facebook feed` columns as this project's final business contract.
 

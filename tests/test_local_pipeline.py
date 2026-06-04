@@ -4450,6 +4450,99 @@ if (results.length !== 1 || !results[0].href.includes('kaylestore.net/i-took-car
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_detail_enrichment_detects_post_cta_watch_more_links() -> None:
+    script = """
+import { postCtaLeadLinkScanBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
+
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() {
+    return this.innerText;
+  }
+  get href() {
+    return this.attrs.href ? new URL(this.attrs.href, global.location.href).href : '';
+  }
+  getAttribute(name) {
+    return this.attrs[name] || '';
+  }
+  getBoundingClientRect() {
+    return { x: 10, y: 10, width: 100, height: 30 };
+  }
+  matches(selector) {
+    return (selector.includes('[role="article"]') && this.attrs.role === 'article')
+      || (selector.includes('article') && this.tagName === 'ARTICLE');
+  }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (selector.includes('[role="article"]') && node.attrs.role === 'article') return node;
+      if (selector.includes('[role="complementary"]') && node.attrs.role === 'complementary') return node;
+      if (selector.includes('[role="navigation"]') && node.attrs.role === 'navigation') return node;
+      if (selector.includes('[role="contentinfo"]') && node.attrs.role === 'contentinfo') return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a[href]') return node.tagName === 'A' && !!node.attrs.href;
+      if (current === '[role="article"]') return node.attrs.role === 'article';
+      if (current === 'article') return node.tagName === 'ARTICLE';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+
+const sideAd = new Node('div', { role: 'complementary' }, [
+  new Node('a', { href: 'https://l.facebook.com/l.php?u=https%3A%2F%2Fads.example%2Ftrial' }, [], 'Watch more')
+]);
+const post = new Node('div', { role: 'article' }, [
+  new Node('span', {}, [], 'Honor Reward'),
+  new Node('span', {}, [], 'TEKNOBILGILERI.COM'),
+  new Node('span', {}, [], 'She Mocked a Man in the Executive Lounge'),
+  new Node('a', { href: 'https://l.facebook.com/l.php?u=https%3A%2F%2Fteknobilgileri.com%2Fexecutive-lounge-story%3Ffbclid%3Dabc' }, [], 'Watch more'),
+  new Node('span', {}, [], 'Like'),
+  new Node('span', {}, [], 'Comment'),
+  new Node('span', {}, [], 'Share')
+]);
+const body = new Node('body', {}, [sideAd, post]);
+global.document = {
+  body,
+  querySelectorAll: (selector) => body.querySelectorAll(selector),
+};
+global.location = new URL('https://www.facebook.com/honorreward/posts/pfbid');
+const results = eval(postCtaLeadLinkScanBrowserExpression('Honor Reward'));
+if (results.length !== 1 || !results[0].href.includes('teknobilgileri.com/executive-lounge-story')) {
+  console.error(JSON.stringify(results, null, 2));
+  process.exit(1);
+}
+if (results[0].href.includes('ads.example') || results[0].source !== 'post_cta') {
+  console.error(JSON.stringify(results, null, 2));
+  process.exit(2);
+}
+"""
+    result = run(["node", "--input-type=module", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_detail_engagement_is_anchored_to_main_post() -> None:
     script = """
 import { detailEngagementBrowserExpression } from './scripts/opencli_enrich_post_details.mjs';
@@ -5559,6 +5652,39 @@ def assert_enrichment_worker_lead_stage_requires_external_landing_url() -> None:
     }
     assert enrichment_worker.detail_stage_satisfied(internal_lead, "lead_link") is False
     assert enrichment_worker.detail_stage_satisfied(external_lead, "lead_link") is True
+
+
+def assert_post_cta_lead_source_qualifies_for_quality_gate() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import enrichment_worker
+    from field_audit import audit_post_fields
+    from models import normalize_post
+    from output_quality import output_quality_errors
+
+    post = normalize_post(
+        {
+            "post_url": "https://www.facebook.com/honorreward/posts/watch-more",
+            "posted_at": "2026年6月3日 10:00",
+            "time_confirmed": True,
+            "time_source": "dom_aria_label",
+            "article_url": "https://teknobilgileri.com/executive-lounge-story",
+            "landing_url": "https://teknobilgileri.com/executive-lounge-story",
+            "lead_url_raw": "https://teknobilgileri.com/executive-lounge-story",
+            "lead_link_status": "qualified",
+            "lead_link_source": "post_cta",
+            "article_summary": VALID_CN_SUMMARY,
+            "summary_source": "article",
+            "post_type": "视频",
+            "likes": 8,
+            "comments": 2,
+            "shares": 1,
+            "output_status": "ready_for_output",
+        }
+    )
+    assert post["output_status"] == "ready_for_output"
+    assert output_quality_errors([post]) == []
+    assert audit_post_fields(post)["field_audit_status"] == "passed"
+    assert enrichment_worker.detail_stage_satisfied(post, "lead_link") is True
 
 
 def assert_stale_running_enrichment_tasks_are_recovered(tmp_path: Path) -> None:
@@ -13303,6 +13429,7 @@ def main() -> int:
     assert_detail_engagement_is_anchored_to_main_post()
     assert_detail_enrichment_ignores_page_shell_ad_links()
     assert_detail_enrichment_detects_plain_text_comment_links()
+    assert_detail_enrichment_detects_post_cta_watch_more_links()
     assert_detail_post_type_expression_classifies_business_types()
     assert_comment_mode_expression_can_select_all_comments()
     assert_opencli_extract_helpers_dedupe_homepage_candidates()
@@ -13422,6 +13549,7 @@ def main() -> int:
         assert_detail_results_match_facebook_url_variants(tmp_path)
         assert_enrichment_worker_requeues_opencli_session_busy(tmp_path)
         assert_enrichment_worker_lead_stage_requires_external_landing_url()
+        assert_post_cta_lead_source_qualifies_for_quality_gate()
         assert_stale_running_enrichment_tasks_are_recovered(tmp_path)
         assert_enqueue_does_not_steal_active_running_tasks(tmp_path)
         assert_enqueue_reopens_done_tasks_when_fields_are_missing_again(tmp_path)

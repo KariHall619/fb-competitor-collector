@@ -520,7 +520,7 @@ def sync_cli_exit_code(sync_result: dict[str, Any]) -> int:
 def _failed_sync_next_actions(sync_result: dict[str, Any]) -> list[str]:
     stage = str(sync_result.get("stage") or sync_result.get("run_status") or "")
     if stage == "quality_gate":
-        return ["严格完整行同步未执行：继续补齐精确时间、评论/回复引流链接、外部落地页和文章来源中文概要后重试。"]
+        return ["严格完整行同步未执行：继续补齐精确时间、评论/回复/主帖CTA引流链接、外部落地页和文章来源中文概要后重试。"]
     if stage == "audit_output_gate":
         return ["当前没有可写入正式台账的候选；先确认已从主页顶部采集并导入了有效 Facebook 帖子链接和账号信息。"]
     if stage == "partial_gate":

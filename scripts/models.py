@@ -46,6 +46,8 @@ FACEBOOK_INTERNAL_HOSTS = {
 }
 ESTIMATED_TIME_SOURCES = {"relative_hour", "relative_estimated", "relative_label"}
 COMMENT_LEAD_SOURCES = {"comment", "comment_reply"}
+POST_CTA_LEAD_SOURCES = {"post_cta"}
+QUALIFIED_LEAD_SOURCES = COMMENT_LEAD_SOURCES | POST_CTA_LEAD_SOURCES
 RELATIVE_TIME_RE = re.compile(
     r"^(?:just now|yesterday|\d+\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)(?:\s+ago)?|刚刚|\d+\s*分钟|\d+\s*小时|昨天|\d+\s*天|\d+\s*周)$",
     re.I,
@@ -361,15 +363,15 @@ def clean_article_url(value: Any) -> str:
 
 
 def comment_lead_landing_url(lead_url_raw: Any, lead_link_source: Any) -> str:
-    """Return the comment/reply lead URL when it is a real external landing page.
+    """Return a qualified lead URL when it is a real external landing page.
 
     Facebook detail pages can contain unrelated right-column or feed ads. A link
-    found in the account's own comment/reply is more authoritative than generic
-    external links discovered elsewhere on the page.
+    found in the account's own comment/reply or in the main-post CTA is more
+    authoritative than generic external links discovered elsewhere on the page.
     """
 
     source = str(lead_link_source or "").strip()
-    if source not in COMMENT_LEAD_SOURCES:
+    if source not in QUALIFIED_LEAD_SOURCES:
         return ""
     cleaned = clean_article_url(lead_url_raw)
     return cleaned if is_external_landing_url(cleaned) else ""
@@ -379,7 +381,7 @@ def has_qualified_comment_lead_link(post: dict[str, Any]) -> bool:
     landing_url = post.get("landing_url") or post.get("article_url")
     return (
         post.get("lead_link_status") == "qualified"
-        and post.get("lead_link_source") in COMMENT_LEAD_SOURCES
+        and post.get("lead_link_source") in QUALIFIED_LEAD_SOURCES
         and bool(post.get("lead_url_raw"))
         and is_external_landing_url(landing_url)
     )

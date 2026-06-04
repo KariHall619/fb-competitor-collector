@@ -292,7 +292,7 @@ def main() -> int:
                 {
                     "ok": False,
                     "stage": "quality_gate",
-                    "message": "同步已停止：存在完全缺失发帖时间、未生成文章来源中文概要，或缺少评论/回复引流落地链接的记录。",
+                    "message": "同步已停止：存在完全缺失发帖时间、未生成文章来源中文概要，或缺少评论/回复/主帖CTA引流落地链接的记录。",
                     "errors": quality_errors,
                 },
                 enrichment_completion_summary(conn, sync_candidates, config),
@@ -306,7 +306,7 @@ def main() -> int:
                 {
                     "ok": False,
                     "stage": "quality_gate",
-                    "message": "同步已停止：当前没有字段完整、可写最终表的记录；候选已保存在本地库，需继续补齐发帖时间、摘要和评论/回复引流落地链接。",
+                    "message": "同步已停止：当前没有字段完整、可写最终表的记录；候选已保存在本地库，需继续补齐发帖时间、摘要和评论/回复/主帖CTA引流落地链接。",
                     "ready_for_output": 0,
                     "needs_enrichment_skipped": skipped,
                 },
