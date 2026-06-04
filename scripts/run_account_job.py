@@ -63,6 +63,13 @@ def run_command(command: list[str], *, timeout: int | None = None) -> subprocess
     return subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False, timeout=timeout)
 
 
+def opencli_command(config: dict[str, Any]) -> list[str]:
+    command = config.get("opencli_command")
+    if isinstance(command, list) and command:
+        return [str(item) for item in command]
+    return [str(config.get("opencli_path") or "opencli")]
+
+
 def parse_json_output(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     try:
         return json.loads(result.stdout)
@@ -199,12 +206,9 @@ def discover_homepage_once(
     min_snapshots: int,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any], int]:
     started = time.monotonic()
+    config = load_config(args.config)
     command = [
-        "python3",
-        "scripts/run_project_opencli.py",
-        "--config",
-        args.config,
-        "--",
+        *opencli_command(config),
         "facebook",
         "fb-competitor-posts",
         "--mode",

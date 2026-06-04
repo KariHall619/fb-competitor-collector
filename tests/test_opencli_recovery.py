@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 from argparse import Namespace
 from pathlib import Path
 
@@ -20,6 +19,7 @@ def test_check_env_launches_chrome_and_waits_for_bridge() -> None:
     original_read = check_env.read_opencli_daemon_status
     original_run = check_env.run_opencli_command
     original_open_chrome = check_env.open_chrome_for_bridge
+    original_adapter = check_env.opencli_adapter_status
     try:
         statuses = [
             {"ok": True, "status": {"ok": True, "extensionConnected": False}},
@@ -47,6 +47,7 @@ def test_check_env_launches_chrome_and_waits_for_bridge() -> None:
 
         check_env.run_opencli_command = fake_run
         check_env.open_chrome_for_bridge = lambda: {"ok": True, "returncode": 0, "command": ["open"]}
+        check_env.opencli_adapter_status = lambda: {"ok": True, "exists": True, "path": "/tmp/adapter.js"}
 
         result = check_env.check_opencli(
             ["opencli"],
@@ -59,6 +60,7 @@ def test_check_env_launches_chrome_and_waits_for_bridge() -> None:
         check_env.read_opencli_daemon_status = original_read
         check_env.run_opencli_command = original_run
         check_env.open_chrome_for_bridge = original_open_chrome
+        check_env.opencli_adapter_status = original_adapter
 
     assert result["ok"] is True
     assert result["status"] == "ready"
@@ -78,6 +80,7 @@ def test_check_env_requires_configured_opencli_browser_command() -> None:
     original_check = check_env.check_invocation
     original_read = check_env.read_opencli_daemon_status
     original_run = check_env.run_opencli_command
+    original_adapter = check_env.opencli_adapter_status
     try:
         check_env.check_invocation = lambda command: {
             "command": command,
@@ -98,6 +101,7 @@ def test_check_env_requires_configured_opencli_browser_command() -> None:
             "stdout": "",
             "stderr": "configured opencli cannot run browser commands",
         }
+        check_env.opencli_adapter_status = lambda: {"ok": True, "exists": True, "path": "/tmp/adapter.js"}
         result = check_env.check_opencli(
             ["fake-opencli"],
             daemon_port=19825,
@@ -108,6 +112,7 @@ def test_check_env_requires_configured_opencli_browser_command() -> None:
         check_env.check_invocation = original_check
         check_env.read_opencli_daemon_status = original_read
         check_env.run_opencli_command = original_run
+        check_env.opencli_adapter_status = original_adapter
 
     assert result["ok"] is False
     assert result["status"] == "browser_command_failed"
@@ -115,20 +120,50 @@ def test_check_env_requires_configured_opencli_browser_command() -> None:
     assert result["blocking_issue"] == "browser_command_failed"
 
 
-def test_project_opencli_wrapper_syncs_project_adapter() -> None:
+def test_check_env_reports_missing_opencli_adapter() -> None:
     sys.path.insert(0, str(ROOT / "scripts"))
-    import run_project_opencli
+    import check_env
 
-    with tempfile.TemporaryDirectory() as tmp:
-        runtime_home = Path(tmp)
-        run_project_opencli.sync_project_adapters(runtime_home)
-        adapter = runtime_home / ".opencli" / "clis" / "facebook" / "fb-competitor-posts.js"
-        assert adapter.exists()
-        text = adapter.read_text(encoding="utf-8")
-        assert "site: 'facebook'" in text
-        assert "name: 'fb-competitor-posts'" in text
-        assert "browser: true" in text
-        assert "Strategy.COOKIE" in text
+    original_check = check_env.check_invocation
+    original_read = check_env.read_opencli_daemon_status
+    original_run = check_env.run_opencli_command
+    original_adapter = check_env.opencli_adapter_status
+    try:
+        check_env.check_invocation = lambda command: {
+            "command": command,
+            "path": command[0],
+            "resolved_path": command[0],
+            "exists": True,
+            "ok": True,
+            "stdout": "1.8.2",
+            "stderr": "",
+        }
+        check_env.read_opencli_daemon_status = lambda _port: {
+            "ok": True,
+            "status": {"ok": True, "extensionConnected": True},
+        }
+        check_env.run_opencli_command = lambda command, args, timeout=20: {
+            "ok": True,
+            "returncode": 0,
+            "stdout": "[]",
+            "stderr": "",
+        }
+        check_env.opencli_adapter_status = lambda: {"ok": False, "exists": False, "path": "/tmp/missing.js"}
+        result = check_env.check_opencli(
+            ["fake-opencli"],
+            daemon_port=19825,
+            auto_fix=False,
+            session="fb-competitor",
+        )
+    finally:
+        check_env.check_invocation = original_check
+        check_env.read_opencli_daemon_status = original_read
+        check_env.run_opencli_command = original_run
+        check_env.opencli_adapter_status = original_adapter
+
+    assert result["ok"] is False
+    assert result["status"] == "adapter_missing"
+    assert result["blocking_issue"] == "adapter_missing"
 
 
 def test_run_accounts_does_not_preopen_account_tabs() -> None:
@@ -179,5 +214,5 @@ def test_run_accounts_does_not_preopen_account_tabs() -> None:
 if __name__ == "__main__":
     test_check_env_launches_chrome_and_waits_for_bridge()
     test_check_env_requires_configured_opencli_browser_command()
-    test_project_opencli_wrapper_syncs_project_adapter()
+    test_check_env_reports_missing_opencli_adapter()
     test_run_accounts_does_not_preopen_account_tabs()

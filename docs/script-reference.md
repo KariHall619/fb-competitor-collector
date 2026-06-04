@@ -127,5 +127,11 @@ PYTHONPYCACHEPREFIX=/private/tmp/fb-competitor-pycache python3 -m py_compile scr
 node -c scripts/fb_dom_extractors.js
 node -c scripts/fb_detail_extractors.js
 node -c scripts/fb_time_extractors.js
-node -c opencli/clis/facebook/fb-competitor-posts.js
+node -c scripts/opencli_fb_competitor_posts.js
+```
+
+Install or refresh the OpenCLI adapter in the real OpenCLI home:
+
+```bash
+python3 scripts/install_opencli_adapter.py --config config/settings.yaml
 ```

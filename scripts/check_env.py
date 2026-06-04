@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 import platform
 import subprocess
 import time
@@ -144,6 +145,40 @@ def probe_opencli_browser_command(command: list[str], session: str, *, timeout: 
     }
 
 
+def opencli_adapter_status() -> dict[str, Any]:
+    path = Path.home() / ".opencli" / "clis" / "facebook" / "fb-competitor-posts.js"
+    exists = path.exists()
+    result: dict[str, Any] = {"path": str(path), "exists": exists}
+    if exists:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            result.update({"ok": False, "error": str(exc)})
+            return result
+        result.update(
+            {
+                "ok": all(
+                    marker in text
+                    for marker in (
+                        "site: 'facebook'",
+                        "name: 'fb-competitor-posts'",
+                        "browser: true",
+                        "Strategy.COOKIE",
+                    )
+                ),
+                "managed_source": "scripts/opencli_fb_competitor_posts.js",
+            }
+        )
+    else:
+        result.update(
+            {
+                "ok": False,
+                "install_command": "python3 scripts/install_opencli_adapter.py --config config/settings.yaml",
+            }
+        )
+    return result
+
+
 def parse_version(text: str) -> tuple[int, int, int] | None:
     cleaned = text.strip().lstrip("v")
     parts = cleaned.split(".")
@@ -185,6 +220,11 @@ def opencli_next_actions(status: str) -> list[str]:
         return [
             "重新运行 python3 scripts/check_env.py --config config/settings.yaml --fix-opencli 以重启 daemon、打开 Chrome 并复测 Browser Bridge。",
             "如果仍失败，确认配置解析出的 opencli 命令和业务 Chrome 中连接的 Browser Bridge 属于同一套 OpenCLI runtime。",
+        ]
+    if status == "adapter_missing":
+        return [
+            "运行 python3 scripts/install_opencli_adapter.py --config config/settings.yaml，用 opencli browser init 初始化并安装 fb-competitor-posts adapter。",
+            "安装后重新运行 python3 scripts/check_env.py --config config/settings.yaml --fix-opencli。",
         ]
     return ["修复 OpenCLI 命令或 daemon 后，重新运行 python3 scripts/check_env.py --config config/settings.yaml --fix-opencli。"]
 
@@ -307,12 +347,23 @@ def check_opencli(
         extension_connected = bool(status_payload.get("extensionConnected"))
         daemon_running = bool(daemon_status.get("ok") and status_payload.get("ok"))
     browser_probe = {"ok": True, "skipped": True}
+    adapter = opencli_adapter_status()
     if command.get("ok") and version_ready and daemon_running and extension_connected:
         browser_probe = probe_opencli_browser_command(command_list, session)
-    ready = bool(command.get("ok") and version_ready and daemon_running and extension_connected and browser_probe.get("ok"))
+    ready = bool(
+        command.get("ok")
+        and version_ready
+        and daemon_running
+        and extension_connected
+        and browser_probe.get("ok")
+        and adapter.get("ok")
+    )
     if ready:
         status = "ready"
         message = "OpenCLI Browser Bridge 已连接，优先使用当前用户 Chrome 标签页采集 Facebook。"
+    elif command.get("ok") and version_ready and not adapter.get("ok"):
+        status = "adapter_missing"
+        message = "OpenCLI 可用，但 fb-competitor-posts adapter 未安装到真实 ~/.opencli/clis；请先运行安装脚本。"
     elif command.get("ok") and not version_ready:
         status = "opencli_version_too_old"
         message = "OpenCLI 版本过低；请升级到 @jackwener/opencli 1.8.0 或更新版本。"
@@ -339,6 +390,7 @@ def check_opencli(
         "daemon_port": daemon_port,
         "daemon_status": daemon_status,
         "browser_probe": browser_probe,
+        "adapter": adapter,
         "auto_fix_attempted": bool(auto_fix and recovery_steps),
         "auto_fix_steps": recovery_steps,
     }

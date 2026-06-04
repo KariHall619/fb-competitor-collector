@@ -701,7 +701,7 @@ if (candidate.selected_post_link_kind !== 'media' || candidate.media_link_count 
 
 
 def assert_opencli_adapter_scaffold_contract() -> None:
-    script_text = (ROOT / "opencli" / "clis" / "facebook" / "fb-competitor-posts.js").read_text(encoding="utf-8")
+    script_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
     assert "cli({" in script_text
     assert "site: 'facebook'" in script_text
     assert "name: 'fb-competitor-posts'" in script_text
@@ -716,27 +716,28 @@ def assert_opencli_adapter_scaffold_contract() -> None:
     assert "coverage_incomplete" in script_text
 
 
-def assert_project_opencli_wrapper_is_project_local() -> None:
-    script_text = (ROOT / "scripts" / "run_project_opencli.py").read_text(encoding="utf-8")
-    assert 'PROJECT_CLIS = ROOT / "opencli" / "clis"' in script_text
-    assert 'PROJECT_OPENCLI_HOME = ROOT / "data" / "opencli-home"' in script_text
-    assert 'env["HOME"] = str(home_dir)' in script_text
-    assert 'env["USERPROFILE"] = str(home_dir)' in script_text
-    assert 'env["FB_COLLECTOR_PROJECT_ROOT"] = str(ROOT)' in script_text
-    assert "/Users/a1/.opencli" not in script_text
+def assert_opencli_adapter_install_is_real_opencli_home() -> None:
+    script_text = (ROOT / "scripts" / "install_opencli_adapter.py").read_text(encoding="utf-8")
+    assert '"browser", session, "init", "facebook/fb-competitor-posts"' in script_text
+    assert 'Path.home() / ".opencli" / "clis" / "facebook" / "fb-competitor-posts.js"' in script_text
+    assert 'ROOT / "scripts" / "opencli_fb_competitor_posts.js"' in script_text
+    assert "FB_COLLECTOR_PROJECT_ROOT" not in script_text
+    assert "data/opencli-home" not in script_text
 
 
 def assert_account_and_worker_call_opencli_adapter() -> None:
     account_text = (ROOT / "scripts" / "run_account_job.py").read_text(encoding="utf-8")
     worker_text = (ROOT / "scripts" / "enrichment_worker.py").read_text(encoding="utf-8")
-    assert "scripts/run_project_opencli.py" in account_text
+    assert "scripts/run_project_opencli.py" not in account_text
     assert '"facebook"' in account_text
     assert '"fb-competitor-posts"' in account_text
     assert '"discover"' in account_text
-    assert "scripts/run_project_opencli.py" in worker_text
+    assert "opencli_command(config)" in account_text
+    assert "scripts/run_project_opencli.py" not in worker_text
     assert '"facebook"' in worker_text
     assert '"fb-competitor-posts"' in worker_text
     assert '"detail"' in worker_text
+    assert "opencli_command(config)" in worker_text
 
 
 def assert_run_accounts_uses_adapter_not_tab_preopen() -> None:
@@ -750,7 +751,7 @@ def assert_run_accounts_uses_adapter_not_tab_preopen() -> None:
 
 
 def assert_detail_enrichment_is_adapter_owned() -> None:
-    adapter_text = (ROOT / "opencli" / "clis" / "facebook" / "fb-competitor-posts.js").read_text(encoding="utf-8")
+    adapter_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
     detail_text = (ROOT / "scripts" / "fb_detail_extractors.js").read_text(encoding="utf-8")
     assert "async function detail(page, kwargs)" in adapter_text
     assert "async function enrichCurrentDetailPage(page, post, options)" in adapter_text
@@ -764,7 +765,7 @@ def assert_detail_enrichment_is_adapter_owned() -> None:
 
 
 def assert_opencli_detail_enrichment_blocks_for_human_login() -> None:
-    adapter_text = (ROOT / "opencli" / "clis" / "facebook" / "fb-competitor-posts.js").read_text(encoding="utf-8")
+    adapter_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
     detail_text = (ROOT / "scripts" / "fb_detail_extractors.js").read_text(encoding="utf-8")
     assert "pageStateExpression()" in adapter_text
     assert "state.loggedOut || state.visitorPreview" in adapter_text
@@ -4714,7 +4715,7 @@ def assert_opencli_extract_helpers_dedupe_homepage_candidates() -> None:
         "https://www.facebook.com/storyhub/videos/1234567890123456/"
     )
 
-    adapter_text = (ROOT / "opencli" / "clis" / "facebook" / "fb-competitor-posts.js").read_text(encoding="utf-8")
+    adapter_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
     assert "function postKey(post)" in adapter_text
     assert "function validCandidate(candidate)" in adapter_text
     assert "group-post:" in adapter_text
@@ -4724,7 +4725,7 @@ def assert_opencli_extract_helpers_dedupe_homepage_candidates() -> None:
 
 
 def assert_opencli_extract_has_under_capture_guards() -> None:
-    script_text = (ROOT / "opencli" / "clis" / "facebook" / "fb-competitor-posts.js").read_text(encoding="utf-8")
+    script_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
     assert "{ name: 'max-snapshots'" in script_text
     assert "default: 32" in script_text
     assert "{ name: 'min-snapshots'" in script_text
@@ -4738,7 +4739,7 @@ def assert_opencli_extract_has_under_capture_guards() -> None:
 
 
 def assert_opencli_extract_stable_end_is_complete_coverage() -> None:
-    script_text = (ROOT / "opencli" / "clis" / "facebook" / "fb-competitor-posts.js").read_text(encoding="utf-8")
+    script_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
     assert "function captureCoverageState" in script_text
     assert "stopReason === 'max_snapshots'" in script_text
     assert "stopReason = 'stable_no_new_posts'" in script_text
@@ -4793,7 +4794,7 @@ if (!isLikelyHeaderTimeElement({ text: '2h', aria: '', title: '', href: 'https:/
 
 
 def assert_opencli_detail_enrichment_supports_target_date_filter() -> None:
-    script_text = (ROOT / "opencli" / "clis" / "facebook" / "fb-competitor-posts.js").read_text(encoding="utf-8")
+    script_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
     worker_text = (ROOT / "scripts" / "enrichment_worker.py").read_text(encoding="utf-8")
     assert "{ name: 'target-date'" in script_text
     assert "if (target_date)" not in script_text
@@ -13224,7 +13225,7 @@ def main() -> int:
     assert_opencli_extract_has_under_capture_guards()
     assert_opencli_extract_stable_end_is_complete_coverage()
     assert_opencli_adapter_scaffold_contract()
-    assert_project_opencli_wrapper_is_project_local()
+    assert_opencli_adapter_install_is_real_opencli_home()
     assert_account_and_worker_call_opencli_adapter()
     assert_run_accounts_uses_adapter_not_tab_preopen()
     assert_detail_enrichment_is_adapter_owned()

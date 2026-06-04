@@ -71,6 +71,13 @@ def csv_config_value(config: dict[str, Any], path: str) -> str:
     return str(value or "")
 
 
+def opencli_command(config: dict[str, Any]) -> list[str]:
+    command = config.get("opencli_command")
+    if isinstance(command, list) and command:
+        return [str(item) for item in command]
+    return [str(config.get("opencli_path") or "opencli")]
+
+
 def run_detail_batch(
     config_path: str,
     config: dict[str, Any],
@@ -86,11 +93,7 @@ def run_detail_batch(
         output_path = Path(temp_dir) / "output.json"
         input_path.write_text(json.dumps({"posts": posts}, ensure_ascii=False, indent=2), encoding="utf-8")
         command = [
-            "python3",
-            "scripts/run_project_opencli.py",
-            "--config",
-            config_path,
-            "--",
+            *opencli_command(config),
             "facebook",
             "fb-competitor-posts",
             "--mode",
