@@ -164,24 +164,24 @@ filters:
 
 实时采集由 OpenCLI Browser Bridge 执行：
 
-1. 绑定业务人员同一 Chrome profile 中已打开的 Facebook 标签页；
-2. 优先用 OpenCLI `--tab` 直接读取目标标签页，减少主动切换；
-3. 如果直接读取失败，回退到原来的 tab select 路径，确保采集效果不下降；
+1. 通过 OpenCLI 打开或明确匹配业务人员同一 Chrome profile 中的目标 Facebook 标签页；
+2. 优先使用自动化打开并传入的 `--tab-page`，或用 OpenCLI `--tab` 直接读取目标标签页，减少主动切换；
+3. 如果直接读取失败，只允许对自动化打开并跟踪的标签页回退到 tab select 路径，不能无条件占用用户当前标签页；
 4. 在页面内执行 `scripts/fb_dom_extractors.js` 的 DOM 提取逻辑；
 5. 过滤掉登录页、空白动态壳、评论片段和无正文候选；
 6. 得到帖子链接、候选文章链接、正文、相对时间文本、互动文本；
 7. `prepare_capture_result.py` 标准化候选并保留 `needs_enrichment`；
 8. `opencli_enrich_post_details.mjs` 优先复用一个详情标签页确认精确时间、评论/回复引流链接和目标日期；单帖低打扰失败时回退到原来的新开详情页流程；
 9. `enrich_article_summaries.py` 抓取落地页材料，`export_summary_requests.py` 导出待 Codex 生成的中文概要请求，`apply_article_summaries.py` 写入 Codex 中文摘要；
-10. 普通 `--sync` 将已确认 Facebook 帖子候选写入飞书台账；缺字段用 `是否采用` 的 `待补抓：...` 标记。只有显式使用 `--strict-ready-only` 时，才只同步 `ready_for_output` 完整记录。
+10. 普通 `--sync` 只把当前 `ready_for_output` 且通过 `quality_audit` 的完整记录写入正式飞书表；缺字段候选留在 SQLite 和补抓队列中继续补抓。只有显式使用 `--sync-audit` / `--ledger-sync` 时，才写入带 `待补抓：...` 标记的不完整审计台账。
 
 如果 OpenCLI daemon 未运行，`check_env.py --fix-opencli` 会先尝试通过有界 `opencli doctor` / daemon 恢复命令拉起服务。若 daemon 已运行但 Browser Bridge 扩展未连接，说明业务 Chrome profile 的扩展/连接状态仍需人工处理，系统不能改走其他采集路线。
 
 采集阶段不得因为链接形态过早丢弃内容。`/posts/`、`story.php`、`permalink.php`、`reel`、`photo.php`、`watch`、`videos` 都先作为 FB 内容候选保存。父帖链接只作为优先去重依据；抓不到父帖时保留原始内容链接，后续再做相似度/人工复核去重。
 
-详情补全阶段会进入每条候选内容，先从时间 tooltip 或 DOM 属性确认精确发帖时间，再展开评论和评论回复，寻找账号主发的引流链接，并锚定当前主帖补互动数据和帖子类型。为了减少打扰，脚本优先复用一个详情标签页处理多条候选；如果复用标签页失败或采集结果变少，则对该帖子回退到原来的单帖新开详情页流程。字段完整时记录进入 `ready_for_output`；字段不完整的有效候选仍写入飞书台账并保留为 `needs_enrichment`，用 `待补抓：...` 标明缺口，后续补采后按帖子链接更新同一行。
+详情补全阶段会进入每条候选内容，先从时间 tooltip 或 DOM 属性确认精确发帖时间，再展开评论和评论回复，寻找账号主发的引流链接，并锚定当前主帖补互动数据和帖子类型。为了减少打扰，脚本优先复用一个详情标签页处理多条候选；如果复用标签页失败或采集结果变少，则对该帖子回退到自动化打开并跟踪的单帖详情页流程。字段完整时记录进入 `ready_for_output`；字段不完整的有效候选保留在 SQLite 的 `needs_enrichment` 和补抓队列中，不写入普通正式飞书表。
 
-扩量提速后的补全任务状态保存在 SQLite `enrichment_tasks` 表中，按 `canonical_post_url + stage` 去重。`run_capture_pipeline.py` 先完成 discover/prepare/import，`enrichment_worker.py` 再按 `detail_time`, `lead_link`, `engagement`, `post_type`, `article_material` 阶段恢复执行；`summary` 阶段只校验是否已应用 Codex 中文概要，不会把标题、meta 描述或英文原文摘录伪装成概要。正式 `--sync` 是台账 upsert，`--strict-ready-only` 才是只写 `ready_for_output` 完整行，`--sync-partial` 只用于不影响正式表的业务预览。
+扩量提速后的补全任务状态保存在 SQLite `enrichment_tasks` 表中，按 `canonical_post_url + stage` 去重。`run_capture_pipeline.py` 先完成 discover/prepare/import，`enrichment_worker.py` 再按 `detail_time`, `lead_link`, `engagement`, `post_type`, `article_material` 阶段恢复执行；`summary` 阶段只校验是否已应用 Codex 中文概要，不会把标题、meta 描述或英文原文摘录伪装成概要。正式 `--sync` 是严格最终输出，只写完整 `ready_for_output` 行；`--sync-audit` / `--ledger-sync` 才用于不完整审计台账，`--sync-partial` 只用于不影响正式表的业务预览。
 
 已验证的时间流程：
 
@@ -343,9 +343,9 @@ python3 scripts/filter_posts.py --config config/settings.yaml --date 260521 --ac
 6. Codex 读取当前主页候选，并用 `3h/12h/1d` 等相对时间决定候选窗口；
 7. Codex 打开候选帖子详情页，确认精确 `posted_at`、评论/回复引流链接和落地页；
 8. Codex 基于导出的落地页材料生成中文故事概要，并通过 `apply_article_summaries.py` 应用；
-9. Codex 入库去重，字段不完整的候选保留为 `needs_enrichment`；
-10. Codex 将已确认 Facebook 帖子候选按 A-K 表格格式 upsert 到飞书输出表；缺字段候选用 `待补抓：...` 标记，完整候选保持 `ready_for_output` 质量状态；
-11. Codex 返回新增数、重复数、异常数、跳过补全数和飞书写入结果。
+9. Codex 入库去重，字段不完整的候选保留为 `needs_enrichment` 并继续按 scoped `next_commands` 补抓；
+10. 只有字段完整并通过质量门的候选，Codex 才按 A-K 表格格式写入飞书输出表；缺字段候选不写入正式表，除非用户明确要求 `--sync-audit` / `--ledger-sync` 审计台账；
+11. Codex 返回账号、候选数、严格输出数、字段完整度、剩余 blocker/next_commands 和飞书写入结果。
 
 ## 11. Mac/Windows 迁移
 
