@@ -46,6 +46,12 @@ const evalAccessStats = {
 };
 const EVAL_TIMEOUT_MS = Number(process.env.OPENCLI_FB_DISCOVERY_EVAL_TIMEOUT_MS || "45000");
 const DETAIL_BOUNDARY_TIMEOUT_MS = Number(process.env.OPENCLI_FB_DISCOVERY_DETAIL_BOUNDARY_TIMEOUT_MS || "10000");
+const DETAIL_BOUNDARY_ENABLED = /^(1|true|yes)$/i.test(
+  process.env.OPENCLI_FB_DISCOVERY_DETAIL_BOUNDARY || ""
+);
+const TERMINAL_DETAIL_BOUNDARY_ENABLED = !/^(0|false|no)$/i.test(
+  process.env.OPENCLI_FB_DISCOVERY_TERMINAL_DETAIL_BOUNDARY || ""
+);
 
 function clean(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
@@ -228,10 +234,12 @@ function validCandidate(candidate) {
 }
 
 async function waitSeconds(opencliCommand, session, tab, seconds) {
-  await runOpencli(["browser", session, "wait", "time", String(seconds), "--tab", tab], {
-    command: opencliCommand,
-    timeoutMs: DETAIL_BOUNDARY_TIMEOUT_MS,
-  });
+  void opencliCommand;
+  void session;
+  void tab;
+  const scale = Number(process.env.OPENCLI_FB_DISCOVERY_WAIT_SCALE ?? "1");
+  const waitMs = Math.max(0, Number(seconds) || 0) * Math.max(0, Number.isFinite(scale) ? scale : 1) * 1000;
+  await new Promise((resolve) => setTimeout(resolve, waitMs));
 }
 
 async function evalPage(opencliCommand, session, tab, js) {
@@ -287,126 +295,55 @@ async function readCurrentPageIdentity(opencliCommand, session, tab) {
 async function scrollDown(opencliCommand, session, tab, pixels) {
   return await evalPage(opencliCommand, session, tab, `(() => {
     const requested = ${Number(pixels) || 1400};
-    const isBlockedOverlay = (el) => {
-      const dialog = el.closest?.('[role="dialog"], [aria-label="Messenger"], [aria-label="Chats"]');
-      if (!dialog) return false;
-      const text = String(dialog.innerText || dialog.textContent || '');
-      return /Messenger|Chats|Chat history|PIN|New message|聊天|消息/i.test(text);
-    };
-    const feedScore = (el) => {
-      const attr = [
-        el.getAttribute?.('role') || '',
-        el.getAttribute?.('aria-label') || '',
-        el.getAttribute?.('data-pagelet') || '',
-        el.id || '',
-        el.className || '',
-      ].join(' ');
-      const text = String(el.innerText || el.textContent || '').slice(0, 2000);
-      let score = 0;
-      if (el.matches?.('[role="main"]')) score += 100;
-      if (/ProfileTimeline|Timeline|Posts|pagelet_timeline|recent/i.test(attr)) score += 70;
-      if (/Follow|Followers|About|Photos|Videos|Reels|Posts/i.test(text)) score += 8;
-      if (/Messenger|Chats|Chat history|PIN/i.test(text)) score -= 200;
-      if (isBlockedOverlay(el)) score -= 500;
-      return score;
-    };
-    const visibleEnough = (el) => {
-      const rect = el.getBoundingClientRect?.();
-      if (!rect) return false;
-      return rect.width > 320 && rect.height > 300 && rect.bottom > 120 && rect.top < window.innerHeight - 80;
-    };
-    const scrollables = [
-      ...document.querySelectorAll('[role="main"], [data-pagelet*="ProfileTimeline"], [aria-label*="Timeline"], [aria-label*="Posts"], div')
-    ].filter((el) => {
-      const style = getComputedStyle(el);
-      const overflow = [style.overflowY, style.overflow].join(' ');
-      return visibleEnough(el)
-        && !isBlockedOverlay(el)
-        && el.scrollHeight > el.clientHeight + 120
-        && /(auto|scroll)/i.test(overflow);
-    }).sort((a, b) => {
-      const scoreDelta = feedScore(b) - feedScore(a);
-      if (scoreDelta) return scoreDelta;
-      return (b.clientHeight || 0) - (a.clientHeight || 0);
-    });
+    const before = window.scrollY || document.documentElement.scrollTop || 0;
+    window.scrollBy(0, requested);
+    const after = window.scrollY || document.documentElement.scrollTop || 0;
     const pageScroller = document.scrollingElement || document.documentElement;
-    const target = scrollables[0] && feedScore(scrollables[0]) >= 50 ? scrollables[0] : pageScroller;
-    const before = target === document.scrollingElement || target === document.documentElement
-      ? (window.scrollY || document.documentElement.scrollTop || 0)
-      : target.scrollTop;
-    if (target === document.scrollingElement || target === document.documentElement) {
-      window.scrollBy(0, requested);
-    } else {
-      target.scrollBy(0, requested);
-    }
-    const after = target === document.scrollingElement || target === document.documentElement
-      ? (window.scrollY || document.documentElement.scrollTop || 0)
-      : target.scrollTop;
     return {
       before,
       after,
       moved: Math.abs(after - before),
-      target: target === document.scrollingElement || target === document.documentElement ? 'window' : 'container',
-      target_role: target.getAttribute?.('role') || '',
-      target_label: target.getAttribute?.('aria-label') || '',
-      target_score: feedScore(target),
+      target: 'window',
       body_length: document.body?.innerText?.length || 0,
-      scroll_height: target.scrollHeight || document.documentElement?.scrollHeight || document.body?.scrollHeight || 0,
+      scroll_height: pageScroller?.scrollHeight || document.documentElement?.scrollHeight || document.body?.scrollHeight || 0,
     };
   })()`);
 }
 
-async function openTemporaryDetailTab(opencliCommand, session, url) {
-  const result = await runOpencli(["browser", session, "tab", "new", url], {
+async function openUrlInTab(opencliCommand, session, tab, url) {
+  const result = await runOpencli(["browser", session, "open", url, "--tab", tab], {
     command: opencliCommand,
     timeoutMs: DETAIL_BOUNDARY_TIMEOUT_MS,
   });
-  if (!result.ok) return { ok: false, error: result.stderr || result.stdout || "tab new failed" };
-  const payload = String(result.stdout || "").trim();
-  let tab = "";
-  try {
-    const parsed = JSON.parse(payload);
-    tab = parsed?.page || parsed?.targetId || parsed?.id || parsed?.tab?.page || "";
-  } catch {
-    tab = payload.split(/\s+/).find((part) => /^[A-Fa-f0-9]{8,}$/.test(part)) || payload;
-  }
-  return tab ? { ok: true, tab } : { ok: false, error: `could not parse detail tab id: ${payload}` };
+  if (!result.ok) return { ok: false, error: result.stderr || result.stdout || "open url failed" };
+  return { ok: true };
 }
 
-async function closeTemporaryDetailTab(opencliCommand, session, tab) {
-  if (!tab) return;
-  await runOpencli(["browser", session, "tab", "close", tab], { command: opencliCommand, timeoutMs: 4000 });
-}
-
-async function confirmDetailTimeState(opencliCommand, session, post, timeWindow) {
+async function confirmDetailTimeState(opencliCommand, session, tab, post, timeWindow) {
   if (!timeWindow?.enabled) return { state: "unknown", skipped: true };
   const existingState = postTimeState(post, timeWindow);
   if (existingState !== "unknown") return { state: existingState, source: "homepage" };
   const url = detailNavigationUrl(post);
   if (!url) return { state: "unknown", error: "missing_detail_url" };
-  const opened = await openTemporaryDetailTab(opencliCommand, session, url);
+  const opened = await openUrlInTab(opencliCommand, session, tab, url);
   if (!opened.ok) return { state: "unknown", error: opened.error || "open_detail_failed" };
-  try {
-    await waitSeconds(opencliCommand, session, opened.tab, 1.2);
-    const target = await evalPage(opencliCommand, session, opened.tab, headerTimeTargetExpression(url)).catch(() => null);
-    let exact = target ? await evalPage(opencliCommand, session, opened.tab, exactTimeFromTargetExpression(target)).catch(() => null) : null;
-    const embedded = await evalPage(opencliCommand, session, opened.tab, embeddedPublishTimeExpression(url)).catch(() => null);
-    if (embedded?.posted_at && (!exact?.posted_at || exact.time_source === "synthetic_hover_tooltip")) {
-      exact = embedded;
-    }
-    const parsed = parsePostTime(exact?.posted_at || "");
-    return {
-      state: stateFromParsedTime(parsed, timeWindow),
-      posted_at: exact?.posted_at || "",
-      time_source: exact?.time_source || "",
-      detail_url: url,
-    };
-  } finally {
-    await closeTemporaryDetailTab(opencliCommand, session, opened.tab);
+  await waitSeconds(opencliCommand, session, tab, 1.2);
+  const target = await evalPage(opencliCommand, session, tab, headerTimeTargetExpression(url)).catch(() => null);
+  let exact = target ? await evalPage(opencliCommand, session, tab, exactTimeFromTargetExpression(target)).catch(() => null) : null;
+  const embedded = await evalPage(opencliCommand, session, tab, embeddedPublishTimeExpression(url)).catch(() => null);
+  if (embedded?.posted_at && (!exact?.posted_at || exact.time_source === "synthetic_hover_tooltip")) {
+    exact = embedded;
   }
+  const parsed = parsePostTime(exact?.posted_at || "");
+  return {
+    state: stateFromParsedTime(parsed, timeWindow),
+    posted_at: exact?.posted_at || "",
+    time_source: exact?.time_source || "",
+    detail_url: url,
+  };
 }
 
-async function confirmWindowBoundaryFromDetails(opencliCommand, session, posts, timeWindow) {
+async function confirmWindowBoundaryFromDetails(opencliCommand, session, tab, posts, timeWindow) {
   if (!timeWindow?.enabled || !posts.length) {
     return { checked: 0, before: 0, inside: 0, after: 0, unknown: 0, complete: false, details: [] };
   }
@@ -419,7 +356,7 @@ async function confirmWindowBoundaryFromDetails(opencliCommand, session, posts, 
   let after = 0;
   let unknown = 0;
   for (const post of tail) {
-    const result = await confirmDetailTimeState(opencliCommand, session, post, timeWindow);
+    const result = await confirmDetailTimeState(opencliCommand, session, tab, post, timeWindow);
     details.push({
       post_url: post.post_url || "",
       state: result.state || "unknown",
@@ -439,6 +376,65 @@ async function confirmWindowBoundaryFromDetails(opencliCommand, session, posts, 
     after,
     unknown,
     complete: before >= 1 && inside === 0 && after === 0,
+    details,
+  };
+}
+
+async function findWindowCutoffFromDetails(opencliCommand, session, tab, posts, timeWindow, maxChecks = 8) {
+  if (!timeWindow?.enabled || !posts.length) {
+    return { checked: 0, cutoff_index: -1, before: 0, inside: 0, after: 0, unknown: 0, complete: false, details: [] };
+  }
+  let low = 0;
+  let high = posts.length - 1;
+  let cutoffIndex = -1;
+  const details = [];
+  let before = 0;
+  let inside = 0;
+  let after = 0;
+  let unknown = 0;
+  let checks = 0;
+  while (low <= high && checks < Math.max(1, Number(maxChecks) || 1)) {
+    const index = Math.floor((low + high) / 2);
+    const post = posts[index];
+    const result = await confirmDetailTimeState(opencliCommand, session, tab, post, timeWindow);
+    checks += 1;
+    details.push({
+      index,
+      post_url: post?.post_url || "",
+      state: result.state || "unknown",
+      posted_at: result.posted_at || "",
+      time_source: result.time_source || "",
+      error: result.error || "",
+    });
+    if (result.posted_at && !post.posted_at) {
+      post.posted_at = result.posted_at;
+      post.posted_at_raw = result.posted_at;
+      post.time_source = result.time_source || "detail_boundary";
+      post.time_confirmed = true;
+    }
+    if (result.state === "before") {
+      before += 1;
+      cutoffIndex = cutoffIndex < 0 ? index : Math.min(cutoffIndex, index);
+      high = index - 1;
+    } else if (result.state === "inside") {
+      inside += 1;
+      low = index + 1;
+    } else if (result.state === "after") {
+      after += 1;
+      low = index + 1;
+    } else {
+      unknown += 1;
+      low = index + 1;
+    }
+  }
+  return {
+    checked: checks,
+    cutoff_index: cutoffIndex,
+    before,
+    inside,
+    after,
+    unknown,
+    complete: cutoffIndex >= 0,
     details,
   };
 }
@@ -574,13 +570,16 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
     }
     if (
       timeWindow.enabled
+      && DETAIL_BOUNDARY_ENABLED
       && index + 1 >= Math.max(4, MIN_SNAPSHOTS)
       && Number(current.inside_window_posts || 0) === 0
       && Number(current.old_window_posts || 0) === 0
       && Number(current.new_posts || 0) > 0
     ) {
       const recentPosts = [...seen.values()].slice(-Number(current.new_posts || 0));
-      const detailBoundary = await confirmWindowBoundaryFromDetails(opencliCommand, session, recentPosts, timeWindow);
+      const detailBoundary = await confirmWindowBoundaryFromDetails(opencliCommand, session, tab, recentPosts, timeWindow);
+      await openUrlInTab(opencliCommand, session, tab, ACCOUNT_URL);
+      await waitSeconds(opencliCommand, session, tab, 0.8);
       snapshots[snapshots.length - 1].detail_time_boundary = detailBoundary;
       detailWindowBoundaryCount = detailBoundary.complete ? detailWindowBoundaryCount + 1 : 0;
       if (detailWindowBoundaryCount >= 1) {
@@ -601,6 +600,32 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
     noMovementCount = scrollMoved < 50 && scrollHeight <= previousScrollHeight ? noMovementCount + 1 : 0;
     previousScrollHeight = Math.max(previousScrollHeight, scrollHeight);
     await waitSeconds(opencliCommand, session, tab, 1.4);
+  }
+
+  if (
+    TERMINAL_DETAIL_BOUNDARY_ENABLED
+    && timeWindow.enabled
+    && stopReason === "max_snapshots"
+    && seen.size > 0
+  ) {
+    const posts = [...seen.values()];
+    const cutoff = await findWindowCutoffFromDetails(opencliCommand, session, tab, posts, timeWindow);
+    await openUrlInTab(opencliCommand, session, tab, ACCOUNT_URL);
+    await waitSeconds(opencliCommand, session, tab, 0.8);
+    snapshots[snapshots.length - 1].terminal_detail_time_boundary = cutoff;
+    if (cutoff.complete && cutoff.cutoff_index >= 0) {
+      const keptPosts = posts.slice(0, cutoff.cutoff_index);
+      const droppedCount = Math.max(0, posts.length - keptPosts.length);
+      seen.clear();
+      for (const post of keptPosts) {
+        const key = postKey(post);
+        if (key) seen.set(key, post);
+      }
+      snapshots[snapshots.length - 1].terminal_detail_time_boundary.dropped_candidate_count = droppedCount;
+      snapshots[snapshots.length - 1].terminal_detail_time_boundary.kept_candidate_count = seen.size;
+      stopReason = "detail_time_older_than_time_window";
+      detailWindowBoundaryCount += 1;
+    }
   }
 
   return {

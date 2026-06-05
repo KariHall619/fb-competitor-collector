@@ -194,6 +194,8 @@ def filter_posts_by_posted_window(
     for post in posts:
         posted_at = parse_posted_at_filter(str(post.get("posted_at") or ""))
         if posted_at is None:
+            if str(post.get("coverage_note") or "").strip():
+                continue
             filtered.append(post)
             continue
         if is_estimated_time_source(post.get("time_source")):

@@ -23,7 +23,11 @@ VALID_CN_SUMMARY = "这篇故事围绕家庭矛盾和财产冲突展开，主角
 
 
 def run(command: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=cwd, env=env, text=True, capture_output=True, check=False)
+    next_env = dict(os.environ)
+    if env:
+        next_env.update(env)
+    next_env.setdefault("OPENCLI_FB_DISCOVERY_WAIT_SCALE", "0")
+    return subprocess.run(command, cwd=cwd, env=next_env, text=True, capture_output=True, check=False)
 
 
 class QuietHTTPRequestHandler(SimpleHTTPRequestHandler):
@@ -1389,17 +1393,21 @@ def assert_opencli_discovery_scroll_avoids_messenger_dialog() -> None:
     adapter_text = (ROOT / "scripts" / "opencli_fb_competitor_posts.js").read_text(encoding="utf-8")
     for text in (extract_text, adapter_text):
         assert "closeBlockingDialogs" in text
-        assert "isBlockedOverlay" in text
         assert "visibility', 'hidden'" in text
         assert "Messenger|Chats|Chat history|PIN" in text
-        assert "target_score" in text
         scroll_slice = text[text.index("async function scrollDown") : text.index("function captureCoverageState")]
-        assert "&& !isBlockedOverlay(el)" in scroll_slice
-        assert "feedScore(scrollables[0]) >= 50" in scroll_slice
-        assert "feedScore(b) - feedScore(a)" in scroll_slice
+        assert "window.scrollBy" in scroll_slice
+        assert "target: 'window'" in scroll_slice
+        assert "querySelectorAll('[role=\"main\"], [data-pagelet*=\"ProfileTimeline\"], [aria-label*=\"Timeline\"], [aria-label*=\"Posts\"], div')" not in scroll_slice
+        assert "feedScore(scrollables[0])" not in scroll_slice
     capture_slice = extract_text[extract_text.index("async function captureSnapshots") : extract_text.index("async function main")]
     assert '"current_visible_position"' not in capture_slice
     assert capture_slice.index("await scrollToTop") < capture_slice.index('readSnapshot(index, "from_top")')
+    assert "OPENCLI_FB_DISCOVERY_DETAIL_BOUNDARY" in extract_text
+    assert "&& DETAIL_BOUNDARY_ENABLED" in capture_slice
+    assert "OPENCLI_FB_DISCOVERY_TERMINAL_DETAIL_BOUNDARY" in extract_text
+    assert "findWindowCutoffFromDetails" in capture_slice
+    assert 'stopReason = "detail_time_older_than_time_window"' in capture_slice
 
 
 def assert_opencli_extract_blocks_wrong_account_tab(tmp_path: Path) -> None:
@@ -5968,8 +5976,8 @@ def assert_opencli_extract_has_under_capture_guards() -> None:
     assert "coverage_incomplete" in script_text
     assert "capture_complete" in script_text
     assert "已达到最大滚动快照数但最后一屏仍有新增候选" in script_text
-    assert "target.scrollBy(0, delta)" in script_text
-    assert "target: target === document.scrollingElement" in script_text
+    assert "window.scrollBy(0, delta)" in script_text
+    assert "target: 'window'" in script_text
     assert "const scrollPixels = intArg(kwargs['scroll-pixels'], 520)" in script_text
     assert "const viewportStep = Math.max(320, Math.floor((window.innerHeight || 800) * 0.55))" in script_text
     assert "oldPostWindowCount >= oldPostStopSnapshots" in script_text
@@ -6180,13 +6188,14 @@ def assert_run_account_job_scoped_posts_applies_posted_window(tmp_path: Path) ->
     conn = connect(tmp_path / "account-scoped-posted-window.sqlite")
     config = {"quality_audit": {"required_engagement_fields": ["likes", "comments", "shares"]}}
     account_url = "https://www.facebook.com/windowpage"
-    for suffix, posted_at, time_source, crawled_at in [
-        ("old", "2026年6月4日 11:59", "dom_aria_label", ""),
-        ("new", "2026年6月4日 12:01", "dom_aria_label", ""),
-        ("pending", "", "", ""),
-        ("estimated", "2026年6月4日 10:26", "relative_estimated", "2026-06-04T20:00:00"),
-        ("estimated-cross-date", "2026年6月3日 20:30", "relative_estimated", "2026-06-05T05:30:00"),
-        ("estimated-stale", "2026年5月28日 20:30", "relative_estimated", "2026-05-29T01:30:00"),
+    for suffix, posted_at, time_source, crawled_at, coverage_note in [
+        ("old", "2026年6月4日 11:59", "dom_aria_label", "", ""),
+        ("new", "2026年6月4日 12:01", "dom_aria_label", "", ""),
+        ("pending", "", "", "", ""),
+        ("pending-old-coverage", "", "", "2026-06-05T08:24:21", "已达到最大滚动快照数但最后一屏仍有新增候选"),
+        ("estimated", "2026年6月4日 10:26", "relative_estimated", "2026-06-04T20:00:00", ""),
+        ("estimated-cross-date", "2026年6月3日 20:30", "relative_estimated", "2026-06-05T05:30:00", ""),
+        ("estimated-stale", "2026年5月28日 20:30", "relative_estimated", "2026-05-29T01:30:00", ""),
     ]:
         upsert_post(
             conn,
@@ -6199,6 +6208,7 @@ def assert_run_account_job_scoped_posts_applies_posted_window(tmp_path: Path) ->
                     "time_confirmed": time_source == "dom_aria_label",
                     "time_source": time_source,
                     "crawled_at": crawled_at,
+                    "coverage_note": coverage_note,
                 }
             ),
             config,
