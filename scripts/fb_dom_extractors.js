@@ -289,6 +289,15 @@ function browserExpression(maxText = 1200) {
       return [...new Set(matches)].slice(0, 12).join('；');
     };
     const textLines = (text) => String(text || '').split('\\n').map(clean).filter(Boolean);
+    const commentMediaFallbackText = (text) => {
+      const lines = textLines(text);
+      const compact = clean(lines.join(' '));
+      if (!compact) return false;
+      if (/\\bAuthor\\b.{0,120}\\bPart\\s*\\d+\\b/i.test(compact) && /\\bLike\\b.{0,30}\\bReply\\b/i.test(compact)) return true;
+      if (/\\bLike\\b.{0,20}\\bReply\\b/i.test(compact) && !/\\bComment\\b.{0,20}\\bShare\\b/i.test(compact)) return true;
+      if (/^Author\\b/i.test(lines[0] || '') && /\\bReply\\b/i.test(compact)) return true;
+      return false;
+    };
     const selectHomepageLeadLink = (node, externalLinks) => {
       if (!externalLinks.length) return null;
       const authorNames = pageNames.map((name) => name.toLowerCase());
@@ -486,15 +495,18 @@ function browserExpression(maxText = 1200) {
       .map((element) => {
         const href = new URL(element.getAttribute('href'), location.href).href;
         let text = '';
+        let contextText = '';
         let cursor = element;
         for (let depth = 0; cursor && depth < 5; depth += 1) {
           const currentText = clean(cursor.innerText || cursor.textContent || '');
           if (currentText && (!text || currentText.length < text.length)) text = currentText;
+          if (currentText && currentText.length > contextText.length) contextText = currentText;
           cursor = cursor.parentElement;
         }
-        return { element, href, text };
+        return { element, href, text, contextText };
       })
       .filter((item) => mainPostHref(item.href) && postHrefKind(item.href) === 'media')
+      .filter((item) => !commentMediaFallbackText(item.contextText || item.text))
       .filter((item) => {
         const parsed = new URL(item.href, location.href);
         const parts = parsed.pathname.split('/').filter(Boolean);

@@ -19,6 +19,11 @@ import {
 
 const require = createRequire(import.meta.url);
 const { browserExpression } = require("./fb_dom_extractors.js");
+const {
+  embeddedPublishTimeExpression,
+  exactTimeFromTargetExpression,
+  headerTimeTargetExpression,
+} = require("./fb_detail_extractors.js");
 
 const { value } = extractArgs();
 const ACCOUNT_URL = value("--account-url", "");
@@ -40,6 +45,7 @@ const evalAccessStats = {
   modes: new Set(),
 };
 const EVAL_TIMEOUT_MS = Number(process.env.OPENCLI_FB_DISCOVERY_EVAL_TIMEOUT_MS || "45000");
+const DETAIL_BOUNDARY_TIMEOUT_MS = Number(process.env.OPENCLI_FB_DISCOVERY_DETAIL_BOUNDARY_TIMEOUT_MS || "10000");
 
 function clean(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
@@ -117,6 +123,13 @@ function postTimeState(post, window) {
   return "inside";
 }
 
+function stateFromParsedTime(parsed, window) {
+  if (!window?.enabled || !parsed) return "unknown";
+  if (window.lower && parsed < window.lower) return "before";
+  if (window.upper && parsed >= window.upper) return "after";
+  return "inside";
+}
+
 function cleanUrl(value) {
   try {
     const parsed = new URL(value);
@@ -130,6 +143,30 @@ function cleanUrl(value) {
   } catch {
     return String(value || "");
   }
+}
+
+function detailNavigationUrl(post) {
+  const photoQueryCandidates = [post?.post_url, post?.raw_fb_url, post?.parent_post_url, post?.canonical_post_url];
+  for (const candidate of photoQueryCandidates) {
+    const cleaned = cleanUrl(candidate || "");
+    if (!cleaned) continue;
+    try {
+      const parsed = new URL(cleaned);
+      const parts = parsed.pathname.split("/").filter(Boolean);
+      const isPhotoPath = parts.includes("photo") || parsed.pathname.includes("photo.php");
+      const fbid = parsed.searchParams.get("fbid") || (parts.includes("photo") ? parts[parts.indexOf("photo") + 1] : "");
+      if (isPhotoPath && fbid) {
+        return `${parsed.origin}/photo/?fbid=${encodeURIComponent(fbid)}`;
+      }
+    } catch {
+      // Fall through to the normal candidate order.
+    }
+  }
+  for (const candidate of [post?.canonical_post_url, post?.parent_post_url, post?.post_url, post?.raw_fb_url]) {
+    const cleaned = cleanUrl(candidate || "");
+    if (cleaned) return cleaned;
+  }
+  return "";
 }
 
 function postKey(post) {
@@ -191,7 +228,10 @@ function validCandidate(candidate) {
 }
 
 async function waitSeconds(opencliCommand, session, tab, seconds) {
-  await runOpencli(["browser", session, "wait", "time", String(seconds), "--tab", tab], { command: opencliCommand });
+  await runOpencli(["browser", session, "wait", "time", String(seconds), "--tab", tab], {
+    command: opencliCommand,
+    timeoutMs: DETAIL_BOUNDARY_TIMEOUT_MS,
+  });
 }
 
 async function evalPage(opencliCommand, session, tab, js) {
@@ -316,6 +356,93 @@ async function scrollDown(opencliCommand, session, tab, pixels) {
   })()`);
 }
 
+async function openTemporaryDetailTab(opencliCommand, session, url) {
+  const result = await runOpencli(["browser", session, "tab", "new", url], {
+    command: opencliCommand,
+    timeoutMs: DETAIL_BOUNDARY_TIMEOUT_MS,
+  });
+  if (!result.ok) return { ok: false, error: result.stderr || result.stdout || "tab new failed" };
+  const payload = String(result.stdout || "").trim();
+  let tab = "";
+  try {
+    const parsed = JSON.parse(payload);
+    tab = parsed?.page || parsed?.targetId || parsed?.id || parsed?.tab?.page || "";
+  } catch {
+    tab = payload.split(/\s+/).find((part) => /^[A-Fa-f0-9]{8,}$/.test(part)) || payload;
+  }
+  return tab ? { ok: true, tab } : { ok: false, error: `could not parse detail tab id: ${payload}` };
+}
+
+async function closeTemporaryDetailTab(opencliCommand, session, tab) {
+  if (!tab) return;
+  await runOpencli(["browser", session, "tab", "close", tab], { command: opencliCommand, timeoutMs: 4000 });
+}
+
+async function confirmDetailTimeState(opencliCommand, session, post, timeWindow) {
+  if (!timeWindow?.enabled) return { state: "unknown", skipped: true };
+  const existingState = postTimeState(post, timeWindow);
+  if (existingState !== "unknown") return { state: existingState, source: "homepage" };
+  const url = detailNavigationUrl(post);
+  if (!url) return { state: "unknown", error: "missing_detail_url" };
+  const opened = await openTemporaryDetailTab(opencliCommand, session, url);
+  if (!opened.ok) return { state: "unknown", error: opened.error || "open_detail_failed" };
+  try {
+    await waitSeconds(opencliCommand, session, opened.tab, 1.2);
+    const target = await evalPage(opencliCommand, session, opened.tab, headerTimeTargetExpression(url)).catch(() => null);
+    let exact = target ? await evalPage(opencliCommand, session, opened.tab, exactTimeFromTargetExpression(target)).catch(() => null) : null;
+    const embedded = await evalPage(opencliCommand, session, opened.tab, embeddedPublishTimeExpression(url)).catch(() => null);
+    if (embedded?.posted_at && (!exact?.posted_at || exact.time_source === "synthetic_hover_tooltip")) {
+      exact = embedded;
+    }
+    const parsed = parsePostTime(exact?.posted_at || "");
+    return {
+      state: stateFromParsedTime(parsed, timeWindow),
+      posted_at: exact?.posted_at || "",
+      time_source: exact?.time_source || "",
+      detail_url: url,
+    };
+  } finally {
+    await closeTemporaryDetailTab(opencliCommand, session, opened.tab);
+  }
+}
+
+async function confirmWindowBoundaryFromDetails(opencliCommand, session, posts, timeWindow) {
+  if (!timeWindow?.enabled || !posts.length) {
+    return { checked: 0, before: 0, inside: 0, after: 0, unknown: 0, complete: false, details: [] };
+  }
+  const tail = posts
+    .filter((post) => postTimeState(post, timeWindow) === "unknown")
+    .slice(-3);
+  const details = [];
+  let before = 0;
+  let inside = 0;
+  let after = 0;
+  let unknown = 0;
+  for (const post of tail) {
+    const result = await confirmDetailTimeState(opencliCommand, session, post, timeWindow);
+    details.push({
+      post_url: post.post_url || "",
+      state: result.state || "unknown",
+      posted_at: result.posted_at || "",
+      time_source: result.time_source || "",
+      error: result.error || "",
+    });
+    if (result.state === "before") before += 1;
+    else if (result.state === "inside") inside += 1;
+    else if (result.state === "after") after += 1;
+    else unknown += 1;
+  }
+  return {
+    checked: details.length,
+    before,
+    inside,
+    after,
+    unknown,
+    complete: before >= 1 && inside === 0 && after === 0,
+    details,
+  };
+}
+
 function captureCoverageState({ blockedExtraction = null, snapshots = [], stopReason = "max_snapshots", maxSnapshots = 32 }) {
   const lastSnapshot = snapshots.at(-1) || {};
   const hitSnapshotCap =
@@ -339,6 +466,7 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
   let noMovementCount = 0;
   let previousScrollHeight = 0;
   let oldPostWindowCount = 0;
+  let detailWindowBoundaryCount = 0;
 
   const readSnapshot = async (index, label) => {
     const pageIdentity = await readCurrentPageIdentity(opencliCommand, session, tab);
@@ -444,6 +572,24 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
       stopReason = "older_than_time_window";
       break;
     }
+    if (
+      timeWindow.enabled
+      && index + 1 >= Math.max(4, MIN_SNAPSHOTS)
+      && Number(current.inside_window_posts || 0) === 0
+      && Number(current.old_window_posts || 0) === 0
+      && Number(current.new_posts || 0) > 0
+    ) {
+      const recentPosts = [...seen.values()].slice(-Number(current.new_posts || 0));
+      const detailBoundary = await confirmWindowBoundaryFromDetails(opencliCommand, session, recentPosts, timeWindow);
+      snapshots[snapshots.length - 1].detail_time_boundary = detailBoundary;
+      detailWindowBoundaryCount = detailBoundary.complete ? detailWindowBoundaryCount + 1 : 0;
+      if (detailWindowBoundaryCount >= 1) {
+        stopReason = "detail_time_older_than_time_window";
+        break;
+      }
+    } else {
+      detailWindowBoundaryCount = 0;
+    }
     if (snapshots.filter((item) => item.label === "from_top").length >= Math.max(1, MIN_SNAPSHOTS) && stable >= STABLE_SNAPSHOTS && noMovementCount >= 1) {
       stopReason = "stable_no_new_posts";
       break;
@@ -463,6 +609,7 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
     posts: [...seen.values()],
     stable_snapshot_count: stable,
     old_post_window_snapshot_count: oldPostWindowCount,
+    detail_window_boundary_count: detailWindowBoundaryCount,
     no_movement_snapshot_count: noMovementCount,
     stopReason,
   };
@@ -557,6 +704,7 @@ async function main() {
       stop_reason: capture.stopReason,
       stable_snapshot_count: capture.stable_snapshot_count,
       old_post_window_snapshot_count: capture.old_post_window_snapshot_count,
+      detail_window_boundary_count: capture.detail_window_boundary_count,
       no_movement_snapshot_count: capture.no_movement_snapshot_count,
       coverage_blocked: coverage.coverage_blocked,
       coverage_incomplete: coverage.coverage_incomplete,

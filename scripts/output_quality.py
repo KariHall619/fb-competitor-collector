@@ -45,11 +45,14 @@ def output_quality_errors(posts: list[dict[str, Any]], config: dict[str, Any] | 
 def ready_for_output(
     posts: list[dict[str, Any]],
     config: dict[str, Any] | None = None,
+    *,
+    include_synced: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    allowed_statuses = {"ready_for_output", "output_synced"} if include_synced else {"ready_for_output"}
     ready = [
         post
         for post in posts
-        if post.get("output_status") == "ready_for_output"
+        if post.get("output_status") in allowed_statuses
         and (config is None or audit_post_fields(post, config).get("field_audit_status") == "passed")
     ]
     skipped = [post for post in posts if post not in ready]

@@ -11,7 +11,7 @@ from typing import Any
 
 from config_loader import deep_get, load_config
 from field_audit import is_system_audit_marker
-from field_schema import output_field_for_header
+from field_schema import cell_text, output_field_for_header
 from models import facebook_content_key
 
 
@@ -287,7 +287,7 @@ def key_column_index(headers: list[Any], key_field: str) -> int | None:
 
 
 def normalized_upsert_key(value: Any, key_field: str) -> str:
-    text = str(value or "").strip()
+    text = cell_text(value)
     if not text:
         return ""
     if key_field != "post_url":
@@ -390,12 +390,28 @@ def upsert_rows(
         current_headers = headers
     existing_rows = existing_values[1:] if existing_values else []
     by_key: dict[str, int] = {}
+    duplicate_indexes: set[int] = set()
     for index, row in enumerate(existing_rows):
         if len(row) > key_index and row[key_index]:
-            by_key[normalized_upsert_key(row[key_index], key_field)] = index
+            key = normalized_upsert_key(row[key_index], key_field)
+            if not key:
+                continue
+            if key in by_key:
+                primary_index = by_key[key]
+                existing_rows[primary_index] = merge_upsert_row(existing_rows[primary_index], row, headers)
+                duplicate_indexes.add(index)
+            else:
+                by_key[key] = index
     updated = 0
     inserted = 0
-    merged_rows = [list(row) for row in existing_rows]
+    merged_rows = [list(row) for index, row in enumerate(existing_rows) if index not in duplicate_indexes]
+    if duplicate_indexes:
+        by_key = {}
+        for index, row in enumerate(merged_rows):
+            if len(row) > key_index and row[key_index]:
+                key = normalized_upsert_key(row[key_index], key_field)
+                if key:
+                    by_key[key] = index
     for row in rows:
         key = normalized_upsert_key(row[key_index], key_field) if len(row) > key_index and row[key_index] else ""
         if key and key in by_key:
@@ -408,7 +424,11 @@ def upsert_rows(
             if key:
                 by_key[key] = len(merged_rows) - 1
     values = [headers] + merged_rows
-    result = write_range(config, f"{sheet_ref}!A1:{end_col}{len(values)}", values)
+    write_values = list(values)
+    if len(existing_values) > len(values):
+        blank_row = [""] * width
+        write_values.extend([list(blank_row) for _ in range(len(existing_values) - len(values))])
+    result = write_range(config, f"{sheet_ref}!A1:{end_col}{len(write_values)}", write_values)
     return {
         "ok": result.returncode == 0,
         "returncode": result.returncode,
@@ -418,6 +438,7 @@ def upsert_rows(
         "rows": len(rows),
         "updated": updated,
         "inserted": inserted,
+        "cleared_trailing_rows": max(0, len(existing_values) - len(values)),
         "mode": "upsert",
         "identity": auth_payload.get("identity"),
         "tokenStatus": auth_payload.get("tokenStatus"),

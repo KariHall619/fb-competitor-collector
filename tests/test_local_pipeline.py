@@ -785,6 +785,76 @@ if (candidate.source_split !== 'media_fallback' || candidate.post_time_text || c
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def assert_dom_extractor_excludes_comment_photo_media_fallback() -> None:
+    script = """
+const { browserExpression } = require('./scripts/fb_dom_extractors');
+class Node {
+  constructor(tagName, attrs = {}, children = [], ownText = '') {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = attrs;
+    this.children = children;
+    this.ownText = ownText;
+    this.parentElement = null;
+    for (const child of children) child.parentElement = this;
+  }
+  get innerText() {
+    return [this.ownText, ...this.children.map((child) => child.innerText)].filter(Boolean).join('\\n');
+  }
+  get textContent() { return this.innerText; }
+  get href() {
+    if (!this.attrs.href) return '';
+    return new URL(this.attrs.href, global.location.href).href;
+  }
+  getAttribute(name) { return this.attrs[name] || ''; }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const result = [];
+    const matches = (node, current) => {
+      if (current === 'a[href]') return node.tagName === 'A' && !!node.attrs.href;
+      if (current === 'h1') return node.tagName === 'H1';
+      if (current === 'h2') return node.tagName === 'H2';
+      if (current === 'article') return node.tagName === 'ARTICLE';
+      if (current === 'div[role="article"]') return node.tagName === 'DIV' && node.attrs.role === 'article';
+      return false;
+    };
+    const visit = (node) => {
+      if (selectors.some((current) => matches(node, current))) result.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(this);
+    return result;
+  }
+}
+const commentPhoto = new Node('div', { role: 'article' }, [
+  new Node('span', {}, [], 'Author'),
+  new Node('strong', {}, [], 'Lessons Taught By Life'),
+  new Node('p', {}, [], 'Part 3 - ENDING: https://kaylestore.net/story-part-3'),
+  new Node('a', { href: '/photo.php?fbid=1404939784990368&set=p.1404939784990368&type=3' }, [], 'Photo'),
+  new Node('span', {}, [], '13h'),
+  new Node('span', {}, [], 'Like'),
+  new Node('span', {}, [], 'Reply'),
+  new Node('span', {}, [], '15')
+]);
+const body = new Node('body', {}, [
+  new Node('h1', {}, [], 'Lessons Taught By Life'),
+  commentPhoto
+]);
+global.document = {
+  title: 'Lessons Taught By Life | Facebook',
+  body,
+  querySelectorAll: (selector) => body.querySelectorAll(selector)
+};
+global.location = new URL('https://www.facebook.com/LessonsTaughtByLifepage');
+const result = eval(browserExpression(1000));
+if (result.real_post_count !== 0 || result.candidates.length !== 0) {
+  console.error(JSON.stringify(result, null, 2));
+  process.exit(1);
+}
+"""
+    result = run(["node", "-e", script])
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def assert_dom_extractor_excludes_profile_shell_with_external_link() -> None:
     script = """
 const { browserExpression } = require('./scripts/fb_dom_extractors');
@@ -2411,6 +2481,10 @@ def assert_feishu_upsert_merges_rows_without_overwriting_manual_adoption() -> No
         "https://www.facebook.com/share/p/abcDEF123/?mibextid=wwXIfr",
         "post_url",
     ) == "share:p:abcDEF123"
+    assert normalized_upsert_key(
+        [{"link": "https://facebook.com/storyhub/posts/pfbid123", "text": "https://facebook.com/storyhub/posts/pfbid123", "type": "url"}],
+        "post_url",
+    ) == normalized_upsert_key("https://facebook.com/storyhub/posts/pfbid123", "post_url")
 
 
 def assert_feishu_upsert_matches_canonical_post_urls(tmp_path: Path) -> None:
@@ -2433,6 +2507,12 @@ def assert_feishu_upsert_matches_canonical_post_urls(tmp_path: Path) -> None:
     existing = [
         headers,
         ["Story Hub", "https://www.facebook.com/storyhub/posts/pfbid123?utm_source=x", "旧概要", "采用"],
+        [
+            "Story Hub",
+            [{"link": "https://facebook.com/storyhub/posts/pfbid123", "text": "https://facebook.com/storyhub/posts/pfbid123", "type": "url"}],
+            "重复概要",
+            "",
+        ],
     ]
     incoming = [["Story Hub", "https://facebook.com/storyhub/posts/pfbid123", "新概要", "待补抓：引流链接"]]
     config = {"feishu": {"sheets": {"all_posts": "FB竞品帖子链接"}}}
@@ -2453,12 +2533,15 @@ def assert_feishu_upsert_matches_canonical_post_urls(tmp_path: Path) -> None:
         assert result["ok"] is True
         assert result["updated"] == 1
         assert result["inserted"] == 0
+        assert result["cleared_trailing_rows"] == 1
+        assert len(written["values"]) == 3
         assert written["values"][1] == [
             "Story Hub",
             "https://facebook.com/storyhub/posts/pfbid123",
             "新概要",
             "采用",
         ]
+        assert written["values"][2] == ["", "", "", ""]
     finally:
         lark_io.require_user_identity = original_require_user_identity
         lark_io.ensure_sheet = original_ensure_sheet
@@ -2591,6 +2674,34 @@ def assert_sync_feishu_audit_and_strict_modes() -> None:
     assert strict["ready_for_output"] == 0
     assert strict["needs_enrichment_skipped"] == 1
     assert strict["next_actions"]
+
+    complete_synced = [
+        {
+            "account_name": "Example Page",
+            "post_url": "https://facebook.com/example/posts/already-synced",
+            "output_status": "output_synced",
+            "field_audit_status": "passed",
+            "posted_at": "2026年6月4日 20:04",
+            "time_confirmed": True,
+            "time_source": "real_mouse_tooltip",
+            "summary_source": "article",
+            "story_summary": VALID_CN_SUMMARY,
+            "lead_link_status": "qualified",
+            "lead_link_source": "comment_reply",
+            "lead_url_raw": "https://example.com/story",
+            "article_url": "https://example.com/story",
+            "likes": 12,
+            "comments": 3,
+            "shares": 1,
+            "post_type": "图文",
+        }
+    ]
+    strict_resync = sync_feishu.sync_posts(config, complete_synced, "all_posts", "append", True, audit=False)
+    assert strict_resync["ok"] is True
+    assert strict_resync["ready_for_output"] == 1
+    assert strict_resync["rows"] == 1
+    assert strict_resync["mode"] == "upsert"
+    assert strict_resync["keys"] == ["https://facebook.com/example/posts/already-synced"]
 
 
 def assert_sync_failures_include_recovery_actions() -> None:
@@ -15149,6 +15260,7 @@ def main() -> int:
     assert_dom_extractor_prefers_article_main_post_when_comments_have_times()
     assert_dom_extractor_excludes_comment_only_permalink_candidate()
     assert_dom_extractor_keeps_photo_chrome_as_media_fallback_only()
+    assert_dom_extractor_excludes_comment_photo_media_fallback()
     assert_dom_extractor_excludes_profile_shell_with_external_link()
     assert_dom_extractor_blocks_visitor_preview()
     assert_dom_extractor_prefers_parent_post_over_photo_link()

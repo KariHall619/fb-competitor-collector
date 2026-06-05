@@ -102,7 +102,7 @@ def sync_posts(
             )
         return annotate_sync_failure(result)
 
-    ready_posts, skipped_posts = ready_for_output(posts, config)
+    ready_posts, skipped_posts = ready_for_output(posts, config, include_synced=mode == "append")
     errors = output_quality_errors(ready_posts, config)
     if errors:
         result = {"ok": False, "stage": "quality_gate", "errors": errors}
@@ -130,8 +130,8 @@ def sync_posts(
         return annotate_sync_failure(result)
     output_headers = configured_output_headers(config)
     rows = [output_row_for_headers(post, output_headers, config) for post in ready_posts]
-    headers = output_headers if mode == "overwrite" else None
-    result = write_rows(config, sheet_key, rows, headers=headers, mode=mode, dry_run=dry_run)
+    write_mode = "overwrite" if mode == "overwrite" else "upsert"
+    result = write_rows(config, sheet_key, rows, headers=output_headers, mode=write_mode, dry_run=dry_run)
     if result.get("ok") and conn is not None and not dry_run:
         mark_output_synced(conn, ready_posts)
     result["ready_for_output"] = len(ready_posts)
