@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { CommandExecutionError, EmptyResultError } from '@jackwener/opencli/errors';
 import { cli, Strategy } from '@jackwener/opencli/registry';
 
@@ -12,6 +13,7 @@ const {
   cleanExternalUrl,
   commentModeBrowserExpression,
   detailEngagementBrowserExpression,
+  detailActionStateExpression,
   detailPostTypeBrowserExpression,
   embeddedPublishTimeExpression,
   exactTimeFromTargetExpression,
@@ -126,6 +128,90 @@ async function wait(page, seconds) {
 
 async function readPage(page, expression) {
   return unwrap(await page.evaluate(expression));
+}
+
+async function currentPageHtml(page) {
+  const payload = await readPage(page, `(() => ({
+    url: location.href,
+    title: document.title,
+    html: document.documentElement?.outerHTML || ''
+  }))()`);
+  return payload || { url: '', title: '', html: '' };
+}
+
+function scraplingPythonCommand() {
+  return process.env.SCRAPLING_PYTHON
+    || process.env.PYTHON
+    || 'python3';
+}
+
+function runScraplingExtractor(payload) {
+  const scriptPath = path.join(projectRoot, 'scripts', 'fb_scrapling_extract.py');
+  const result = spawnSync(scraplingPythonCommand(), [scriptPath], {
+    input: JSON.stringify(payload),
+    encoding: 'utf-8',
+    maxBuffer: 20 * 1024 * 1024,
+  });
+  if (result.error) {
+    return { ok: false, error: String(result.error?.message || result.error), candidates: [] };
+  }
+  const text = String(result.stdout || '').trim();
+  if (!text) {
+    return {
+      ok: false,
+      error: String(result.stderr || `scrapling exited ${result.status}` || 'scrapling_no_output').trim(),
+      candidates: [],
+    };
+  }
+  try {
+    const parsed = JSON.parse(text);
+    return {
+      ...parsed,
+      stderr: String(result.stderr || '').trim(),
+      exit_code: result.status,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `scrapling_json_parse_failed: ${String(error?.message || error)}`,
+      stdout: text.slice(0, 1000),
+      stderr: String(result.stderr || '').trim(),
+      candidates: [],
+    };
+  }
+}
+
+async function scraplingLeadCandidates(page, post, mode) {
+  const result = await scraplingPageExtraction(page, { account_name: post.account_name || '', mode });
+  return {
+    ...result,
+    candidates: Array.isArray(result?.lead_candidates) ? result.lead_candidates : [],
+  };
+}
+
+function missingLeadReason(attempts = []) {
+  const last = attempts.at(-1) || {};
+  const all = attempts.filter((item) => item.mode !== 'post_cta');
+  const anyClicked = all.some((item) => Number(item.action_summary?.clicked_count || 0) > 0);
+  const anyExternal = all.some((item) => Number(item.action_summary?.external_count || 0) > 0);
+  const anyScraplingOk = all.some((item) => item.scrapling?.ok);
+  if (!anyClicked) return 'comment_controls_not_found_or_not_clickable';
+  if (!anyExternal) return 'external_link_not_in_html_after_expand';
+  if (anyScraplingOk && !Number(last.scrapling?.candidate_count || 0)) return 'parser_no_candidate_after_actions';
+  return 'lead_link_not_resolved';
+}
+
+async function scraplingPageExtraction(page, extra = {}) {
+  const snapshot = await currentPageHtml(page);
+  if (!snapshot.html) {
+    return { ok: false, error: 'missing_page_html', candidates: [], lead_candidates: [] };
+  }
+  return runScraplingExtractor({
+    html: snapshot.html,
+    url: snapshot.url,
+    title: snapshot.title,
+    ...extra,
+  });
 }
 
 function cleanUrl(value) {
@@ -564,14 +650,35 @@ async function extractLeadLink(page, post, options) {
   const attempts = [];
   let fallbackSelected = null;
   for (const mode of ['default', 'all_comments', 'newest']) {
-    await readPage(page, focusDetailConversationExpression()).catch(() => ({}));
-    const modeResult = await readPage(page, commentModeBrowserExpression(mode)).catch((error) => ({ mode, error: String(error) }));
-    await readPage(page, expandCommentsExpression(options.commentExpandRounds, options.replyExpandRounds)).catch(() => []);
-    const candidates = await readPage(page, leadLinkScanBrowserExpression(post.account_name || '', mode));
+    const actionTrace = await readPage(
+      page,
+      detailActionStateExpression(options.commentExpandRounds, options.replyExpandRounds, mode)
+    ).catch((error) => ({ mode, error: String(error), summary: {} }));
+    const scraplingResult = await scraplingLeadCandidates(page, post, mode).catch((error) => ({
+      ok: false,
+      error: String(error?.message || error),
+      candidates: [],
+    }));
+    let candidates = Array.isArray(scraplingResult?.candidates) ? scraplingResult.candidates : [];
+    let extractor = 'scrapling';
+    if (!candidates.length) {
+      candidates = await readPage(page, leadLinkScanBrowserExpression(post.account_name || '', mode));
+      extractor = 'browser_dom';
+    }
     const selected = (candidates || []).find((item) => item.owner_matched) || (candidates || [])[0] || null;
     attempts.push({
       mode,
-      mode_result: modeResult,
+      action_trace: actionTrace,
+      action_summary: actionTrace?.summary || {},
+      extractor,
+      scrapling: {
+        ok: Boolean(scraplingResult?.ok),
+        candidate_count: Array.isArray(scraplingResult?.candidates) ? scraplingResult.candidates.length : 0,
+        real_post_count: Number(scraplingResult?.real_post_count || 0),
+        engagement_raw: scraplingResult?.engagement?.raw || '',
+        post_type: scraplingResult?.post_type?.post_type || '',
+        error: scraplingResult?.error || '',
+      },
       candidate_count: (candidates || []).length,
       selected: selected
         ? {
@@ -579,6 +686,7 @@ async function extractLeadLink(page, post, options) {
             source: selected.source,
             owner_matched: selected.owner_matched,
             block_text: selected.block_text,
+            extractor: selected.extractor || extractor,
           }
         : null,
     });
@@ -630,9 +738,10 @@ async function extractLeadLink(page, post, options) {
     }
     if (!fallbackSelected) fallbackSelected = ctaSelected;
   }
-  if (!fallbackSelected) return { status: 'missing', candidates: [], attempts };
+  if (!fallbackSelected) return { status: 'missing', reason: missingLeadReason(attempts), candidates: [], attempts };
   return {
     status: 'missing',
+    reason: missingLeadReason(attempts),
     lead_url_raw: fallbackSelected.href,
     landing_url: '',
     lead_link_source: fallbackSelected.source,
@@ -658,12 +767,20 @@ async function enrichCurrentDetailPage(page, post, options) {
   const exactTime = await extractExactTime(page, post, options);
   const focus = await readPage(page, focusDetailConversationExpression()).catch(() => ({}));
   const target = exactTime.target || null;
+  const scraplingDetail = await scraplingPageExtraction(page, {
+    account_name: post.account_name || '',
+    mode: 'detail',
+  }).catch((error) => ({ ok: false, error: String(error?.message || error) }));
   const engagement = options.skipEngagement
     ? { skipped: true, raw: '', confidence: 'skipped' }
-    : await readPage(page, detailEngagementBrowserExpression(target));
+    : (scraplingDetail?.engagement?.raw
+      ? scraplingDetail.engagement
+      : await readPage(page, detailEngagementBrowserExpression(target)));
   const postType = options.skipPostType
     ? { skipped: true, post_type: post.post_type || '' }
-    : await readPage(page, detailPostTypeBrowserExpression());
+    : (scraplingDetail?.post_type?.post_type
+      ? scraplingDetail.post_type
+      : await readPage(page, detailPostTypeBrowserExpression()));
   const leadLink = await extractLeadLink(page, post, options);
 
   const nextPost = { ...post };
@@ -708,10 +825,27 @@ async function enrichCurrentDetailPage(page, post, options) {
       nextPost.lead_link_status = 'missing';
     }
     if (leadLink.status !== 'qualified') {
-      nextPost.note = appendSemicolonNote(nextPost.note, '评论区、评论回复或主帖CTA引流链接待确认');
+      const reasonText = leadLink.reason ? `评论区、评论回复或主帖CTA引流链接待确认：${leadLink.reason}` : '评论区、评论回复或主帖CTA引流链接待确认';
+      nextPost.note = appendSemicolonNote(nextPost.note, reasonText);
     }
   }
-  return { ok: true, post: nextPost, exact_time: exactTime, engagement, lead_link: leadLink, post_type: postType, focus };
+  return {
+    ok: true,
+    post: nextPost,
+    exact_time: exactTime,
+    engagement,
+    lead_link: leadLink,
+    post_type: postType,
+    focus,
+    scrapling_detail: {
+      ok: Boolean(scraplingDetail?.ok),
+      error: scraplingDetail?.error || '',
+      real_post_count: Number(scraplingDetail?.real_post_count || 0),
+      lead_candidate_count: Number(scraplingDetail?.lead_candidate_count || 0),
+      engagement_raw: scraplingDetail?.engagement?.raw || '',
+      post_type: scraplingDetail?.post_type?.post_type || '',
+    },
+  };
 }
 
 async function detail(page, kwargs) {
@@ -771,6 +905,7 @@ async function detail(page, kwargs) {
       duration_ms: Date.now() - started,
       exact_time: payload.exact_time,
       focus: payload.focus,
+      scrapling_detail: payload.scrapling_detail,
       engagement: payload.engagement,
       lead_link: payload.lead_link,
       post_type: payload.post_type,

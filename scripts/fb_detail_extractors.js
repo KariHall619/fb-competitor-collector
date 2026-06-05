@@ -783,6 +783,150 @@ function expandCommentsExpression(commentRounds = 3, replyRounds = 3) {
   })()`;
 }
 
+function detailActionStateExpression(commentRounds = 3, replyRounds = 3, mode = "default") {
+  return `(async () => {
+    const mode = ${JSON.stringify(mode)};
+    const maxRounds = Math.max(${Number(commentRounds) || 3}, ${Number(replyRounds) || 3});
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const linkPattern = /(?:https?:\\/\\/|www\\.)[^\\s<>"'，。；、)）\\]]+/gi;
+    const externalHref = (href) => {
+      try {
+        const parsed = new URL(href, location.href);
+        const host = parsed.hostname.replace(/^www\\./i, "").toLowerCase();
+        if (/l\\.facebook\\.com$/i.test(parsed.hostname) && parsed.searchParams.get("u")) return true;
+        return /^https?:/i.test(parsed.protocol)
+          && host !== "facebook.com"
+          && !host.endsWith(".facebook.com")
+          && host !== "fb.watch"
+          && host !== "meta.com"
+          && !host.endsWith(".meta.com");
+      } catch {
+        return false;
+      }
+    };
+    const pageStats = () => {
+      const bodyText = document.body?.innerText || "";
+      const html = document.documentElement?.outerHTML || "";
+      const anchors = [...document.querySelectorAll("a[href]")]
+        .map((a) => a.getAttribute("href") || "")
+        .filter(externalHref);
+      const textLinks = [...bodyText.matchAll(linkPattern)]
+        .map((match) => match[0])
+        .filter((href) => externalHref(href.startsWith("http") ? href : "https://" + href));
+      const labels = [...document.querySelectorAll('div[role="button"], span, a, [aria-label]')]
+        .map((el) => clean(el.innerText || el.textContent || el.getAttribute("aria-label") || ""))
+        .filter(Boolean);
+      return {
+        body_length: bodyText.length,
+        html_length: html.length,
+        external_anchor_count: anchors.length,
+        external_text_url_count: textLinks.length,
+        visible_author_count: (bodyText.match(/\\bAuthor\\b|作者/g) || []).length,
+        visible_reply_count: (bodyText.match(/\\bReply\\b|回复/g) || []).length,
+        comment_control_count: labels.filter((label) => /comments?|replies|reply|see more|view more|所有评论|查看更多|回复/i.test(label)).length,
+        external_preview: [...new Set([...anchors, ...textLinks])].slice(0, 5),
+      };
+    };
+    const modeLabels = {
+      all_comments: [/all comments/i, /所有评论/, /全部评论/],
+      newest: [/newest/i, /most recent/i, /最新评论/, /最新/],
+      most_relevant: [/most relevant/i, /top comments/i, /最相关/, /热门评论/],
+    };
+    const sortControlLabels = [
+      /most relevant/i,
+      /top comments/i,
+      /all comments/i,
+      /newest/i,
+      /comment ranking/i,
+      /最相关/,
+      /热门评论/,
+      /所有评论/,
+      /全部评论/,
+      /最新评论/,
+      /评论排序/,
+    ];
+    const expandLabels = [
+      /view more comments/i,
+      /see more comments/i,
+      /view previous comments/i,
+      /more comments/i,
+      /view replies/i,
+      /see replies/i,
+      /\\d+\\s+repl(?:y|ies)/i,
+      /view\\s+\\d+\\s+repl(?:y|ies)/i,
+      /see\\s+\\d+\\s+repl(?:y|ies)/i,
+      /see more/i,
+      /查看更多评论/,
+      /查看更多回复/,
+      /查看回复/,
+      /更多/,
+    ];
+    const clickable = () => [...document.querySelectorAll('div[role="button"], span, a, [aria-label]')]
+      .map((el) => ({ el, text: clean(el.innerText || el.textContent || el.getAttribute("aria-label") || "") }))
+      .filter((item) => item.text && item.text.length <= 180);
+    const clickOne = async (patterns, label) => {
+      const item = clickable()
+        .sort((a, b) => a.text.length - b.text.length)
+        .find((candidate) => patterns.some((pattern) => pattern.test(candidate.text)));
+      if (!item) return { label, clicked: false, text: "" };
+      const before = pageStats();
+      try {
+        item.el.scrollIntoView?.({ block: "center", inline: "nearest" });
+        await sleep(120);
+        item.el.click();
+        await sleep(650);
+      } catch (error) {
+        return { label, clicked: false, text: item.text, error: String(error?.message || error) };
+      }
+      const after = pageStats();
+      return {
+        label,
+        clicked: true,
+        text: item.text,
+        body_length_delta: after.body_length - before.body_length,
+        external_delta: (after.external_anchor_count + after.external_text_url_count) - (before.external_anchor_count + before.external_text_url_count),
+      };
+    };
+    const trace = {
+      mode,
+      before: pageStats(),
+      mode_actions: [],
+      expand_actions: [],
+      scroll_actions: [],
+      after: null,
+    };
+    if (mode !== "default") {
+      trace.mode_actions.push(await clickOne(sortControlLabels, "open_comment_sort"));
+      trace.mode_actions.push(await clickOne(modeLabels[mode] || [], "select_comment_mode"));
+    }
+    for (let round = 0; round < maxRounds; round += 1) {
+      const roundBefore = pageStats();
+      const action = await clickOne(expandLabels, "expand_comment_or_reply");
+      action.round = round;
+      trace.expand_actions.push(action);
+      window.scrollBy(0, 360);
+      await sleep(450);
+      const roundAfter = pageStats();
+      trace.scroll_actions.push({
+        round,
+        body_length_delta: roundAfter.body_length - roundBefore.body_length,
+        external_delta: (roundAfter.external_anchor_count + roundAfter.external_text_url_count) - (roundBefore.external_anchor_count + roundBefore.external_text_url_count),
+      });
+      if (!action.clicked && Math.abs(roundAfter.body_length - roundBefore.body_length) < 20) break;
+      if (roundAfter.external_anchor_count + roundAfter.external_text_url_count > roundBefore.external_anchor_count + roundBefore.external_text_url_count) break;
+    }
+    trace.after = pageStats();
+    trace.summary = {
+      clicked_count: [...trace.mode_actions, ...trace.expand_actions].filter((item) => item.clicked).length,
+      body_length_delta: trace.after.body_length - trace.before.body_length,
+      external_count: trace.after.external_anchor_count + trace.after.external_text_url_count,
+      comment_control_count: trace.after.comment_control_count,
+    };
+    return trace;
+  })()`;
+}
+
 function focusDetailConversationExpression() {
   return `(() => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
@@ -1140,6 +1284,7 @@ module.exports = {
   exactTimeFromTargetExpression,
   expandCommentsExpression,
   focusDetailConversationExpression,
+  detailActionStateExpression,
   headerTimeTargetExpression,
   leadLinkScanBrowserExpression,
   pageStateExpression,

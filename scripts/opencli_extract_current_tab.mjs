@@ -5,6 +5,7 @@
  */
 
 import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -253,6 +254,42 @@ async function evalPage(opencliCommand, session, tab, js) {
   return result.payload || {};
 }
 
+async function currentPageHtml(opencliCommand, session, tab) {
+  return evalPage(opencliCommand, session, tab, `(() => ({
+    url: location.href,
+    title: document.title,
+    html: document.documentElement?.outerHTML || ''
+  }))()`);
+}
+
+function scraplingPythonCommand() {
+  return process.env.SCRAPLING_PYTHON
+    || process.env.PYTHON
+    || "python3";
+}
+
+function runScraplingExtraction(payload) {
+  const scriptPath = path.join(path.dirname(CURRENT_FILE), "fb_scrapling_extract.py");
+  const result = spawnSync(scraplingPythonCommand(), [scriptPath], {
+    input: JSON.stringify(payload),
+    encoding: "utf-8",
+    maxBuffer: 20 * 1024 * 1024,
+  });
+  const text = String(result.stdout || "").trim();
+  if (!text) return { ok: false, error: String(result.stderr || result.error || "scrapling_no_output"), candidates: [] };
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    return { ok: false, error: String(error?.message || error), candidates: [] };
+  }
+}
+
+async function scraplingPageExtraction(opencliCommand, session, tab) {
+  const snapshot = await currentPageHtml(opencliCommand, session, tab);
+  if (!snapshot.html) return { ok: false, error: "missing_page_html", candidates: [] };
+  return runScraplingExtraction(snapshot);
+}
+
 async function scrollToTop(opencliCommand, session, tab) {
   await evalPage(opencliCommand, session, tab, `(() => {
     const closeBlockingDialogs = () => {
@@ -490,13 +527,21 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
       return false;
     }
 
-    const extraction = await evalPage(opencliCommand, session, tab, browserExpression(maxText)).catch((error) => ({
-      capture_blocked: true,
-      eval_failed: true,
+    const scraplingExtraction = await scraplingPageExtraction(opencliCommand, session, tab).catch((error) => ({
+      ok: false,
       error: String(error?.message || error),
-      body_length: 0,
-      real_post_count: 0,
+      candidates: [],
     }));
+    let extraction = scraplingExtraction?.ok && Array.isArray(scraplingExtraction.candidates) && scraplingExtraction.candidates.length
+      ? { ...scraplingExtraction, extraction_source: "scrapling" }
+      : await evalPage(opencliCommand, session, tab, browserExpression(maxText)).catch((error) => ({
+        capture_blocked: true,
+        eval_failed: true,
+        error: String(error?.message || error),
+        body_length: 0,
+        real_post_count: 0,
+      }));
+    if (!extraction.extraction_source) extraction.extraction_source = "browser_dom";
     if (extraction.capture_blocked) {
       blockedExtraction = extraction;
       stopReason = extraction.eval_failed ? "opencli_eval_failed" : extraction.logged_out ? "login_required" : "visitor_preview";
@@ -540,6 +585,7 @@ async function captureSnapshots({ opencliCommand, session, tab, maxText }) {
       label,
       body_length: extraction.body_length || 0,
       article_count: extraction.article_count || 0,
+      extraction_source: extraction.extraction_source || "",
       raw_candidate_count: extraction.real_post_count || 0,
       new_posts: newPosts,
       seen_posts: seen.size,
