@@ -14,6 +14,7 @@ from urllib.parse import urlparse, urlunparse
 from field_audit import audit_fields_for_storage
 from field_audit import is_system_audit_marker
 from models import clean_post_url, has_qualified_comment_lead_link
+from pipeline_diagnostics import output_audit_summary
 from pipeline_status import crawl_status_for, missing_enrichment_stages, output_status_for
 from story_summary_policy import has_valid_story_summary
 from value_utils import parse_bool
@@ -65,6 +66,11 @@ ENRICHMENT_STAGES = ("detail_time", "lead_link", "engagement", "post_type", "art
 TASK_OPEN_STATUSES = ("pending", "failed")
 TASK_STAGE_ORDER = {stage: index for index, stage in enumerate(ENRICHMENT_STAGES, 1)}
 TASK_FETCH_LIMIT_MULTIPLIER = 2
+ENRICHMENT_TASK_EXTRA_COLUMNS = {
+    "reason_code": "TEXT",
+    "evidence_ref": "TEXT",
+    "progress_signature": "TEXT",
+}
 
 
 SCHEMA_COLUMNS: dict[str, str] = {
@@ -175,14 +181,65 @@ def init_db(conn: sqlite3.Connection) -> None:
             locked_at TEXT,
             duration_ms INTEGER,
             payload TEXT,
+            reason_code TEXT,
+            evidence_ref TEXT,
+            progress_signature TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(canonical_post_url, stage)
         )
         """
     )
+    existing_task_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(enrichment_tasks)").fetchall()
+    }
+    for column, column_type in ENRICHMENT_TASK_EXTRA_COLUMNS.items():
+        if column not in existing_task_columns:
+            conn.execute(f"ALTER TABLE enrichment_tasks ADD COLUMN {column} {column_type}")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_enrichment_tasks_status_stage ON enrichment_tasks(status, stage, next_run_at)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS stage_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            canonical_post_url TEXT NOT NULL,
+            post_url TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            reason_code TEXT,
+            message TEXT,
+            evidence_ref TEXT,
+            progress_signature TEXT,
+            duration_ms INTEGER,
+            payload TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_stage_attempts_post_stage ON stage_attempts(canonical_post_url, stage, created_at)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS output_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT,
+            account_name TEXT,
+            account_url TEXT,
+            discovered INTEGER NOT NULL DEFAULT 0,
+            time_confirmed INTEGER NOT NULL DEFAULT 0,
+            lead_qualified INTEGER NOT NULL DEFAULT 0,
+            summary_ready INTEGER NOT NULL DEFAULT 0,
+            gate_passed INTEGER NOT NULL DEFAULT 0,
+            synced INTEGER NOT NULL DEFAULT 0,
+            blocked_by TEXT,
+            top_missing_field TEXT,
+            raw_payload TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
     )
     conn.execute(
         """
@@ -467,6 +524,18 @@ def enqueue_enrichment_tasks(
                     WHEN enrichment_tasks.status = 'running' THEN enrichment_tasks.last_error
                     ELSE NULL
                 END,
+                reason_code = CASE
+                    WHEN enrichment_tasks.status = 'running' THEN enrichment_tasks.reason_code
+                    ELSE NULL
+                END,
+                evidence_ref = CASE
+                    WHEN enrichment_tasks.status = 'running' THEN enrichment_tasks.evidence_ref
+                    ELSE NULL
+                END,
+                progress_signature = CASE
+                    WHEN enrichment_tasks.status = 'running' THEN enrichment_tasks.progress_signature
+                    ELSE NULL
+                END,
                 next_run_at = CASE
                     WHEN enrichment_tasks.status = 'running' THEN enrichment_tasks.next_run_at
                     ELSE CURRENT_TIMESTAMP
@@ -731,19 +800,78 @@ def mark_task_running(conn: sqlite3.Connection, task_id: int) -> None:
     conn.commit()
 
 
-def mark_task_done(conn: sqlite3.Connection, task_id: int, *, duration_ms: int | None = None) -> None:
+def task_row(conn: sqlite3.Connection, task_id: int) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM enrichment_tasks WHERE id = ?", (task_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def record_stage_attempt(
+    conn: sqlite3.Connection,
+    task: dict[str, Any],
+    *,
+    status: str,
+    reason_code: str = "",
+    message: str = "",
+    evidence_ref: str = "",
+    progress_signature: str = "",
+    duration_ms: int | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO stage_attempts
+        (canonical_post_url, post_url, stage, attempt, status, reason_code, message, evidence_ref, progress_signature, duration_ms, payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            task.get("canonical_post_url") or "",
+            task.get("post_url") or "",
+            task.get("stage") or "",
+            int(task.get("attempts") or 0),
+            status,
+            reason_code,
+            message[:1000],
+            evidence_ref,
+            progress_signature,
+            duration_ms,
+            json.dumps(payload or {}, ensure_ascii=False),
+        ),
+    )
+
+
+def mark_task_done(
+    conn: sqlite3.Connection,
+    task_id: int,
+    *,
+    duration_ms: int | None = None,
+    evidence_ref: str = "",
+    payload: dict[str, Any] | None = None,
+) -> None:
+    task = task_row(conn, task_id)
     conn.execute(
         """
         UPDATE enrichment_tasks
         SET status = 'done',
             duration_ms = COALESCE(?, duration_ms),
             last_error = NULL,
+            reason_code = NULL,
+            evidence_ref = COALESCE(NULLIF(?, ''), evidence_ref),
+            progress_signature = NULL,
             locked_at = NULL,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
-        (duration_ms, task_id),
+        (duration_ms, evidence_ref, task_id),
     )
+    if task:
+        record_stage_attempt(
+            conn,
+            task,
+            status="done",
+            evidence_ref=evidence_ref,
+            duration_ms=duration_ms,
+            payload=payload,
+        )
     conn.commit()
 
 
@@ -774,22 +902,47 @@ def mark_task_failed(
     *,
     duration_ms: int | None = None,
     retry_seconds: int = 900,
+    reason_code: str = "",
+    evidence_ref: str = "",
+    progress_signature: str = "",
+    max_attempts: int | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> None:
+    task = task_row(conn, task_id) or {}
+    attempts = int(task.get("attempts") or 0) + 1
+    status = "failed"
+    if max_attempts is not None and max_attempts > 0 and attempts >= max_attempts:
+        status = "exhausted"
     next_run_at = (datetime.utcnow() + timedelta(seconds=retry_seconds)).isoformat(timespec="seconds")
     conn.execute(
         """
         UPDATE enrichment_tasks
-        SET status = 'failed',
+        SET status = ?,
             attempts = attempts + 1,
             last_error = ?,
+            reason_code = ?,
+            evidence_ref = COALESCE(NULLIF(?, ''), evidence_ref),
+            progress_signature = ?,
             next_run_at = ?,
             duration_ms = COALESCE(?, duration_ms),
             locked_at = NULL,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
-        (error[:1000], next_run_at, duration_ms, task_id),
+        (status, error[:1000], reason_code, evidence_ref, progress_signature, next_run_at, duration_ms, task_id),
     )
+    if task:
+        record_stage_attempt(
+            conn,
+            {**task, "attempts": attempts},
+            status=status,
+            reason_code=reason_code,
+            message=error,
+            evidence_ref=evidence_ref,
+            progress_signature=progress_signature,
+            duration_ms=duration_ms,
+            payload=payload,
+        )
     conn.commit()
 
 
@@ -799,20 +952,39 @@ def mark_task_pending(
     *,
     reason: str = "",
     retry_seconds: int = 0,
+    reason_code: str = "",
+    evidence_ref: str = "",
+    progress_signature: str = "",
+    payload: dict[str, Any] | None = None,
 ) -> None:
+    task = task_row(conn, task_id) or {}
     next_run_at = (datetime.utcnow() + timedelta(seconds=max(0, retry_seconds))).isoformat(timespec="seconds")
     conn.execute(
         """
         UPDATE enrichment_tasks
         SET status = 'pending',
             last_error = ?,
+            reason_code = ?,
+            evidence_ref = COALESCE(NULLIF(?, ''), evidence_ref),
+            progress_signature = ?,
             next_run_at = ?,
             locked_at = NULL,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
-        (reason[:1000], next_run_at, task_id),
+        (reason[:1000], reason_code, evidence_ref, progress_signature, next_run_at, task_id),
     )
+    if task:
+        record_stage_attempt(
+            conn,
+            task,
+            status="pending",
+            reason_code=reason_code,
+            message=reason,
+            evidence_ref=evidence_ref,
+            progress_signature=progress_signature,
+            payload=payload,
+        )
     conn.commit()
 
 
@@ -835,6 +1007,55 @@ def task_counts_for_posts(conn: sqlite3.Connection, posts: list[dict[str, Any]])
         params,
     ).fetchall()
     return {f"{row['stage']}:{row['status']}": int(row["count"]) for row in rows}
+
+
+def stage_attempts_for_posts(conn: sqlite3.Connection, posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    scope_clause, params = task_scope_clause(posts)
+    rows = conn.execute(
+        f"""
+        SELECT * FROM stage_attempts
+        WHERE {scope_clause}
+        ORDER BY id ASC
+        """,
+        params,
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def record_output_audit(
+    conn: sqlite3.Connection,
+    posts: list[dict[str, Any]],
+    *,
+    config: dict[str, Any] | None = None,
+    run_id: str = "",
+    account_name: str = "",
+    account_url: str = "",
+) -> dict[str, Any]:
+    tasks = enrichment_tasks_for_posts(conn, posts) if posts else []
+    summary = output_audit_summary(posts, tasks, config=config)
+    conn.execute(
+        """
+        INSERT INTO output_audit
+        (run_id, account_name, account_url, discovered, time_confirmed, lead_qualified, summary_ready, gate_passed, synced, blocked_by, top_missing_field, raw_payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            account_name,
+            account_url,
+            int(summary.get("discovered") or 0),
+            int(summary.get("time_confirmed") or 0),
+            int(summary.get("lead_qualified") or 0),
+            int(summary.get("summary_ready") or 0),
+            int(summary.get("gate_passed") or 0),
+            int(summary.get("synced") or 0),
+            json.dumps(summary.get("blocked_by") or {}, ensure_ascii=False),
+            summary.get("top_missing_field") or "",
+            json.dumps(summary, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+    return summary
 
 
 def posts_for_tasks(conn: sqlite3.Connection, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:

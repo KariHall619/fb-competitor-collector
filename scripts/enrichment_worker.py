@@ -24,6 +24,7 @@ from models import (
     is_estimated_time_source,
     parse_reference_time,
 )
+from pipeline_diagnostics import detail_evidence_from_payload, reason_for_detail_stage
 from pipeline_status import crawl_status_for, has_confirmed_time, output_status_for
 from story_summary_policy import has_valid_story_summary, story_summary_errors
 from store import (
@@ -38,6 +39,7 @@ from store import (
     pending_enrichment_tasks_for_posts,
     post_for_task,
     query_posts,
+    record_output_audit,
     row_for_post,
     task_counts,
     task_counts_for_posts,
@@ -401,6 +403,74 @@ def post_task_key(post: dict[str, Any], task: dict[str, Any] | None = None) -> s
     )
 
 
+def progress_signature(evidence: dict[str, Any]) -> str:
+    if not evidence:
+        return ""
+    keys = [
+        "expand_clicks_count",
+        "external_link_count_in_dom",
+        "anchor_link_count",
+        "plaintext_link_count",
+        "candidate_count",
+        "author_block_matched",
+        "stop_reason",
+    ]
+    return json.dumps({key: evidence.get(key) for key in keys if key in evidence}, ensure_ascii=False, sort_keys=True)
+
+
+def max_task_attempts(config: dict[str, Any]) -> int:
+    return int(deep_get(config, "enrichment.max_attempts", 4) or 0)
+
+
+def mark_unsatisfied_detail_task(
+    conn: sqlite3.Connection,
+    task: dict[str, Any],
+    stored: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    reason: str,
+    retry_seconds: int,
+    detail_payload: dict[str, Any] | None = None,
+) -> None:
+    evidence = detail_evidence_from_payload(detail_payload, str(task.get("stage") or ""))
+    reason_code = reason_for_detail_stage(str(task.get("stage") or ""), stored, message=reason, evidence=evidence, config=config)
+    signature = progress_signature(evidence)
+    mark_task_pending(
+        conn,
+        task["id"],
+        reason=reason,
+        retry_seconds=retry_seconds,
+        reason_code=reason_code,
+        progress_signature=signature,
+        payload=evidence,
+    )
+
+
+def mark_failed_task_with_reason(
+    conn: sqlite3.Connection,
+    task: dict[str, Any],
+    post: dict[str, Any] | None,
+    config: dict[str, Any],
+    *,
+    message: str,
+    duration_ms: int | None = None,
+    detail_payload: dict[str, Any] | None = None,
+) -> None:
+    evidence = detail_evidence_from_payload(detail_payload, str(task.get("stage") or ""))
+    reason_code = reason_for_detail_stage(str(task.get("stage") or ""), post, message=message, evidence=evidence, config=config)
+    signature = progress_signature(evidence)
+    mark_task_failed(
+        conn,
+        task["id"],
+        message,
+        duration_ms=duration_ms,
+        reason_code=reason_code,
+        progress_signature=signature,
+        max_attempts=max_task_attempts(config) or None,
+        payload=evidence,
+    )
+
+
 def detail_units_for_tasks(
     conn: sqlite3.Connection, detail_tasks: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], int]:
@@ -409,12 +479,12 @@ def detail_units_for_tasks(
     for task in detail_tasks:
         post = post_for_task(conn, task)
         if not post:
-            mark_task_failed(conn, task["id"], "post not found")
+            mark_task_failed(conn, task["id"], "post not found", reason_code="Q_POST_NOT_FOUND")
             missing_posts += 1
             continue
         key = post_task_key(post, task)
         if not key:
-            mark_task_failed(conn, task["id"], "post key not found")
+            mark_task_failed(conn, task["id"], "post key not found", reason_code="Q_POST_KEY_NOT_FOUND")
             missing_posts += 1
             continue
         unit = units_by_key.setdefault(key, {"key": key, "post": post, "tasks": [], "stages": set()})
@@ -522,23 +592,40 @@ def main() -> int:
             for unit in batch_units:
                 post = unit["post"]
                 stored = row_for_post(conn, post) or post
+                detail_payload = {}
+                if batch_succeeded:
+                    key = post_task_key(post, None)
+                    for item in result.get("payload", {}).get("details", []) if isinstance(result.get("payload"), dict) else []:
+                        if post_task_key({"post_url": item.get("post_url")}, None) == key or item.get("post_url") in {post.get("post_url"), post.get("canonical_post_url")}:
+                            detail_payload = item
+                            break
                 for task in unit["tasks"]:
                     if batch_succeeded and detail_stage_satisfied(stored, task["stage"], config):
-                        mark_task_done(conn, task["id"], duration_ms=duration_ms)
+                        mark_task_done(conn, task["id"], duration_ms=duration_ms, payload=detail_payload)
                         completed += 1
                     elif batch_succeeded:
-                        mark_task_pending(
+                        mark_unsatisfied_detail_task(
                             conn,
-                            task["id"],
+                            task,
+                            stored,
+                            config,
                             reason=f"{task['stage']} still missing",
                             retry_seconds=int(deep_get(config, "performance.detail_retry_seconds", 60)),
+                            detail_payload=detail_payload,
                         )
                         retry_later += 1
                     elif batch_retry_later:
-                        mark_task_pending(conn, task["id"], reason=batch_error or "retry_later", retry_seconds=0)
+                        mark_task_pending(conn, task["id"], reason=batch_error or "retry_later", retry_seconds=0, reason_code="UNKNOWN")
                         retry_later += 1
                     else:
-                        mark_task_failed(conn, task["id"], batch_error or f"{task['stage']} still missing", duration_ms=duration_ms)
+                        mark_failed_task_with_reason(
+                            conn,
+                            task,
+                            post,
+                            config,
+                            message=batch_error or f"{task['stage']} still missing",
+                            duration_ms=duration_ms,
+                        )
                         failed += 1
 
     article_tasks = [task for task in tasks if task["stage"] == "article_material"]
@@ -566,14 +653,23 @@ def main() -> int:
                     mark_task_done(conn, task["id"], duration_ms=duration_ms)
                     completed += 1
                 except Exception as exc:
-                    mark_task_failed(conn, task["id"], str(exc), duration_ms=duration_ms)
+                    post = post or {}
+                    reason_code = reason_for_detail_stage("article_material", post, message=str(exc), config=config)
+                    mark_task_failed(
+                        conn,
+                        task["id"],
+                        str(exc),
+                        duration_ms=duration_ms,
+                        reason_code=reason_code,
+                        max_attempts=max_task_attempts(config) or None,
+                    )
                     failed += 1
 
     summary_tasks = [task for task in tasks if task["stage"] == "summary"]
     for task in summary_tasks:
         post = post_for_task(conn, task)
         if not post:
-            mark_task_failed(conn, task["id"], "post not found")
+            mark_task_failed(conn, task["id"], "post not found", reason_code="Q_POST_NOT_FOUND", max_attempts=max_task_attempts(config) or None)
             failed += 1
             continue
         task_start = time.monotonic()
@@ -590,7 +686,15 @@ def main() -> int:
                 key = post_task_key(post, task)
                 if key and key not in codex_summary_urls:
                     codex_summary_urls.append(key)
-            mark_task_failed(conn, task["id"], error, duration_ms=int((time.monotonic() - task_start) * 1000))
+            reason_code = reason_for_detail_stage("summary", post, message=error, config=config)
+            mark_task_failed(
+                conn,
+                task["id"],
+                error,
+                duration_ms=int((time.monotonic() - task_start) * 1000),
+                reason_code=reason_code,
+                max_attempts=max_task_attempts(config) or None,
+            )
             failed += 1
 
     if human_intervention_required:
@@ -604,6 +708,15 @@ def main() -> int:
     else:
         run_status = "failed"
 
+    current_posts = scoped_posts if scope_enabled else query_posts(conn)
+    audit_summary = record_output_audit(
+        conn,
+        current_posts,
+        config=config,
+        run_id=f"enrichment_worker:{datetime.utcnow().isoformat(timespec='seconds')}",
+        account_name=args.account_name,
+        account_url=args.account_url,
+    )
     result = {
         "ok": failed == 0,
         "run_status": run_status,
@@ -630,6 +743,7 @@ def main() -> int:
             "post_count": len(scoped_posts) if scope_enabled else None,
         },
         "task_counts": task_counts_for_posts(conn, scoped_posts) if scope_enabled else task_counts(conn),
+        "output_audit": audit_summary,
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if failed == 0 else (2 if run_status == "needs_codex_summary" else 1)

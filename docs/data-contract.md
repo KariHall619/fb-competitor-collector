@@ -100,3 +100,15 @@ The output table `FB竞品帖子链接` uses A-K columns:
 - `worker_failed`: enrichment worker or script contract failed; fix before treating as ordinary missing fields.
 
 Non-`complete` means the business workflow is not fully finished, even if some local rows or audit rows exist.
+
+## Diagnostic Tables
+
+`enrichment_tasks` keeps resumable task state keyed by `(canonical_post_url, stage)`. In addition to `last_error`, it stores structured diagnostics:
+
+- `reason_code`: stable stage failure code such as `T_NO_ANCHOR`, `L_AUTHOR_BLOCK_UNMATCHED`, `L_LINK_NOT_IN_DOM`, `S_NO_MATERIAL`, or `G_GATE_BLOCKED`
+- `evidence_ref`: local path to a saved evidence bundle when available
+- `progress_signature`: compact comparable metrics for no-progress detection
+
+`stage_attempts` is append-only attempt history for each post/stage. Use it to answer why a post did not advance without depending on transient JSON logs.
+
+`output_audit` stores a run-level funnel: discovered, time confirmed, qualified lead, summary ready, gate passed, synced, `blocked_by`, and `top_missing_field`. It is diagnostic only and does not relax the strict Feishu output gate.

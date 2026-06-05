@@ -35,7 +35,8 @@ def normalize_href(value: str, base_url: str) -> str:
     try:
         href = urljoin(base_url, value)
         parsed = urlparse(href)
-        if parsed.netloc.lower().endswith("l.facebook.com"):
+        host = parsed.netloc.lower().removeprefix("www.")
+        if (host.endswith("l.facebook.com") or host in {"m.facebook.com", "mobile.facebook.com"}) and parsed.query:
             target = parse_qs(parsed.query).get("u", [""])[0]
             if target:
                 return urljoin(base_url, unquote(target))
@@ -116,6 +117,49 @@ def anchor_links(block: Any, base_url: str) -> list[dict[str, str]]:
     return links
 
 
+def external_link_stats(block: Any, base_url: str) -> dict[str, Any]:
+    anchor_count = 0
+    plaintext_count = 0
+    domain_filtered: list[str] = []
+    redirect_unwrapped: list[dict[str, str]] = []
+    try:
+        anchors = block.css("a[href]")
+    except Exception:
+        anchors = []
+    for anchor in anchors:
+        raw = element_attr(anchor, "href")
+        normalized = normalize_href(raw, base_url)
+        if not normalized:
+            continue
+        if normalized != urljoin(base_url, raw):
+            redirect_unwrapped.append({"raw": raw, "normalized": normalized})
+        try:
+            parsed = urlparse(normalized)
+        except Exception:
+            continue
+        host = parsed.netloc.lower().removeprefix("www.")
+        if parsed.scheme in {"http", "https"} and host and not (host == "facebook.com" or host.endswith(".facebook.com")):
+            anchor_count += 1
+            if not is_story_landing_url(normalized):
+                domain_filtered.append(normalized)
+    text = element_text(block)
+    for match in URL_PATTERN.finditer(text):
+        raw = match.group(0).rstrip(".,;!?")
+        href = raw if raw.lower().startswith("http") else "https://" + raw
+        normalized = normalize_href(href, base_url)
+        if normalized:
+            plaintext_count += 1
+            if not is_story_landing_url(normalized):
+                domain_filtered.append(normalized)
+    return {
+        "anchor_link_count": anchor_count,
+        "plaintext_link_count": plaintext_count,
+        "external_link_count_in_dom": anchor_count + plaintext_count,
+        "domain_filtered": sorted(set(domain_filtered))[:50],
+        "redirect_unwrapped": redirect_unwrapped[:50],
+    }
+
+
 def unique_links(links: list[dict[str, str]]) -> list[dict[str, str]]:
     seen: set[str] = set()
     output: list[dict[str, str]] = []
@@ -162,7 +206,11 @@ def owner_matched_lines(lines: list[str], account_name: str) -> bool:
         or line.startswith(account + " responded")
         or account in line[: max(len(account) + 40, 80)]
         for line in head
-    )
+    ) or author_marked_lines(lines)
+
+
+def author_marked_lines(lines: list[str]) -> bool:
+    return any(re.fullmatch(r"author|作者", line.strip(), re.I) for line in lines[:40])
 
 
 def looks_shell_or_ad(text: str) -> bool:
@@ -420,21 +468,91 @@ def extract(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "missing_html", "candidates": []}
     page = Selector(html, url=base_url, adaptive=True, adaptive_domain="facebook.com")
     results: list[dict[str, Any]] = []
+    parse_candidates: list[dict[str, Any]] = []
+    aggregate_stats = {
+        "anchor_link_count": 0,
+        "plaintext_link_count": 0,
+        "external_link_count_in_dom": 0,
+        "domain_filtered": [],
+        "redirect_unwrapped": [],
+    }
     for block in candidate_blocks(page):
         text = element_text(block)
         lines = element_lines(block)
         if not text or len(text) > 12000 or looks_shell_or_ad(text):
             continue
+        stats = external_link_stats(block, base_url)
+        aggregate_stats["anchor_link_count"] += int(stats.get("anchor_link_count") or 0)
+        aggregate_stats["plaintext_link_count"] += int(stats.get("plaintext_link_count") or 0)
+        aggregate_stats["external_link_count_in_dom"] += int(stats.get("external_link_count_in_dom") or 0)
+        aggregate_stats["domain_filtered"].extend(stats.get("domain_filtered") or [])
+        aggregate_stats["redirect_unwrapped"].extend(stats.get("redirect_unwrapped") or [])
         links = unique_links(anchor_links(block, base_url) + plain_text_links(text, base_url))
-        if not links or not has_comment_context(text):
+        author_marked = author_marked_lines(lines)
+        owner_match = owner_matched_lines(lines, account_name)
+        comment_context = has_comment_context(text)
+        if not links:
+            if stats.get("external_link_count_in_dom"):
+                parse_candidates.append(
+                    {
+                        "author_block_matched": owner_match,
+                        "comment_context": comment_context,
+                        "score": 0,
+                        "links": [],
+                        "reject_reason": "domain_filtered_or_unusable_link",
+                        "block_text": text[:500],
+                    }
+                )
             continue
-        if not owner_matched_lines(lines, account_name):
+        if not owner_match:
+            parse_candidates.append(
+                {
+                    "author_block_matched": False,
+                    "comment_context": comment_context,
+                    "score": 0,
+                    "links": [link.get("href", "") for link in links],
+                    "reject_reason": "author_block_unmatched",
+                    "block_text": text[:500],
+                }
+            )
+            continue
+        if not comment_context and not author_marked:
+            parse_candidates.append(
+                {
+                    "author_block_matched": True,
+                    "comment_context": False,
+                    "score": 0,
+                    "links": [link.get("href", "") for link in links],
+                    "reject_reason": "comment_context_unproven",
+                    "block_text": text[:500],
+                }
+            )
             continue
         for link in links:
             score = score_candidate(text, link, account_name)
             if score <= 0:
+                parse_candidates.append(
+                    {
+                        "author_block_matched": True,
+                        "comment_context": comment_context,
+                        "score": score,
+                        "links": [link.get("href", "")],
+                        "reject_reason": "score_below_threshold",
+                        "block_text": text[:500],
+                    }
+                )
                 continue
             source = "comment_reply" if re.search(r"\bReply\b|\breplied\b|\bresponded\b|回复", text, re.I) else "comment"
+            parse_candidates.append(
+                {
+                    "author_block_matched": True,
+                    "comment_context": comment_context,
+                    "score": score,
+                    "links": [link.get("href", "")],
+                    "reject_reason": "",
+                    "block_text": text[:500],
+                }
+            )
             results.append(
                 {
                     "href": link["href"],
@@ -442,7 +560,8 @@ def extract(payload: dict[str, Any]) -> dict[str, Any]:
                     "block_text": text[:900],
                     "source": source,
                     "owner_matched": True,
-                    "comment_context": True,
+                    "author_marked": author_marked,
+                    "comment_context": comment_context,
                     "comment_mode": comment_mode,
                     "source_kind": link.get("source_kind", ""),
                     "extractor": "scrapling",
@@ -461,12 +580,20 @@ def extract(payload: dict[str, Any]) -> dict[str, Any]:
     homepage_candidates = extract_homepage_candidates(page, payload)
     engagement = extract_engagement(page)
     post_type = extract_post_type(page)
+    aggregate_stats["domain_filtered"] = sorted(set(aggregate_stats["domain_filtered"]))[:50]
+    aggregate_stats["redirect_unwrapped"] = aggregate_stats["redirect_unwrapped"][:50]
     return {
         "ok": True,
         "candidates": homepage_candidates,
         "real_post_count": len(homepage_candidates),
         "lead_candidates": deduped[:20],
         "lead_candidate_count": len(deduped),
+        "lead_diagnostics": {
+            "author_block_matched": any(item.get("author_block_matched") for item in parse_candidates),
+            "candidate_count": len(deduped),
+            **aggregate_stats,
+        },
+        "parse_candidates": parse_candidates[:100],
         "engagement": engagement,
         "post_type": post_type,
         "candidate_count": len(deduped),
