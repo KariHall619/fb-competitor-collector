@@ -134,7 +134,8 @@ async function currentPageHtml(page) {
   const payload = await readPage(page, `(() => ({
     url: location.href,
     title: document.title,
-    html: document.documentElement?.outerHTML || ''
+    html: document.documentElement?.outerHTML || '',
+    inner_text: document.body?.innerText || ''
   }))()`);
   return payload || { url: '', title: '', html: '' };
 }
@@ -677,6 +678,8 @@ async function extractLeadLink(page, post, options) {
         real_post_count: Number(scraplingResult?.real_post_count || 0),
         engagement_raw: scraplingResult?.engagement?.raw || '',
         post_type: scraplingResult?.post_type?.post_type || '',
+        lead_diagnostics: scraplingResult?.lead_diagnostics || {},
+        parse_candidates: Array.isArray(scraplingResult?.parse_candidates) ? scraplingResult.parse_candidates.slice(0, 50) : [],
         error: scraplingResult?.error || '',
       },
       candidate_count: (candidates || []).length,
@@ -767,10 +770,14 @@ async function enrichCurrentDetailPage(page, post, options) {
   const exactTime = await extractExactTime(page, post, options);
   const focus = await readPage(page, focusDetailConversationExpression()).catch(() => ({}));
   const target = exactTime.target || null;
-  const scraplingDetail = await scraplingPageExtraction(page, {
+  const snapshot = await currentPageHtml(page).catch(() => ({ url: '', title: '', html: '', inner_text: '' }));
+  const scraplingDetail = runScraplingExtractor({
+    html: snapshot.html,
+    url: snapshot.url,
+    title: snapshot.title,
     account_name: post.account_name || '',
     mode: 'detail',
-  }).catch((error) => ({ ok: false, error: String(error?.message || error) }));
+  });
   const engagement = options.skipEngagement
     ? { skipped: true, raw: '', confidence: 'skipped' }
     : (scraplingDetail?.engagement?.raw
@@ -844,6 +851,13 @@ async function enrichCurrentDetailPage(page, post, options) {
       lead_candidate_count: Number(scraplingDetail?.lead_candidate_count || 0),
       engagement_raw: scraplingDetail?.engagement?.raw || '',
       post_type: scraplingDetail?.post_type?.post_type || '',
+      lead_diagnostics: scraplingDetail?.lead_diagnostics || {},
+    },
+    snapshot: {
+      url: snapshot.url || '',
+      title: snapshot.title || '',
+      html: snapshot.html || '',
+      inner_text: snapshot.inner_text || '',
     },
   };
 }

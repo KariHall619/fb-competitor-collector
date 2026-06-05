@@ -24,7 +24,7 @@ from models import (
     is_estimated_time_source,
     parse_reference_time,
 )
-from pipeline_diagnostics import detail_evidence_from_payload, reason_for_detail_stage
+from pipeline_diagnostics import detail_evidence_from_payload, evidence_bundle_from_detail_payload, reason_for_detail_stage
 from pipeline_status import crawl_status_for, has_confirmed_time, output_status_for
 from story_summary_policy import has_valid_story_summary, story_summary_errors
 from store import (
@@ -422,6 +422,29 @@ def max_task_attempts(config: dict[str, Any]) -> int:
     return int(deep_get(config, "enrichment.max_attempts", 4) or 0)
 
 
+def evidence_base_dir(config: dict[str, Any], db_path: str) -> Path:
+    configured = str(deep_get(config, "diagnostics.evidence_dir", "") or "").strip()
+    if configured:
+        return Path(configured)
+    return Path(db_path).parent.parent / "exports" / "evidence" / "live"
+
+
+def detail_evidence_ref(
+    config: dict[str, Any],
+    db_path: str,
+    task: dict[str, Any],
+    reason_code: str,
+    detail_payload: dict[str, Any] | None,
+) -> str:
+    key = f"{task.get('stage') or 'stage'}-{task.get('id') or 'task'}-{task.get('canonical_post_url') or task.get('post_url') or ''}"
+    return evidence_bundle_from_detail_payload(
+        detail_payload,
+        base_dir=evidence_base_dir(config, db_path),
+        key=key,
+        reason_code=reason_code,
+    )
+
+
 def mark_unsatisfied_detail_task(
     conn: sqlite3.Connection,
     task: dict[str, Any],
@@ -431,16 +454,19 @@ def mark_unsatisfied_detail_task(
     reason: str,
     retry_seconds: int,
     detail_payload: dict[str, Any] | None = None,
+    db_path: str = "",
 ) -> None:
     evidence = detail_evidence_from_payload(detail_payload, str(task.get("stage") or ""))
     reason_code = reason_for_detail_stage(str(task.get("stage") or ""), stored, message=reason, evidence=evidence, config=config)
     signature = progress_signature(evidence)
+    evidence_ref = detail_evidence_ref(config, db_path, task, reason_code, detail_payload) if db_path else ""
     mark_task_pending(
         conn,
         task["id"],
         reason=reason,
         retry_seconds=retry_seconds,
         reason_code=reason_code,
+        evidence_ref=evidence_ref,
         progress_signature=signature,
         payload=evidence,
     )
@@ -455,16 +481,19 @@ def mark_failed_task_with_reason(
     message: str,
     duration_ms: int | None = None,
     detail_payload: dict[str, Any] | None = None,
+    db_path: str = "",
 ) -> None:
     evidence = detail_evidence_from_payload(detail_payload, str(task.get("stage") or ""))
     reason_code = reason_for_detail_stage(str(task.get("stage") or ""), post, message=message, evidence=evidence, config=config)
     signature = progress_signature(evidence)
+    evidence_ref = detail_evidence_ref(config, db_path, task, reason_code, detail_payload) if db_path else ""
     mark_task_failed(
         conn,
         task["id"],
         message,
         duration_ms=duration_ms,
         reason_code=reason_code,
+        evidence_ref=evidence_ref,
         progress_signature=signature,
         max_attempts=max_task_attempts(config) or None,
         payload=evidence,
@@ -612,6 +641,7 @@ def main() -> int:
                             reason=f"{task['stage']} still missing",
                             retry_seconds=int(deep_get(config, "performance.detail_retry_seconds", 60)),
                             detail_payload=detail_payload,
+                            db_path=str(db_path),
                         )
                         retry_later += 1
                     elif batch_retry_later:
@@ -625,6 +655,7 @@ def main() -> int:
                             config,
                             message=batch_error or f"{task['stage']} still missing",
                             duration_ms=duration_ms,
+                            db_path=str(db_path),
                         )
                         failed += 1
 

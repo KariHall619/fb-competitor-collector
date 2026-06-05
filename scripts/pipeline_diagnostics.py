@@ -35,6 +35,7 @@ ARTICLE_REASONS = {"A_FETCH_FAIL", "A_NON_ARTICLE", "A_BLOCKED"}
 SUMMARY_REASONS = {"S_NO_MATERIAL", "S_APPLY_FAIL", "S_NOT_CHINESE"}
 SYNC_REASONS = {"G_GATE_BLOCKED", "F_AUTH", "F_API"}
 QUEUE_REASONS = {"Q_POST_NOT_FOUND", "Q_POST_KEY_NOT_FOUND", "Q_NO_PROGRESS", "Q_MAX_ATTEMPTS"}
+UNKNOWN_REASONS = {"U_LEAD_UNOBSERVED"}
 
 KNOWN_REASON_CODES = (
     DISCOVERY_REASONS
@@ -44,6 +45,7 @@ KNOWN_REASON_CODES = (
     | SUMMARY_REASONS
     | SYNC_REASONS
     | QUEUE_REASONS
+    | UNKNOWN_REASONS
 )
 
 
@@ -113,15 +115,18 @@ def reason_for_lead_evidence(evidence: dict[str, Any] | None, *, message: str = 
         return "L_NO_COMMENTS_IN_DOM"
     if "lead_link_not_resolved" in text:
         return "L_REDIRECT_UNWRAP_FAIL"
-    if evidence.get("author_block_matched") is False:
-        return "L_AUTHOR_BLOCK_UNMATCHED"
+    has_observation = bool(evidence.get("observed"))
     if int(evidence.get("candidate_count") or 0) > 0:
         return "L_REDIRECT_UNWRAP_FAIL"
     if int(evidence.get("external_link_count_in_dom") or 0) > 0:
         return "L_LINK_NOT_IN_DOM"
-    if int(evidence.get("expand_clicks_count") or 0) == 0 and evidence.get("comments_region_found") is False:
+    if has_observation and evidence.get("author_block_matched") is False and evidence.get("comments_region_found") is True:
+        return "L_AUTHOR_BLOCK_UNMATCHED"
+    if has_observation and int(evidence.get("expand_clicks_count") or 0) == 0 and evidence.get("comments_region_found") is False:
         return "L_NO_COMMENTS_IN_DOM"
-    return "L_NO_LINK_ON_PAGE"
+    if has_observation:
+        return "L_NO_LINK_ON_PAGE"
+    return "U_LEAD_UNOBSERVED"
 
 
 def detail_evidence_from_payload(payload: dict[str, Any] | None, stage: str) -> dict[str, Any]:
@@ -140,15 +145,62 @@ def detail_evidence_from_payload(payload: dict[str, Any] | None, stage: str) -> 
     author_matched = any(bool((item.get("selected") or {}).get("owner_matched") or (item.get("selected") or {}).get("author_marked")) for item in attempts)
     return {
         "reason_code": normalize_reason_code(lead.get("reason_code"), default=""),
+        "observed": bool(attempts),
         "stop_reason": lead.get("reason") or "",
         "expand_clicks_count": clicked_count,
         "comments_region_found": bool(action_summaries),
-        "author_block_matched": author_matched if candidate_count or scrapling_count else False,
+        "author_block_matched": author_matched if candidate_count or scrapling_count else None,
         "external_link_count_in_dom": external_count + text_count,
         "anchor_link_count": external_count,
         "plaintext_link_count": text_count,
         "candidate_count": max(candidate_count, scrapling_count),
     }
+
+
+def evidence_bundle_from_detail_payload(
+    payload: dict[str, Any] | None,
+    *,
+    base_dir: str | Path,
+    key: str,
+    reason_code: str,
+) -> str:
+    payload = payload or {}
+    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+    lead = payload.get("lead_link") if isinstance(payload.get("lead_link"), dict) else {}
+    attempts = lead.get("attempts") if isinstance(lead.get("attempts"), list) else []
+    expand_actions = [
+        {
+            "mode": item.get("mode"),
+            "action_summary": item.get("action_summary") or {},
+            "action_trace": item.get("action_trace") or {},
+        }
+        for item in attempts
+    ]
+    link_stats: dict[str, Any] = {}
+    parse_candidates: list[dict[str, Any]] = []
+    for item in attempts:
+        scrapling = item.get("scrapling") if isinstance(item.get("scrapling"), dict) else {}
+        diagnostics = scrapling.get("lead_diagnostics") if isinstance(scrapling.get("lead_diagnostics"), dict) else {}
+        if diagnostics:
+            link_stats.update(diagnostics)
+        candidates = scrapling.get("parse_candidates") if isinstance(scrapling.get("parse_candidates"), list) else []
+        parse_candidates.extend(candidate for candidate in candidates if isinstance(candidate, dict))
+    if not link_stats:
+        link_stats = detail_evidence_from_payload(payload, "lead_link")
+    if not parse_candidates and isinstance(lead.get("candidates"), list):
+        parse_candidates = [item for item in lead.get("candidates") if isinstance(item, dict)]
+    if not snapshot.get("html") and not snapshot.get("inner_text") and not link_stats and not parse_candidates:
+        return ""
+    return write_evidence_bundle(
+        base_dir,
+        key=key,
+        html=str(snapshot.get("html") or ""),
+        inner_text=str(snapshot.get("inner_text") or ""),
+        expand_actions=expand_actions,
+        link_stats=link_stats,
+        parse_candidates=parse_candidates[:100],
+        stop_reason=reason_code,
+    )
 
 
 def write_evidence_bundle(
@@ -193,20 +245,26 @@ def output_audit_summary(
     gate_passed = sum(1 for post in posts if post.get("output_status") == "ready_for_output")
     synced = sum(1 for post in posts if post.get("output_status") == "output_synced")
     blocked_by: Counter[str] = Counter()
+    task_reason_by_key: dict[tuple[str, str], str] = {}
+    for task in tasks:
+        code = normalize_reason_code(task.get("reason_code"), default="")
+        if not code:
+            continue
+        canonical = str(task.get("canonical_post_url") or task.get("post_url") or "")
+        stage = str(task.get("stage") or "")
+        if canonical and stage:
+            task_reason_by_key[(canonical, stage)] = code
     for post in posts:
         if not has_confirmed_time(post):
             blocked_by[reason_for_detail_stage("detail_time", post, config=config)] += 1
         if not has_qualified_comment_lead_link(post):
-            blocked_by[reason_for_detail_stage("lead_link", post, config=config)] += 1
+            key = str(post.get("canonical_post_url") or post.get("post_url") or "")
+            blocked_by[task_reason_by_key.get((key, "lead_link"), "U_LEAD_UNOBSERVED")] += 1
         if not has_article_summary(post):
             blocked_by["S_NO_MATERIAL"] += 1
         audit = audit_post_fields(post, config)
         for reason in audit.get("field_audit_reasons", []):
             blocked_by[f"field_audit_{reason}"] += 1
-    for task in tasks:
-        code = normalize_reason_code(task.get("reason_code"), default="")
-        if code:
-            blocked_by[code] += 1
     top_missing_field = ""
     if blocked_by:
         top_missing_field = blocked_by.most_common(1)[0][0]
